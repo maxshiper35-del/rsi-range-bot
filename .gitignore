@@ -1,0 +1,24 @@
+# секреты
+.env
+
+# БД (WAL-файлы тоже)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.db.tmp
+data/backups/
+
+# логи
+logs/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# инструменты
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage

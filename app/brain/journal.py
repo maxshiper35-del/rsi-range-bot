@@ -1,0 +1,346 @@
+"""
+journal.py — источник правды публичной статистики.
+
+Пишет сигналы, автоматически фиксирует исход (TP/SL) по цене биржи, считает
+winrate / PnL в R. Журнал неизменяем: исходы пишутся только в append-таблицу
+signal_events; entry/stop/take_profits/created_at не редактируются.
+"""
+from __future__ import annotations
+
+import json
+
+from app import clock, db
+from app.core.signal_engine import Side, Signal
+
+_TP_COLS = ("tp1", "tp2", "tp3")
+
+
+def row_to_signal(row) -> Signal:
+    """Восстановить Signal из строки signals (для алертов/переформатирования)."""
+    return Signal(
+        symbol=row["symbol"],
+        side=Side(row["side"]),
+        timeframe=row["timeframe"],
+        entry=row["entry"],
+        stop=row["stop"],
+        take_profits=[row[c] for c in _TP_COLS if row[c] is not None],
+        risk_reward=row["risk_reward"],
+        confidence=row["confidence"],
+        reasons=json.loads(row["reasons_json"] or "[]"),
+        created_at=row["created_at"],
+        indicators_snapshot=json.loads(row["snapshot_json"] or "{}"),
+    )
+
+
+def _insert(signal: Signal, status: str, event: str) -> int:
+    """Общая вставка сигнала в заданном статусе + начальное событие. -> signal_id."""
+    tps = list(signal.take_profits) + [None, None, None]
+    now = clock.utcnow_iso()
+    exchange = signal.indicators_snapshot.get("exchange", "bybit") \
+        if isinstance(signal.indicators_snapshot, dict) else "bybit"
+    with db.transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO signals(symbol, side, timeframe, entry, stop, tp1, tp2, tp3, "
+            "risk_reward, confidence, reasons_json, snapshot_json, exchange, status, "
+            "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (signal.symbol, signal.side.value, signal.timeframe, signal.entry, signal.stop,
+             tps[0], tps[1], tps[2], signal.risk_reward, signal.confidence,
+             json.dumps(signal.reasons, ensure_ascii=False),
+             json.dumps(signal.indicators_snapshot, ensure_ascii=False),
+             exchange, status, signal.created_at, now),
+        )
+        sid = cur.lastrowid
+        conn.execute(
+            "INSERT INTO signal_events(signal_id, event, price, r_at_event, created_at) "
+            "VALUES (?,?,?,0,?)",
+            (sid, event, signal.entry, now),
+        )
+    return sid
+
+
+def record_signal(signal: Signal) -> int:
+    """Авто-режим: записать сигнал сразу активным (status=open) + событие 'opened'."""
+    return _insert(signal, "open", "opened")
+
+
+def find_duplicate_setup(signal: Signal) -> "int | None":
+    """id уже записанного сигнала с тем же сетапом, если есть.
+
+    Один и тот же импульс детектится на нескольких последовательных барах, но его
+    якоря фибо фиксированы -> entry/stop идентичны. Дедуп: (symbol, timeframe, side,
+    entry, stop) среди не-expired записей — чтобы не спамить оператора каждые 15 минут.
+    """
+    row = db.query_one(
+        "SELECT id FROM signals WHERE symbol=? AND timeframe=? AND side=? "
+        "AND entry=? AND stop=? AND status != 'expired' ORDER BY id DESC LIMIT 1",
+        (signal.symbol, signal.timeframe, signal.side.value, signal.entry, signal.stop))
+    return row["id"] if row else None
+
+
+def record_candidate(signal: Signal) -> int:
+    """Полуавтомат: записать КАНДИДАТА (status=candidate) — ждёт подтверждения контекста."""
+    return _insert(signal, "candidate", "candidate")
+
+
+def _resolve_candidate(signal_id: int, status: str, event: str) -> bool:
+    """Атомарно: условный UPDATE (WHERE status='candidate') + событие только при rowcount==1.
+
+    Проверка и запись — в одной транзакции, поэтому конкурирующие /confirm и /reject
+    не могут оба «выиграть» (TOCTOU закрыт): второй получит rowcount=0 -> False.
+    """
+    now = clock.utcnow_iso()
+    with db.transaction() as conn:
+        cur = conn.execute(
+            "UPDATE signals SET status=?, updated_at=? WHERE id=? AND status='candidate'",
+            (status, now, signal_id))
+        if cur.rowcount != 1:
+            return False
+        conn.execute("INSERT INTO signal_events(signal_id, event, created_at) VALUES (?,?,?)",
+                     (signal_id, event, now))
+    return True
+
+
+def confirm_candidate(signal_id: int) -> bool:
+    """Оператор подтвердил контекст: candidate -> open (идёт в рассылку/мониторинг)."""
+    return _resolve_candidate(signal_id, "open", "confirmed")
+
+
+def reject_candidate(signal_id: int) -> bool:
+    """Оператор отклонил (контекст против): candidate -> rejected."""
+    return _resolve_candidate(signal_id, "rejected", "rejected")
+
+
+def open_candidates() -> list:
+    """Список кандидатов, ожидающих решения оператора."""
+    return db.query("SELECT * FROM signals WHERE status='candidate' ORDER BY id")
+
+
+def _outcome_for(row, price: float):
+    """Определить исход открытого сигнала по текущей цене. -> (status, event, result_r) | None."""
+    entry, stop, side = row["entry"], row["stop"], row["side"]
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    if side == "LONG":
+        if price <= stop:
+            return "stopped", "stopped", -1.0
+        reached = [(c, row[c]) for c in _TP_COLS if row[c] is not None and price >= row[c]]
+        if reached:
+            col, tp = reached[-1]
+            return col, col, (tp - entry) / risk
+    else:  # SHORT
+        if price >= stop:
+            return "stopped", "stopped", -1.0
+        reached = [(c, row[c]) for c in _TP_COLS if row[c] is not None and price <= row[c]]
+        if reached:
+            col, tp = reached[-1]
+            return col, col, (entry - tp) / risk
+    return None
+
+
+def update_outcomes(latest_prices: dict[str, float]) -> int:
+    """УПРОЩЁННЫЙ скоринг по снапшоту последней цены (юнит-тесты/ручная проверка).
+
+    НЕ учитывает исполнение лимитного входа и путь цены между прогонами —
+    в проде использовать update_outcomes_from_bars (честный скоринг по барам).
+
+    Активные (open): статус -> tp*/stopped, идут в публичную статистику.
+    Отклонённые (rejected): считаем ТЕНЕВОЙ исход (counterfactual) — пишем result_r/closed_at
+    и событие 'shadow', но статус ОСТАВЛЯЕМ 'rejected' (в публичную стату не попадают).
+    Это данные для когортного отчёта confirmed vs rejected.
+    """
+    closed = 0
+    rows = db.query("SELECT * FROM signals WHERE status='open' "
+                    "OR (status='rejected' AND result_r IS NULL)")
+    for row in rows:
+        price = latest_prices.get(row["symbol"])
+        if price is None:
+            continue
+        res = _outcome_for(row, float(price))
+        if res is None:
+            continue
+        status, event, result_r = res
+        now = clock.utcnow_iso()
+        shadow = row["status"] == "rejected"
+        with db.transaction() as conn:
+            conn.execute(
+                "UPDATE signals SET status=?, result_r=?, closed_at=?, updated_at=? WHERE id=?",
+                (row["status"] if shadow else status, round(result_r, 4), now, now, row["id"]),
+            )
+            conn.execute(
+                "INSERT INTO signal_events(signal_id, event, price, r_at_event, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (row["id"], "shadow" if shadow else event,
+                 float(price), round(result_r, 4), now),
+            )
+        closed += 1
+    return closed
+
+
+def _outcome_from_bars(row, df) -> "tuple | None":
+    """Исход по ХРОНОЛОГИИ закрытых баров после created_at (честный скоринг).
+
+    Фазы: (1) ждём касания entry (лимитный вход, low<=entry<=high) — без fill сделки НЕТ;
+    (2) после fill: стоп и тейк проверяются по high/low каждого бара, при касании обоих
+    в одном баре — консервативно СТОП. Если fill не случился за max_wait баров -> 'expired'.
+    -> (status, event, result_r|None) | None (ещё не разрешился).
+    """
+    import pandas as pd
+
+    max_wait = 50                                   # баров на исполнение лимитки
+    entry, stop, side = row["entry"], row["stop"], row["side"]
+    risk = abs(entry - stop)
+    if risk <= 0 or "dt" not in df.columns:
+        return None
+    tps = [(c, row[c]) for c in _TP_COLS if row[c] is not None]
+    dts = pd.to_datetime(df["dt"], utc=True)
+    created = pd.to_datetime(row["created_at"], utc=True)
+    bars = df.loc[dts > created]
+    if bars.empty:
+        return None
+
+    filled = False
+    waited = 0
+    for _, b in bars.iterrows():
+        hi, lo = float(b["high"]), float(b["low"])
+        if not filled:
+            waited += 1
+            if lo <= entry <= hi:
+                filled = True                        # вход исполнен; стоп/тейк — с этого же бара
+            elif waited >= max_wait:
+                return ("expired", "expired", None)  # лимитка не исполнилась — сделки не было
+            else:
+                continue
+        if side == "LONG":
+            if lo <= stop:
+                return ("stopped", "stopped", -1.0)  # стоп-первым (консервативно)
+            hit = [(c, tp) for c, tp in tps if hi >= tp]
+        else:
+            if hi >= stop:
+                return ("stopped", "stopped", -1.0)
+            hit = [(c, tp) for c, tp in tps if lo <= tp]
+        if hit:
+            col, tp = hit[-1]                        # лучший достигнутый в этом баре тейк
+            r = (tp - entry) / risk if side == "LONG" else (entry - tp) / risk
+            return (col, col, r)
+    return None                                      # позиция ещё открыта / ждёт fill
+
+
+def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
+    """Продовый скоринг исходов по OHLCV-барам (см. _outcome_from_bars).
+
+    -> список закрытых {id, symbol, side, timeframe, status, result_r, shadow}
+       (для постинга результатов в канал; caller фильтрует shadow/expired сам).
+    Идемпотентен: сигнал скорится один раз (дальше отфильтрован по result_r/closed_at).
+    Для rejected пишется теневой исход (статус не меняется, событие 'shadow').
+    """
+    closed = []
+    rows = db.query("SELECT * FROM signals WHERE (status='open' AND result_r IS NULL) "
+                    "OR (status='rejected' AND result_r IS NULL AND closed_at IS NULL)")
+    for row in rows:
+        df = bars_by_symbol.get(row["symbol"])
+        if df is None:
+            continue
+        res = _outcome_from_bars(row, df)
+        if res is None:
+            continue
+        status, event, result_r = res
+        now = clock.utcnow_iso()
+        shadow = row["status"] == "rejected"
+        r_val = round(result_r, 4) if result_r is not None else None
+        with db.transaction() as conn:
+            conn.execute(
+                "UPDATE signals SET status=?, result_r=?, closed_at=?, updated_at=? WHERE id=?",
+                (row["status"] if shadow else status, r_val, now, now, row["id"]),
+            )
+            conn.execute(
+                "INSERT INTO signal_events(signal_id, event, price, r_at_event, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (row["id"], ("shadow" if event != "expired" else "expired") if shadow else event,
+                 None, r_val, now),
+            )
+        closed.append({"id": row["id"], "symbol": row["symbol"], "side": row["side"],
+                       "timeframe": row["timeframe"], "status": status,
+                       "result_r": r_val, "shadow": shadow})
+    return closed
+
+
+def cohort_stats() -> dict:
+    """Сравнение когорт для форвард-эксперимента: подтверждённые vs отклонённые.
+
+    confirmed — сигналы, прошедшие подтверждение (активные и закрытые);
+    rejected — отклонённые с ТЕНЕВЫМ исходом. Метрики только по закрытым
+    (result_r IS NOT NULL). edge_r = разница экспектанси confirmed − rejected —
+    это и есть измеряемый вклад человека.
+    """
+    def agg(rows) -> dict:
+        rs = [r["result_r"] for r in rows]
+        n = len(rs)
+        wins = sum(1 for r in rs if r > 0)
+        return {"trades": n, "wins": wins,
+                "winrate": round(wins / n, 4) if n else 0.0,
+                "expectancy_r": round(sum(rs) / n, 4) if n else 0.0,
+                "total_r": round(sum(rs), 4)}
+
+    # членство в когорте — по факту РЕШЕНИЯ ОПЕРАТОРА (событию), а не по статусу:
+    # сигналы record_signal (авто-режим) в эксперимент не входят.
+    confirmed = db.query(
+        "SELECT s.result_r FROM signals s "
+        "WHERE s.result_r IS NOT NULL AND EXISTS (SELECT 1 FROM signal_events e "
+        "WHERE e.signal_id = s.id AND e.event = 'confirmed')")
+    rejected = db.query(
+        "SELECT s.result_r FROM signals s "
+        "WHERE s.result_r IS NOT NULL AND EXISTS (SELECT 1 FROM signal_events e "
+        "WHERE e.signal_id = s.id AND e.event = 'rejected')")
+    pending = db.query_one(
+        "SELECT COUNT(*) AS c FROM signals WHERE status='candidate'")["c"]
+    out = {"confirmed": agg(confirmed), "rejected": agg(rejected),
+           "all": agg(list(confirmed) + list(rejected)), "pending_candidates": pending}
+    out["edge_r"] = round(out["confirmed"]["expectancy_r"]
+                          - out["rejected"]["expectancy_r"], 4)
+    return out
+
+
+def stats() -> dict:
+    """Публичные агрегаты для /stats: winrate, expectancy(R), суммарный PnL(R), счётчики."""
+    # только реально закрытые активные сделки; candidate/rejected (теневые) — не публичная стата
+    rows = db.query(
+        "SELECT result_r FROM signals WHERE status IN ('tp1','tp2','tp3','stopped','expired') "
+        "AND result_r IS NOT NULL")
+    rs = [r["result_r"] for r in rows]
+    n = len(rs)
+    wins = [r for r in rs if r > 0]
+    total_r = sum(rs)
+    open_n = db.query_one("SELECT COUNT(*) AS c FROM signals WHERE status='open'")["c"]
+    return {
+        "trades": n,
+        "wins": len(wins),
+        "losses": n - len(wins),
+        "winrate": round(len(wins) / n, 4) if n else 0.0,
+        "expectancy_r": round(total_r / n, 4) if n else 0.0,
+        "total_r": round(total_r, 4),
+        "open": open_n,
+    }
+
+
+def stats_by_symbol() -> dict:
+    """Разбивка публичной статистики по символам — для живого табло в канале."""
+    rows = db.query(
+        "SELECT symbol, result_r FROM signals WHERE status IN ('tp1','tp2','tp3','stopped','expired') "
+        "AND result_r IS NOT NULL")
+    by_symbol: dict = {}
+    for r in rows:
+        rs = by_symbol.setdefault(r["symbol"], [])
+        rs.append(r["result_r"])
+    out = {}
+    for symbol, rs in by_symbol.items():
+        n = len(rs)
+        wins = sum(1 for x in rs if x > 0)
+        out[symbol] = {
+            "trades": n,
+            "wins": wins,
+            "winrate": round(wins / n, 4) if n else 0.0,
+            "expectancy_r": round(sum(rs) / n, 4) if n else 0.0,
+            "total_r": round(sum(rs), 4),
+        }
+    return out

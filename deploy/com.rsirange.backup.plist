@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd-агент: ежедневный бэкап data/signals.db в data/backups/ (04:00, ротация 14 копий).
+  Независим от процесса бота — работает, даже если бот временно упал.
+  Установка:
+    cp deploy/com.rsirange.backup.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.rsirange.backup.plist
+  Запустить вручную: launchctl start com.rsirange.backup   (или: make backup-db)
+  Логи — logs/backup.log в каталоге проекта.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rsirange.backup</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>-m</string>
+        <string>scripts.backup_db</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/mac/bot ctypto</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mac/bot ctypto/logs/backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mac/bot ctypto/logs/backup.log</string>
+</dict>
+</plist>

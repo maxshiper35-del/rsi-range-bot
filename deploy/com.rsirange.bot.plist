@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd-агент: держит RSI Range бота живым (автозапуск при входе в систему + рестарт при краше).
+  Установка:
+    cp deploy/com.rsirange.bot.plist ~/Library/LaunchAgents/
+    launchctl load  ~/Library/LaunchAgents/com.rsirange.bot.plist   # запустить + автозапуск
+  Управление:
+    launchctl unload ~/Library/LaunchAgents/com.rsirange.bot.plist  # остановить + отключить
+    launchctl list | grep rsirange                                  # статус
+  Логи — logs/bot.log в каталоге проекта.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rsirange.bot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>-m</string>
+        <string>app.delivery.bot</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/mac/bot ctypto</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mac/bot ctypto/logs/bot.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mac/bot ctypto/logs/bot.log</string>
+</dict>
+</plist>

@@ -1,0 +1,172 @@
+"""
+runtime.py — настройки, правимые из Telegram без рестарта.
+
+Значение берётся из таблицы settings (override), иначе — дефолт из .env (Settings).
+Читается дёшево (SQLite WAL) на каждом такте poller / рассылке.
+"""
+from __future__ import annotations
+
+from app import clock, db
+from app.config import get_settings
+
+_TRUE = {"1", "true", "on", "yes", "да", "вкл"}
+
+
+def _raw(key: str):
+    row = db.query_one("SELECT value FROM settings WHERE key=?", (key,))
+    return row["value"] if row else None
+
+
+def set_value(key: str, value) -> None:
+    db.execute(
+        "INSERT INTO settings(key, value, updated_at) VALUES(?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (key, str(value), clock.utcnow_iso()))
+
+
+def _csv(s: str) -> list[str]:
+    return [x.strip() for x in (s or "").split(",") if x.strip()]
+
+
+def symbols() -> list[str]:
+    v = _raw("symbols")
+    return _csv(v) if v is not None else list(get_settings().symbols)
+
+
+def timeframes() -> list[str]:
+    v = _raw("timeframes")
+    return _csv(v) if v is not None else list(get_settings().timeframes)
+
+
+def signal_mode() -> str:
+    return _raw("signal_mode") or get_settings().signal_mode
+
+
+def paused() -> bool:
+    return (_raw("paused") or "0").lower() in _TRUE
+
+
+def signals_channel() -> str:
+    v = _raw("signals_channel")
+    return v if v is not None else get_settings().signals_channel
+
+
+def channel_enabled() -> bool:
+    v = _raw("channel_enabled")
+    if v is not None:
+        return v.lower() in _TRUE
+    return bool(signals_channel())
+
+
+def channel_mode() -> str:
+    """full — полный сигнал в канал; teaser — превью с призывом подписаться."""
+    return _raw("channel_mode") or "full"
+
+
+def usdt_invoice_url() -> str:
+    """Ссылка на ручной счёт CryptoBot (полу-ручной приём USDT). Пусто = выкл."""
+    return _raw("usdt_invoice_url") or ""
+
+
+def cryptobot_token() -> str:
+    """API-токен Crypto Pay (авто-USDT). Админский override приоритетнее .env.
+
+    Пустой override («/cryptobottoken -») РЕАЛЬНО выключает авто-USDT, даже если
+    токен задан в .env — различаем «нет override» (None) и «override пустой» ("").
+    """
+    v = _raw("cryptobot_token")
+    return v if v is not None else (get_settings().cryptobot_token or "")
+
+
+def usdt_bonus_days() -> int:
+    """Бонус-дни за оплату USDT вместо Stars (Stars дороже мерчанту ~38% эфф. комиссии)."""
+    v = _raw("usdt_bonus_days")
+    return int(v) if v is not None else 2
+
+
+def cornix_block_enabled() -> bool:
+    """Добавлять ли Cornix-совместимый блок к постам канала. Дефолт выкл —
+    перед включением нужна ручная сверка с реальным Cornix (формат может меняться)."""
+    return (_raw("cornix_block_enabled") or "0").lower() in _TRUE
+
+
+def min_confidence() -> float:
+    v = _raw("min_confidence")
+    return float(v) if v is not None else 0.5
+
+
+def min_impulse_atr() -> float:
+    v = _raw("min_impulse_atr")
+    return float(v) if v is not None else 1.0
+
+
+# Дефолт: только Setup 1:1 включён. Честный walk-forward бэктест (docs/ — вынесены из репо)
+# показал 6226 и LTF-BB/LTF-OB стабильно убыточными на BTC/ETH/SOL 12 мес; живая эксплуатация
+# (BTC LONG LTF-BB ×3 подряд, все в стоп, −3R за один день) подтвердила это на практике.
+_DEFAULT_ENABLED_SETUPS = "1:1"
+
+
+def last_board_update_at() -> "str | None":
+    return _raw("last_board_update_at")
+
+
+def set_last_board_update_at(iso: str) -> None:
+    set_value("last_board_update_at", iso)
+
+
+def live_board_message_id() -> "int | None":
+    v = _raw("live_board_message_id")
+    return int(v) if v else None            # "" тоже трактуем как «не установлено»
+
+
+def set_live_board_message_id(message_id: "int | None") -> None:
+    """message_id=None очищает — следующий цикл живого табло создаст новый закреплённый
+    пост вместо повторных попыток редактировать протухшее/удалённое сообщение."""
+    set_value("live_board_message_id", message_id if message_id is not None else "")
+
+
+def enabled_setups() -> tuple:
+    """Какие сетапы SMCEngine разрешено торговать. CSV в settings, дефолт см. выше."""
+    v = _raw("enabled_setups")
+    raw = v if v is not None else _DEFAULT_ENABLED_SETUPS
+    return tuple(x.strip() for x in raw.split(",") if x.strip())
+
+
+def price_stars() -> int:
+    v = _raw("sub_price_stars")
+    return int(v) if v is not None else get_settings().sub_price_stars
+
+
+def price_usdt() -> float:
+    v = _raw("sub_price_usdt")
+    return float(v) if v is not None else get_settings().sub_price_usdt
+
+
+def sub_days() -> int:
+    v = _raw("sub_days")
+    return int(v) if v is not None else get_settings().sub_days
+
+
+def free_per_week() -> int:
+    v = _raw("free_signals_per_week")
+    return int(v) if v is not None else get_settings().free_signals_per_week
+
+
+def effective() -> dict:
+    """Все действующие настройки — для /status и /admin."""
+    return {
+        "paused": paused(),
+        "symbols": symbols(),
+        "timeframes": timeframes(),
+        "signal_mode": signal_mode(),
+        "channel": signals_channel() or "—",
+        "channel_enabled": channel_enabled(),
+        "channel_mode": channel_mode(),
+        "min_confidence": min_confidence(),
+        "min_impulse_atr": min_impulse_atr(),
+        "enabled_setups": enabled_setups(),
+        "price_stars": price_stars(),
+        "price_usdt": price_usdt(),
+        "sub_days": sub_days(),
+        "free_per_week": free_per_week(),
+    }

@@ -1,0 +1,19 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data          # SQLite сохраняется между рестартами
+    restart: unless-stopped
+    command: python -m app.delivery.bot
+
+  # webhook TradingView (v2) — включить, когда понадобится:
+  # webhook:
+  #   build: .
+  #   env_file: .env
+  #   ports:
+  #     - "8080:8080"
+  #   volumes:
+  #     - ./data:/app/data
+  #   restart: unless-stopped
+  #   command: python -m app.v2.tradingview_webhook

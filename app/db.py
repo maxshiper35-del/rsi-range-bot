@@ -1,0 +1,91 @@
+"""Тонкий слой доступа к SQLite. WAL + соединение-на-поток, безопасно под async-бот."""
+from __future__ import annotations
+
+import sqlite3
+import threading
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterable, Sequence
+
+from app.config import get_settings
+
+_local = threading.local()      # своё соединение на каждый поток-воркер
+_write_lock = threading.Lock()  # SQLite допускает одного писателя
+
+
+def get_conn() -> sqlite3.Connection:
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        s = get_settings()
+        s.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(s.db_path, check_same_thread=False, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        _local.conn = conn
+    return conn
+
+
+def query(sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
+    return get_conn().execute(sql, params).fetchall()
+
+
+def query_one(sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
+    return get_conn().execute(sql, params).fetchone()
+
+
+def execute(sql: str, params: Sequence[Any] = ()) -> int:
+    """INSERT -> lastrowid, иначе rowcount."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.lastrowid or cur.rowcount
+
+
+def executemany(sql: str, rows: Iterable[Sequence[Any]]) -> int:
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.executemany(sql, rows)
+        conn.commit()
+        return cur.rowcount
+
+
+@contextmanager
+def transaction():
+    """Атомарно для нескольких записей (journal: сигнал + событие исхода)."""
+    with _write_lock:
+        conn = get_conn()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def upsert(table: str, keys: dict[str, Any], values: dict[str, Any]) -> None:
+    cols = list(keys) + list(values)
+    ph = ", ".join("?" for _ in cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in values)
+    sql = (f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({ph}) "
+           f"ON CONFLICT({', '.join(keys)}) DO UPDATE SET {updates}")
+    execute(sql, [*keys.values(), *values.values()])
+
+
+def init_db(migrations_dir: Path = Path("migrations")) -> None:
+    """Прогон .sql-миграций по порядку, идемпотентно через schema_migrations."""
+    conn = get_conn()
+    conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations "
+                 "(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))")
+    conn.commit()
+    applied = {r["name"] for r in query("SELECT name FROM schema_migrations")}
+    for path in sorted(migrations_dir.glob("*.sql")):
+        if path.name in applied:
+            continue
+        with _write_lock:
+            conn.executescript(path.read_text(encoding="utf-8"))
+            conn.execute("INSERT INTO schema_migrations(name) VALUES (?)", (path.name,))
+            conn.commit()
