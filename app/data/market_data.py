@@ -13,7 +13,7 @@ import pandas as pd
 
 from app import clock
 
-_TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+_TF_SECONDS = {"15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
 
 
 def seconds_to_next_close(tf: str, now_ts: float) -> float:

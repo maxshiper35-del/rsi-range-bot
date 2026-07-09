@@ -1,28 +1,73 @@
-"""Запуск бэктеста SMC-движка из CLI: make backtest.
+"""Запуск бэктеста SMC-движка из CLI: make backtest (без аргументов — как раньше).
+
+Аргументы (бриф F/G: мульти-ТФ и TP-лесенка — только через бэктест-гейт):
+  --symbol BTC/USDT:USDT   --tf 1h   --limit 1000
+  --setups "1:1"           только перечисленные сетапы (CSV; дефолт — все)
+  --ladder "1:0.5,2:0.5"   лесенка частичных выходов R:доля (дефолт — TP сетапа целиком)
+  --be 1                   перевод стопа в безубыток после N закрытых траншей
+  --time-filter            включить окно времени NY (дефолт: выключено, как раньше)
 
 Пробует живые данные (ccxt через fetch_ohlcv), при отсутствии сети — синтетика ядра,
 чтобы команда всегда что-то печатала. Для продакшена — подать сюда исторический CSV.
 """
 from __future__ import annotations
 
+import argparse
+
 from app.brain.smc_setups import SMCConfig
 from app.logging_conf import get_logger
 from app.sim.backtest import run_backtest
 
 
+def parse_ladder(raw: str) -> list:
+    """'1:0.5,2:0.5' -> [(1.0, 0.5), (2.0, 0.5)]. Доли должны суммироваться в 1.0."""
+    ladder = []
+    for part in raw.split(","):
+        rm, fr = part.split(":")
+        ladder.append((float(rm), float(fr)))
+    total = sum(fr for _, fr in ladder)
+    if abs(total - 1.0) > 1e-9:
+        raise ValueError(f"доли лесенки должны суммироваться в 1.0, получено {total:g}")
+    return ladder
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Walk-forward бэктест SMC-движка")
+    p.add_argument("--symbol", default="BTC/USDT:USDT")
+    p.add_argument("--tf", default="1h")
+    p.add_argument("--limit", type=int, default=1000)
+    p.add_argument("--setups", default=None,
+                   help="CSV сетапов, напр. '1:1' или '6226,1:1' (дефолт — все)")
+    p.add_argument("--ladder", default=None,
+                   help="лесенка 'R:доля,R:доля', напр. '1:0.5,2:0.5'")
+    p.add_argument("--be", type=int, default=None,
+                   help="стоп в безубыток после N закрытых траншей лесенки")
+    p.add_argument("--time-filter", action="store_true",
+                   help="включить окно времени NY (дефолт: выключено)")
+    return p.parse_args(argv)
+
+
 def main() -> None:
     log = get_logger("backtest")
-    symbol, tf = "BTC/USDT:USDT", "1h"
+    args = parse_args()
+    symbol, tf = args.symbol, args.tf
     try:
         from app.core.signal_engine import fetch_ohlcv
-        df = fetch_ohlcv(symbol, tf, limit=1000)
+        df = fetch_ohlcv(symbol, tf, limit=args.limit)
         log.info("live: %d баров %s %s", len(df), symbol, tf)
     except Exception as e:
         from app.core.signal_engine import _synthetic_uptrend
         df, symbol = _synthetic_uptrend(), "TEST/USDT"
         log.info("offline (%s) — синтетика, %d баров", type(e).__name__, len(df))
 
-    rep = run_backtest(df, symbol, tf, cfg=SMCConfig(use_time_filter=False))
+    cfg_kwargs: dict = {"use_time_filter": args.time_filter}
+    if args.setups:
+        cfg_kwargs["enabled_setups"] = tuple(s.strip() for s in args.setups.split(","))
+    rep = run_backtest(
+        df, symbol, tf, cfg=SMCConfig(**cfg_kwargs),
+        tp_ladder=parse_ladder(args.ladder) if args.ladder else None,
+        move_be_after=args.be,
+    )
     print(rep.summary())
     print("по сторонам:", rep.by_side)
 

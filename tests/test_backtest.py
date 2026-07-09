@@ -74,5 +74,25 @@ def test_backtest_tp_ladder_partial_exits():
     assert rep.trades >= 1
     # частичные выходы дают дробный R (не только ±1 / фикс. RR)
     assert any(abs(t.result_r - round(t.result_r)) > 1e-6 for t in rep.detail) or rep.trades == 0
-    # риск ограничен ~1R: полный стоп = −1R минус издержки (перевод в БУ помогает лишь если TP1 задет)
+    # риск ограничен ~1R: полный стоп = −1R минус издержки
+    # (перевод в БУ помогает лишь если TP1 задет)
     assert rep.avg_loss_r >= -1.1
+
+
+def test_parse_ladder():
+    from scripts.run_backtest import parse_ladder
+    assert parse_ladder("1:0.5,2:0.5") == [(1.0, 0.5), (2.0, 0.5)]
+    assert parse_ladder("1.5:1") == [(1.5, 1.0)]
+    import pytest
+    with pytest.raises(ValueError):
+        parse_ladder("1:0.5,2:0.3")                     # доли не суммируются в 1.0
+
+
+def test_backtest_cli_args():
+    from scripts.run_backtest import parse_args
+    d = parse_args([])                                  # make backtest без аргументов — как раньше
+    assert d.symbol == "BTC/USDT:USDT" and d.tf == "1h" and d.limit == 1000
+    assert d.setups is None and d.ladder is None and d.be is None and d.time_filter is False
+    a = parse_args(["--symbol", "ETH/USDT:USDT", "--tf", "30m", "--setups", "1:1",
+                    "--ladder", "1:0.5,2.26:0.5", "--be", "1", "--time-filter"])
+    assert a.tf == "30m" and a.setups == "1:1" and a.be == 1 and a.time_filter is True

@@ -59,7 +59,8 @@ def test_poll_once_semiauto_records_candidate(fresh_db):
                          mode="semiauto")
     assert len(found) == 1
     sig, sid = found[0]
-    assert fresh_db.query_one("SELECT status FROM signals WHERE id=?", (sid,))["status"] == "candidate"
+    row = fresh_db.query_one("SELECT status FROM signals WHERE id=?", (sid,))
+    assert row["status"] == "candidate"
 
 
 def test_fetch_closed_ohlcv_retries(monkeypatch):
@@ -108,3 +109,9 @@ def test_poll_once_symbol_error_is_skipped(fresh_db):
     found, _ = poll_once(["BAD", "BTC/USDT:USDT"], ["m15"], engine=eng, frames_loader=loader,
                          mode="auto")
     assert len(found) == 1                             # BAD пропущен, цикл не упал
+
+
+def test_seconds_to_next_close_30m():
+    # бриф F: "30m" добавлен в _TF_SECONDS (раньше тихо фильтровался из runtime.timeframes)
+    assert seconds_to_next_close("30m", 0) == 30 * 60
+    assert seconds_to_next_close("30m", 15 * 60) == 15 * 60
