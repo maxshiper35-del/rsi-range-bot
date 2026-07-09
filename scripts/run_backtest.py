@@ -36,6 +36,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--symbol", default="BTC/USDT:USDT")
     p.add_argument("--tf", default="1h")
     p.add_argument("--limit", type=int, default=1000)
+    p.add_argument("--months", type=float, default=None,
+                   help="история в месяцах через пагинацию (перекрывает --limit; "
+                        "одиночный fetch у Bybit ограничен ~1000 барами)")
     p.add_argument("--setups", default=None,
                    help="CSV сетапов, напр. '1:1' или '6226,1:1' (дефолт — все)")
     p.add_argument("--ladder", default=None,
@@ -52,9 +55,16 @@ def main() -> None:
     args = parse_args()
     symbol, tf = args.symbol, args.tf
     try:
-        from app.core.signal_engine import fetch_ohlcv
-        df = fetch_ohlcv(symbol, tf, limit=args.limit)
-        log.info("live: %d баров %s %s", len(df), symbol, tf)
+        if args.months:
+            from app.data.market_data import _TF_SECONDS, fetch_history
+            bars = int(args.months * 30.44 * 86400 / _TF_SECONDS[tf])
+            df = fetch_history(symbol, tf, target_bars=bars)
+            log.info("live: %d баров %s %s (~%.1f мес, пагинация)",
+                     len(df), symbol, tf, args.months)
+        else:
+            from app.core.signal_engine import fetch_ohlcv
+            df = fetch_ohlcv(symbol, tf, limit=args.limit)
+            log.info("live: %d баров %s %s", len(df), symbol, tf)
     except Exception as e:
         from app.core.signal_engine import _synthetic_uptrend
         df, symbol = _synthetic_uptrend(), "TEST/USDT"

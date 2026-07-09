@@ -115,3 +115,32 @@ def test_seconds_to_next_close_30m():
     # бриф F: "30m" добавлен в _TF_SECONDS (раньше тихо фильтровался из runtime.timeframes)
     assert seconds_to_next_close("30m", 0) == 30 * 60
     assert seconds_to_next_close("30m", 15 * 60) == 15 * 60
+
+
+def test_fetch_history_paginates_and_dedupes():
+    """Пагинация: страницы по page_limit, без дублей на стыке, последний бар отброшен."""
+    from app.data.market_data import fetch_history
+
+    class _StubEx:
+        def __init__(self):
+            self.calls = []
+
+        def fetch_ohlcv(self, symbol, timeframe, since, limit):
+            self.calls.append(since)
+            tf_ms = 3600 * 1000
+            start = (since // tf_ms) * tf_ms
+            # отдаём страницы по 1000 баров, включая бар == since (как реальные биржи)
+            return [[start + i * tf_ms, 1.0, 2.0, 0.5, 1.5, 10.0] for i in range(limit)]
+
+    ex = _StubEx()
+    df = fetch_history("BTC/USDT:USDT", "1h", target_bars=2500, exchange=ex, page_limit=1000)
+    assert len(df) == 2500                              # цель (последний срезан: незакрыт)
+    assert len(ex.calls) >= 3                           # минимум 3 страницы по 1000
+    assert df["ts"].is_unique and df["ts"].is_monotonic_increasing
+    assert "dt" in df.columns
+
+
+def test_fetch_history_unknown_tf():
+    from app.data.market_data import fetch_history
+    with pytest.raises(ValueError):
+        fetch_history("BTC/USDT:USDT", "3m", target_bars=10, exchange=object())

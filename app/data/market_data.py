@@ -196,6 +196,57 @@ def fetch_closed_ohlcv(symbol: str, timeframe: str, limit: int = 200,
     return df.iloc[:-1].reset_index(drop=True)          # последний бар может быть незакрыт
 
 
+def fetch_history(symbol: str, timeframe: str, target_bars: int,
+                  exchange_id: str | None = None, page_limit: int = 1000,
+                  retries: int = 3, backoff_base: float = 2.0,
+                  exchange=None) -> pd.DataFrame:
+    """Постраничная история OHLCV (since-курсор): target_bars закрытых баров для бэктеста.
+
+    Одиночный fetch_ohlcv у Bybit ограничен ~1000 барами — для гейта F/G (бриф: сравнение
+    ТФ на 6-12 месяцах) нужна пагинация. Страницы ретраятся как в fetch_closed_ohlcv;
+    rate-limiter — встроенный ccxt (общий кэш-инстанс). exchange= — инъекция для тестов.
+    """
+    import time as _time
+
+    from app.logging_conf import get_logger
+
+    if timeframe not in _TF_SECONDS:
+        raise ValueError(f"неизвестный ТФ {timeframe!r} (знаю: {sorted(_TF_SECONDS)})")
+    if exchange is None:
+        if exchange_id is None:
+            from app.config import get_settings
+            exchange_id = get_settings().exchange_id
+        exchange = _exchange(exchange_id)
+    tf_ms = _TF_SECONDS[timeframe] * 1000
+    since = int(_time.time() * 1000) - (target_bars + 2) * tf_ms
+    rows: list = []
+    while len(rows) < target_bars + 1:                  # +1: последний бар отбросим как незакрытый
+        batch = None
+        for attempt in range(retries):
+            try:
+                batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe,
+                                             since=since, limit=page_limit)
+                break
+            except Exception as e:                      # noqa: BLE001 — ccxt Network/RateLimit
+                if attempt == retries - 1:
+                    raise
+                delay = backoff_base * (2 ** attempt)
+                get_logger("market_data").warning(
+                    "fetch_history %s %s: %s — ретрай через %.0fс", symbol, timeframe, e, delay)
+                _time.sleep(delay)
+        if not batch:
+            break                                       # история кончилась (листинг моложе окна)
+        if rows:
+            batch = [b for b in batch if b[0] > rows[-1][0]]    # без дублей на стыке страниц
+            if not batch:
+                break
+        rows.extend(batch)
+        since = rows[-1][0] + tf_ms
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+    df["dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+    return df.iloc[:-1].tail(target_bars).reset_index(drop=True)  # закрытые, не больше цели
+
+
 def load_frames(symbol: str, timeframes: list[str], limit: int = 200,
                 exchange_id: str | None = None) -> dict[str, pd.DataFrame]:
     """Загрузить закрытые OHLCV по нескольким ТФ -> {tf: df} для SMCEngine.analyze.
