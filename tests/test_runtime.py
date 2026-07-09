@@ -50,6 +50,10 @@ def test_new_runtime_keys(fresh_db):
     assert runtime.cryptobot_token() == ""
     runtime.set_value("cryptobot_token", "tok123")
     assert runtime.cryptobot_token() == "tok123"
+    # trial_days: дефолт 5 (нет .env-фолбэка, дефолт зашит в runtime.py), override
+    assert runtime.trial_days() == 5
+    runtime.set_value("trial_days", "7")
+    assert runtime.trial_days() == 7
 
 
 def test_enabled_setups_default_is_conservative(fresh_db):

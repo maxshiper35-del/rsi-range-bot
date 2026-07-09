@@ -42,6 +42,17 @@ def test_grant_idempotent_and_extends(fresh_db):
     assert fresh_db.query_one("SELECT COUNT(*) AS c FROM payments")["c"] == 2
 
 
+def test_grant_subscription_fractional_days(fresh_db):
+    """Тестовый тариф (часы, не дни): 5/24 дня должно продлевать ровно на ~5 часов,
+    не падать и не округляться до 0/1 дня."""
+    from app.delivery import payments
+    assert payments.grant_subscription(777, "stars", 10, "XTR", 5 / 24, "charge_hours") is True
+    u = payments.get_user(777)
+    until = datetime.fromisoformat(u["paid_until"])
+    delta = until - datetime.now(timezone.utc)
+    assert timedelta(hours=4, minutes=55) < delta < timedelta(hours=5, minutes=5)
+
+
 def test_expired_not_in_subscribers(fresh_db):
     from app import clock, db
     from app.delivery import payments
@@ -59,6 +70,12 @@ def test_status_text(fresh_db):
     assert "Telegram Stars" in txt and "Нажми кнопку" in txt
     payments.grant_subscription(999, "stars", 1000, "XTR", 30, "c1")
     assert "активна до" in payments.subscription_status_text(999)
+
+
+def test_fmt_days():
+    from app.delivery import payments
+    assert payments._fmt_days(30) == "30 дней"
+    assert payments._fmt_days(5 / 24) == "5 часов"
 
 
 # --- воронка free-тира ---
@@ -100,6 +117,106 @@ def test_expire_overdue(fresh_db):
     assert payments.expire_overdue() == [300]
     assert payments.get_user(300)["tier"] == "free"
     assert payments.expire_overdue() == []                        # идемпотентно
+
+
+def test_grant_trial_new_user(fresh_db):
+    from app.delivery import payments
+    assert payments.grant_trial(700, 5) is True
+    u = payments.get_user(700)
+    assert u["tier"] == "paid" and u["trial_granted_at"] is not None
+    until = datetime.fromisoformat(u["paid_until"])
+    assert timedelta(days=4) < (until - datetime.now(timezone.utc)) < timedelta(days=6)
+
+
+def test_grant_trial_once_only(fresh_db):
+    from app.delivery import payments
+    assert payments.grant_trial(701, 5) is True
+    first_until = payments.get_user(701)["paid_until"]
+    # повторный /start (например после истечения триала) — второй раз НЕ выдаёт
+    assert payments.grant_trial(701, 5) is False
+    assert payments.get_user(701)["paid_until"] == first_until
+
+
+def test_grant_trial_not_for_ever_paid_user(fresh_db):
+    """Юзер, у которого КОГДА-ЛИБО была подписка (даже истёкшая) — триал не для него,
+    иначе лапсед-юзер получал бы бесплатный доступ при каждом возврате."""
+    from app import db
+    from app.delivery import payments
+    payments.grant_subscription(702, "stars", 1000, "XTR", 30, "charge_1")
+    db.execute("UPDATE users SET paid_until=? WHERE tg_id=?",
+              ("2020-01-01T00:00:00+00:00", 702))            # подписка истекла давно
+    assert payments.is_paid(702) is False                     # сейчас не платит
+    assert payments.grant_trial(702, 5) is False               # но триал всё равно не положен
+
+
+def test_grant_trial_expires_via_expire_overdue(fresh_db):
+    from app import db
+    from app.delivery import payments
+    payments.grant_trial(703, 5)
+    db.execute("UPDATE users SET paid_until=? WHERE tg_id=?",
+              ("2020-01-01T00:00:00+00:00", 703))
+    assert payments.expire_overdue() == [703]
+    assert payments.get_user(703)["tier"] == "free"
+
+
+def test_redeem_promo_activates(fresh_db):
+    from app.delivery import payments
+    payments.create_promo("WELCOME10", 10)
+    res = payments.redeem_promo(800, "WELCOME10")
+    assert res == {"ok": True, "days": 10, "reason": None}
+    u = payments.get_user(800)
+    until = datetime.fromisoformat(u["paid_until"])
+    assert timedelta(days=9) < (until - datetime.now(timezone.utc)) < timedelta(days=11)
+
+
+def test_redeem_promo_not_found(fresh_db):
+    from app.delivery import payments
+    assert payments.redeem_promo(801, "NOPE") == {"ok": False, "days": None, "reason": "not_found"}
+
+
+def test_redeem_promo_already_used(fresh_db):
+    from app.delivery import payments
+    payments.create_promo("ONCE", 7)
+    assert payments.redeem_promo(802, "ONCE")["ok"] is True
+    res2 = payments.redeem_promo(802, "ONCE")
+    assert res2 == {"ok": False, "days": None, "reason": "already_used"}
+    # дни не начислены дважды — код применён ровно один раз
+    n = fresh_db.query_one(
+        "SELECT COUNT(*) AS c FROM promo_redemptions WHERE code='ONCE'")["c"]
+    assert n == 1
+
+
+def test_redeem_promo_exhausted(fresh_db):
+    from app.delivery import payments
+    payments.create_promo("LIMITED", 5, max_uses=1)
+    assert payments.redeem_promo(803, "LIMITED")["ok"] is True
+    res = payments.redeem_promo(804, "LIMITED")           # другой юзер — лимит уже исчерпан
+    assert res == {"ok": False, "days": None, "reason": "exhausted"}
+
+
+def test_redeem_promo_same_user_low_max_uses_reports_already_used_not_exhausted(fresh_db):
+    """Регрессия: при max_uses=1 повторная попытка ТОГО ЖЕ юзера должна честно говорить
+    'уже использовали', а не маскироваться под 'код исчерпан' (баг найден живой проверкой)."""
+    from app.delivery import payments
+    payments.create_promo("SOLO", 5, max_uses=1)
+    assert payments.redeem_promo(808, "SOLO")["ok"] is True
+    res = payments.redeem_promo(808, "SOLO")               # тот же юзер, повторно
+    assert res == {"ok": False, "days": None, "reason": "already_used"}
+
+
+def test_redeem_promo_expired(fresh_db):
+    from app.delivery import payments
+    payments.create_promo("OLD", 5, expires_at="2020-01-01T00:00:00+00:00")
+    res = payments.redeem_promo(805, "OLD")
+    assert res == {"ok": False, "days": None, "reason": "expired"}
+
+
+def test_redeem_promo_different_users_both_succeed(fresh_db):
+    """Лимит — на КОД в целом (max_uses), не блокирует РАЗНЫХ юзеров по отдельности."""
+    from app.delivery import payments
+    payments.create_promo("SHARED", 3)
+    assert payments.redeem_promo(806, "SHARED")["ok"] is True
+    assert payments.redeem_promo(807, "SHARED")["ok"] is True
 
 
 def test_renewal_reminder(fresh_db):
@@ -185,6 +302,36 @@ def test_acquisition_source_first_touch(fresh_db):
     assert payments.get_user(720)["acquisition_source"] == "kol1"
     payments.register_user(721)                          # без метки — NULL
     assert payments.get_user(721)["acquisition_source"] is None
+
+
+def test_acquisition_breakdown_counts_real_payments_only(fresh_db):
+    """Ключевой инвариант /growth: триал/промо ставят paid_until, но НЕ считаются 'оплатили' —
+    только реальный платёж (payments.status='paid') двигает конверсию."""
+    from app.delivery import payments
+
+    payments.register_user(730)
+    payments.set_acquisition_source(730, "kol1")
+    payments.grant_trial(730, 5)                          # paid_until есть, но не платёж
+
+    payments.register_user(731)
+    payments.set_acquisition_source(731, "kol1")
+    payments.grant_subscription(731, "stars", 1000, "XTR", 30, "charge_731")  # реальный платёж
+
+    payments.register_user(732)                           # без метки — органика
+
+    b = payments.acquisition_breakdown()
+    assert b["kol1"] == {"total": 2, "paid": 1}            # только 731 реально оплатил
+    assert b["—"] == {"total": 1, "paid": 0}               # 732 — органика, не платил
+
+
+def test_acquisition_breakdown_promo_not_counted_as_paid(fresh_db):
+    from app.delivery import payments
+    payments.register_user(733)
+    payments.set_acquisition_source(733, "promo_campaign")
+    payments.create_promo("GROWTHTEST", 5)
+    payments.redeem_promo(733, "GROWTHTEST")               # paid_until есть, но не платёж
+    b = payments.acquisition_breakdown()
+    assert b["promo_campaign"] == {"total": 1, "paid": 0}
 
 
 # --- USDT через CryptoBot (мок API) ---

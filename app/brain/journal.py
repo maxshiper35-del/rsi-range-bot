@@ -8,6 +8,7 @@ signal_events; entry/stop/take_profits/created_at не редактируютс�
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 from app import clock, db
 from app.core.signal_engine import Side, Signal
@@ -63,7 +64,7 @@ def record_signal(signal: Signal) -> int:
     return _insert(signal, "open", "opened")
 
 
-def find_duplicate_setup(signal: Signal) -> "int | None":
+def find_duplicate_setup(signal: Signal) -> int | None:
     """id уже записанного сигнала с тем же сетапом, если есть.
 
     Один и тот же импульс детектится на нескольких последовательных барах, но его
@@ -113,6 +114,46 @@ def reject_candidate(signal_id: int) -> bool:
 def open_candidates() -> list:
     """Список кандидатов, ожидающих решения оператора."""
     return db.query("SELECT * FROM signals WHERE status='candidate' ORDER BY id")
+
+
+def expire_stale_candidates(max_age_minutes: int = 60) -> list:
+    """TTL для semiauto-кандидатов: без /confirm или /reject дольше max_age_minutes ->
+    candidate -> expired. Готовится ВПРОК (semiauto сейчас выключен, signal_mode=auto) —
+    без TTL включение semiauto копило бы неразрешённых кандидатов вечно, искажая /report
+    (cohort_stats). result_r остаётся NULL -> в публичную статистику (stats/stats_by_setup,
+    фильтр result_r IS NOT NULL) не попадают. Событие 'expired' переиспользуем из уже
+    разрешённого CHECK(event IN (...)) — тот же смысл (сделки не случилось), не заводим
+    новое значение ради одной лишней миграции.
+    -> список id просроченных кандидатов."""
+    cutoff = (clock.utcnow() - timedelta(minutes=max_age_minutes)).isoformat()
+    rows = db.query("SELECT id FROM signals WHERE status='candidate' AND created_at < ?", (cutoff,))
+    ids = [r["id"] for r in rows]
+    if not ids:
+        return ids
+    now = clock.utcnow_iso()
+    with db.transaction() as conn:
+        for sid in ids:
+            conn.execute("UPDATE signals SET status='expired', updated_at=? WHERE id=?", (now, sid))
+            conn.execute("INSERT INTO signal_events(signal_id, event, created_at) VALUES (?,?,?)",
+                         (sid, "expired", now))
+    return ids
+
+
+def record_ledger_hash(row_count: int, sha256: str) -> None:
+    """Локальный архив хэша опубликованного трек-рекорда — переживает удаление/блокировку
+    канала (лежит в уже забэкапленной БД, не только в Telegram)."""
+    db.execute("INSERT INTO ledger_hashes(row_count, sha256, created_at) VALUES (?,?,?)",
+              (row_count, sha256, clock.utcnow_iso()))
+
+
+def export_public_trades() -> list:
+    """Полный публичный журнал для /trackrecord и еженедельного экспорта: и открытые, и
+    закрытые сигналы, БЕЗ candidate/rejected (это отдельный когортный эксперимент /report,
+    не публичный трек-рекорд — сознательно другая выборка, чтобы не путать читателя CSV)."""
+    return db.query(
+        "SELECT id, symbol, side, timeframe, entry, stop, tp1, tp2, tp3, status, result_r, "
+        "created_at, closed_at FROM signals WHERE status NOT IN ('candidate','rejected') "
+        "ORDER BY created_at")
 
 
 def _outcome_for(row, price: float):
@@ -177,7 +218,7 @@ def update_outcomes(latest_prices: dict[str, float]) -> int:
     return closed
 
 
-def _outcome_from_bars(row, df) -> "tuple | None":
+def _outcome_from_bars(row, df) -> tuple | None:
     """Исход по ХРОНОЛОГИИ закрытых баров после created_at (честный скоринг).
 
     Фазы: (1) ждём касания entry (лимитный вход, low<=entry<=high) — без fill сделки НЕТ;
@@ -259,9 +300,13 @@ def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
                 (row["id"], ("shadow" if event != "expired" else "expired") if shadow else event,
                  None, r_val, now),
             )
+        try:
+            setup = json.loads(row["snapshot_json"] or "{}").get("setup", "?")
+        except (ValueError, TypeError):
+            setup = "?"
         closed.append({"id": row["id"], "symbol": row["symbol"], "side": row["side"],
                        "timeframe": row["timeframe"], "status": status,
-                       "result_r": r_val, "shadow": shadow})
+                       "result_r": r_val, "shadow": shadow, "setup": setup})
     return closed
 
 
@@ -293,7 +338,7 @@ def cohort_stats() -> dict:
         "WHERE s.result_r IS NOT NULL AND EXISTS (SELECT 1 FROM signal_events e "
         "WHERE e.signal_id = s.id AND e.event = 'rejected')")
     pending = db.query_one(
-        "SELECT COUNT(*) AS c FROM signals WHERE status='candidate'")["c"]
+        "SELECT COUNT(*) AS c FROM signals WHERE status='candidate'")["c"]  # type: ignore[index]
     out = {"confirmed": agg(confirmed), "rejected": agg(rejected),
            "all": agg(list(confirmed) + list(rejected)), "pending_candidates": pending}
     out["edge_r"] = round(out["confirmed"]["expectancy_r"]
@@ -311,7 +356,8 @@ def stats() -> dict:
     n = len(rs)
     wins = [r for r in rs if r > 0]
     total_r = sum(rs)
-    open_n = db.query_one("SELECT COUNT(*) AS c FROM signals WHERE status='open'")["c"]
+    open_n = db.query_one(
+        "SELECT COUNT(*) AS c FROM signals WHERE status='open'")["c"]  # type: ignore[index]
     return {
         "trades": n,
         "wins": len(wins),
@@ -323,11 +369,35 @@ def stats() -> dict:
     }
 
 
+def stats_for_period(start_iso: str, end_iso: str) -> dict:
+    """Та же агрегация, что stats(), но СКОУПЛЕННАЯ по closed_at в [start_iso, end_iso) —
+    для карточки недели (реальные цифры ЭТОЙ недели, не всё время жизни бота). Дополнительно
+    отдаёт outcomes — хронологический список True/False (win/loss) для юнит-чарта.
+    Даты/окно определяет вызывающий код (bot.py), не эта функция — она не читает часы."""
+    rows = db.query(
+        "SELECT result_r FROM signals WHERE status IN ('tp1','tp2','tp3','stopped','expired') "
+        "AND result_r IS NOT NULL AND closed_at >= ? AND closed_at < ? ORDER BY closed_at",
+        (start_iso, end_iso))
+    rs = [r["result_r"] for r in rows]
+    n = len(rs)
+    wins = [r for r in rs if r > 0]
+    total_r = sum(rs)
+    return {
+        "trades": n,
+        "wins": len(wins),
+        "losses": n - len(wins),
+        "winrate": round(len(wins) / n, 4) if n else 0.0,
+        "expectancy_r": round(total_r / n, 4) if n else 0.0,
+        "total_r": round(total_r, 4),
+        "outcomes": [r > 0 for r in rs],
+    }
+
+
 def stats_by_symbol() -> dict:
     """Разбивка публичной статистики по символам — для живого табло в канале."""
     rows = db.query(
-        "SELECT symbol, result_r FROM signals WHERE status IN ('tp1','tp2','tp3','stopped','expired') "
-        "AND result_r IS NOT NULL")
+        "SELECT symbol, result_r FROM signals "
+        "WHERE status IN ('tp1','tp2','tp3','stopped','expired') AND result_r IS NOT NULL")
     by_symbol: dict = {}
     for r in rows:
         rs = by_symbol.setdefault(r["symbol"], [])
@@ -344,3 +414,59 @@ def stats_by_symbol() -> dict:
             "total_r": round(sum(rs), 4),
         }
     return out
+
+
+def stats_by_setup() -> dict:
+    """Разбивка публичной статистики по тегу сетапа (6226/1:1/open-SMC/LTF-BB/LTF-OB) —
+    для /bysetup и живого табло. Тег живёт в snapshot_json (JSON-поле, не колонка) —
+    парсим в Python, не через json_extract в SQL (переносимость важнее при этом объёме).
+    LTF-BB и LTF-OB НЕ схлопываются в один бакет — именно LTF-BB показал проблему
+    в бэктесте/живой эксплуатации, LTF-OB отдельно не проверялся.
+    """
+    rows = db.query(
+        "SELECT snapshot_json, result_r FROM signals WHERE status IN "
+        "('tp1','tp2','tp3','stopped','expired') AND result_r IS NOT NULL")
+    by_setup: dict = {}
+    for r in rows:
+        try:
+            setup = json.loads(r["snapshot_json"] or "{}").get("setup", "?")
+        except (ValueError, TypeError):
+            setup = "?"
+        by_setup.setdefault(setup, []).append(r["result_r"])
+    out = {}
+    for setup, rs in by_setup.items():
+        n = len(rs)
+        wins = sum(1 for x in rs if x > 0)
+        out[setup] = {
+            "trades": n,
+            "wins": wins,
+            "winrate": round(wins / n, 4) if n else 0.0,
+            "expectancy_r": round(sum(rs) / n, 4) if n else 0.0,
+            "total_r": round(sum(rs), 4),
+        }
+    return out
+
+
+def consecutive_losses(setup: str, n: int = 5) -> int:
+    """Сколько последних ЗАКРЫТЫХ сделок этого сетапа подряд убыточны (result_r<=0),
+    считая от самой свежей. Читает JSON-тег в Python по тем же причинам, что и
+    stats_by_setup(); n ограничивает окно (не нужно сканировать всю историю)."""
+    rows = db.query(
+        "SELECT snapshot_json, result_r FROM signals WHERE status IN "
+        "('tp1','tp2','tp3','stopped','expired') AND result_r IS NOT NULL "
+        "ORDER BY closed_at DESC LIMIT ?", (max(n * 20, 100),))
+    streak = 0
+    for r in rows:
+        try:
+            tag = json.loads(r["snapshot_json"] or "{}").get("setup", "?")
+        except (ValueError, TypeError):
+            tag = "?"
+        if tag != setup:
+            continue
+        if r["result_r"] <= 0:
+            streak += 1
+            if streak >= n:
+                return streak
+        else:
+            break
+    return streak

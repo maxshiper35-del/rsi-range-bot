@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# pre-commit: lint+typecheck ИЗМЕНЁННЫХ .py-файлов + полный прогон тестов.
+#
+# Ruff/mypy намеренно scoped на staged-файлы, а не весь репозиторий: whole-tree
+# hook блокировал бы коммит из-за долга в файлах, которые этот коммит не трогает.
+# "Boy scout rule" — тронул файл, почисти его целиком (mypy/ruff проверяют весь
+# файл, не только изменённые строки — это норма для pre-commit хуков, не баг).
+# mypy --follow-imports=silent — иначе типизирует и импортируемые (но не staged)
+# модули, блокируя коммит чужим долгом. F821/F401 (реальные NameError-баги, не
+# стиль) проверяются по ВСЕМУ app/ — дёшево и уже ловило живой прод-баг, который
+# тесты пропустили.
+#
+# Установка: make install-hooks (копирует этот файл в .git/hooks/pre-commit).
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+staged=$(git diff --cached --name-only --diff-filter=ACM -- '*.py' || true)
+
+if [ -n "$staged" ]; then
+    echo "pre-commit: ruff check (изменённые файлы)..."
+    # shellcheck disable=SC2086
+    python3 -m ruff check $staged
+
+    app_staged=$(echo "$staged" | grep '^app/' || true)
+    if [ -n "$app_staged" ]; then
+        echo "pre-commit: mypy (изменённые файлы под app/)..."
+        # shellcheck disable=SC2086
+        python3 -m mypy --follow-imports=silent $app_staged
+    fi
+fi
+
+echo "pre-commit: ruff check --select F821,F401 app (весь app/, ловит NameError-баги)..."
+python3 -m ruff check app --select F821,F401
+
+echo "pre-commit: pytest (полный прогон)..."
+python3 -m pytest -q
+
+echo "pre-commit: OK"

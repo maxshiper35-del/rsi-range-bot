@@ -10,6 +10,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app import clock, db, runtime
 from app.config import get_settings
 from app.logging_conf import get_logger
 
@@ -58,8 +59,12 @@ def _rotate(dst_dir: Path, keep_last: int) -> None:
 
 def main() -> None:
     log = get_logger("backup_db")
+    db.init_db()                                # settings-таблица гарантированно существует
     path = backup_once()
     log.info("бэкап создан: %s (%d байт)", path, path.stat().st_size)
+    # timestamp в settings (WAL, тот же файл, что и боевая БД) — не отдельный лог-файл,
+    # который бот не читает; /health и алерт о пропуске (_maintenance) читают отсюда
+    runtime.set_last_backup_at(clock.utcnow_iso())
 
 
 if __name__ == "__main__":

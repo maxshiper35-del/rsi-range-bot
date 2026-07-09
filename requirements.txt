@@ -6,6 +6,9 @@ aiogram>=3.0
 Flask>=3.0
 cryptography>=42.0
 python-dotenv>=1.0
+playwright>=1.40   # рендер карточки недели (app/delivery/graphics.py); после установки
+                   # пакета нужно ОДНОКРАТНО: python3 -m playwright install chromium
+                   # (make install-playwright) — сам браузер pip не ставит
 
 # --- dev ---
 pytest>=8.0

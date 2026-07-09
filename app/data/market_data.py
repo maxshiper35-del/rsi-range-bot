@@ -7,10 +7,11 @@ seconds_to_next_close / poll_once / run_poller (такт по закрытию �
 """
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import pandas as pd
 
+from app import clock
 
 _TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 
@@ -26,7 +27,7 @@ def seconds_to_next_close(tf: str, now_ts: float) -> float:
 
 def poll_once(symbols: list, timeframes: list, engine=None,
               frames_loader: Callable | None = None, pause_sec: float = 0.0,
-              mode: str | None = None) -> list:
+              mode: str | None = None) -> tuple[list, list]:
     """Один цикл сканирования: по каждому символу загрузить кадры и записать сигналы.
 
     mode: 'auto' — сигнал сразу активен (журнал+статистика); 'semiauto' — кандидат
@@ -98,10 +99,14 @@ async def run_poller(on_candidate, engine=None, on_tick=None, on_close=None) -> 
             base_tf = min(tfs, key=lambda t: _TF_SECONDS[t])
             delay = seconds_to_next_close(base_tf, _time.time()) + 2.0  # +2с бирже на закрытие
             await asyncio.sleep(delay)
+            # такт "проснулся по расписанию" — сигнал живости для /health, не зависит от
+            # успеха дальнейшей работы (скан/on_tick могут упасть, поток жив в любом случае)
+            await asyncio.to_thread(runtime.set_last_poller_tick_at, clock.utcnow_iso())
 
-            if runtime.paused():                        # пауза: сигналы не ищем, но обслуживаем подписки
+            if runtime.paused():          # пауза: сигналы не ищем, но обслуживаем подписки
                 log.info("poller на паузе — пропускаю скан")
-                found, closed = [], []
+                found: list = []
+                closed: list = []
             else:
                 eng = engine or SMCEngine(SMCConfig(
                     min_confidence=runtime.min_confidence(),
@@ -146,7 +151,7 @@ def _exchange(exchange_id: str):
 
     cache = getattr(_exchange, "_cache", None)
     if cache is None:
-        cache = _exchange._cache = {}
+        cache = _exchange._cache = {}  # type: ignore[attr-defined]  # кэш-на-функции — намеренно
     if exchange_id not in cache:
         cache[exchange_id] = getattr(ccxt, exchange_id)({
             "enableRateLimit": True,
@@ -214,7 +219,8 @@ def load_correlated(symbol: str, timeframe: str = "1h", limit: int = 200,
         elif base == b:
             partner = a
         if partner:
-            pair = f"{partner}/USDT:USDT" if not partner.startswith(("US", "DXY", "XA")) else partner
+            is_index = partner.startswith(("US", "DXY", "XA"))
+            pair = partner if is_index else f"{partner}/USDT:USDT"
             return fetch_closed_ohlcv(pair, timeframe, limit=limit,
                                       exchange_id=exchange_id), partner
     return None

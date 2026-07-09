@@ -39,3 +39,33 @@ def test_side_check_constraint(fresh_db):
     with pytest.raises(sqlite3.IntegrityError):
         db.execute(_INSERT, ("BTC/USDT:USDT", "UP", "1h", 1.0, 0.9, 3.0, 0.6, "{}",
                              "2026-02-01T00:00:00+00:00"))  # side не в ('LONG','SHORT')
+
+
+def test_migration_atomicity_partial_failure_rolls_back(fresh_db, tmp_path):
+    """Миграция, упавшая на середине .sql, не должна оставлять частично применённую схему —
+    иначе ретрай на следующем рестарте падает на 'table already exists' от первой половины."""
+    db = fresh_db
+    bad_dir = tmp_path / "migrations_bad"
+    bad_dir.mkdir()
+    (bad_dir / "999_broken.sql").write_text(
+        "CREATE TABLE atomicity_test (id INTEGER PRIMARY KEY);\n"
+        "THIS IS NOT VALID SQL;\n"
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        db.init_db(bad_dir)
+
+    # ROLLBACK -> таблица из первого (валидного) statement не осталась висеть в схеме
+    tables = {r["name"] for r in db.query("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "atomicity_test" not in tables
+    # и миграция не отмечена применённой -> ретрай возможен, а не заблокирован навсегда
+    applied = {r["name"] for r in db.query("SELECT name FROM schema_migrations")}
+    assert "999_broken.sql" not in applied
+
+    # ретрай с исправленным файлом ТОГО ЖЕ имени проходит чисто (не "table already exists")
+    (bad_dir / "999_broken.sql").write_text(
+        "CREATE TABLE atomicity_test (id INTEGER PRIMARY KEY);\n")
+    db.init_db(bad_dir)
+    tables = {r["name"] for r in db.query("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "atomicity_test" in tables
+    applied = {r["name"] for r in db.query("SELECT name FROM schema_migrations")}
+    assert "999_broken.sql" in applied

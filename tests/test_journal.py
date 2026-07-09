@@ -5,10 +5,10 @@ from app.core.signal_engine import Side, Signal
 
 
 def _sig(symbol="BTC/USDT:USDT", side=Side.SHORT, entry=100.0, stop=110.0, tp=80.0,
-         created_at="2026-01-01T00:00:00+00:00"):
+         created_at="2026-01-01T00:00:00+00:00", setup="6226"):
     return Signal(symbol=symbol, side=side, timeframe="m15", entry=entry, stop=stop,
                   take_profits=[tp], risk_reward=2.0, confidence=0.6, reasons=["тест"],
-                  created_at=created_at, indicators_snapshot={"setup": "6226"})
+                  created_at=created_at, indicators_snapshot={"setup": setup})
 
 
 def test_record_signal(fresh_db):
@@ -42,6 +42,45 @@ def test_update_outcomes_stop(fresh_db):
     assert journal.stats()["losses"] == 1
 
 
+def test_stats_for_period_scoped_by_closed_at(fresh_db):
+    """Карточка недели: только сделки, ЗАКРЫТЫЕ внутри окна, а не всё время жизни бота."""
+    from app.brain import journal
+    journal.record_signal(_sig(symbol="BTC/USDT:USDT"))
+    journal.record_signal(_sig(symbol="ETH/USDT:USDT", entry=200.0, stop=210.0, tp=180.0,
+                               created_at="2026-01-01T00:15:00+00:00"))
+    journal.update_outcomes({"BTC/USDT:USDT": 79.0, "ETH/USDT:USDT": 211.0})  # tp / stop
+    # ETH "закрылась" давно — переносим closed_at за пределы окна недели
+    fresh_db.execute("UPDATE signals SET closed_at=? WHERE symbol='ETH/USDT:USDT'",
+                     ("2020-01-01T00:00:00+00:00",))
+    from app import clock
+    wk = journal.stats_for_period("2025-01-01T00:00:00+00:00", clock.utcnow_iso())
+    assert wk["trades"] == 1                      # только BTC — ETH вне окна
+    assert wk["total_r"] == 2.0
+    assert wk["outcomes"] == [True]
+
+
+def test_stats_for_period_outcomes_chronological(fresh_db):
+    from app.brain import journal
+    journal.record_signal(_sig(symbol="BTC/USDT:USDT"))                      # закроется stop
+    journal.record_signal(_sig(symbol="ETH/USDT:USDT", entry=200.0, stop=210.0, tp=180.0,
+                               created_at="2026-01-01T00:15:00+00:00"))      # закроется tp
+    journal.update_outcomes({"BTC/USDT:USDT": 111.0, "ETH/USDT:USDT": 179.0})
+    # BTC закрылась раньше ETH -> outcomes должны идти в этом порядке
+    fresh_db.execute("UPDATE signals SET closed_at=? WHERE symbol='BTC/USDT:USDT'",
+                     ("2026-06-01T00:00:00+00:00",))
+    fresh_db.execute("UPDATE signals SET closed_at=? WHERE symbol='ETH/USDT:USDT'",
+                     ("2026-06-02T00:00:00+00:00",))
+    wk = journal.stats_for_period("2026-01-01T00:00:00+00:00", "2027-01-01T00:00:00+00:00")
+    assert wk["outcomes"] == [False, True]        # BTC (stop) раньше ETH (tp)
+
+
+def test_stats_for_period_empty(fresh_db):
+    from app.brain import journal
+    wk = journal.stats_for_period("2020-01-01T00:00:00+00:00", "2020-01-02T00:00:00+00:00")
+    assert wk == {"trades": 0, "wins": 0, "losses": 0, "winrate": 0.0,
+                  "expectancy_r": 0.0, "total_r": 0.0, "outcomes": []}
+
+
 def test_stats_by_symbol(fresh_db):
     from app.brain import journal
     journal.record_signal(_sig(symbol="BTC/USDT:USDT"))
@@ -55,6 +94,46 @@ def test_stats_by_symbol(fresh_db):
     assert "SOL/USDT:USDT" not in by_symbol           # без сделок — не в разбивке
 
 
+def test_stats_by_setup(fresh_db):
+    from app.brain import journal
+    journal.record_signal(_sig(symbol="BTC/USDT:USDT", setup="6226"))
+    journal.record_signal(_sig(symbol="ETH/USDT:USDT", entry=200.0, stop=210.0, tp=180.0,
+                               created_at="2026-01-01T00:15:00+00:00", setup="1:1"))
+    journal.update_outcomes({"BTC/USDT:USDT": 79.0, "ETH/USDT:USDT": 211.0})  # tp / stop
+    by_setup = journal.stats_by_setup()
+    assert by_setup["6226"]["trades"] == 1
+    assert by_setup["6226"]["total_r"] == 2.0
+    assert by_setup["1:1"]["trades"] == 1
+    assert by_setup["1:1"]["total_r"] == -1.0
+
+
+def test_stats_by_setup_ltf_bb_ob_not_collapsed(fresh_db):
+    from app.brain import journal
+    journal.record_signal(_sig(symbol="BTC/USDT:USDT", setup="LTF-BB"))
+    journal.record_signal(_sig(symbol="ETH/USDT:USDT", entry=200.0, stop=210.0, tp=180.0,
+                               created_at="2026-01-01T00:15:00+00:00", setup="LTF-OB"))
+    journal.update_outcomes({"BTC/USDT:USDT": 79.0, "ETH/USDT:USDT": 179.0})  # оба tp
+    by_setup = journal.stats_by_setup()
+    assert "LTF-BB" in by_setup and "LTF-OB" in by_setup
+    assert by_setup["LTF-BB"]["trades"] == 1 and by_setup["LTF-OB"]["trades"] == 1
+
+
+def test_consecutive_losses(fresh_db):
+    from app.brain import journal
+    # win, затем стопы подряд на LTF-BB, закрываем по одному звонку -> нарастающий closed_at
+    journal.record_signal(_sig(symbol="BTC/USDT:USDT", setup="LTF-BB"))
+    journal.update_outcomes({"BTC/USDT:USDT": 79.0})           # tp -> win
+    journal.record_signal(_sig(symbol="ETH/USDT:USDT", entry=200.0, stop=210.0, tp=180.0,
+                               created_at="2026-01-01T00:15:00+00:00", setup="LTF-BB"))
+    journal.update_outcomes({"ETH/USDT:USDT": 211.0})          # stop -> loss #1
+    journal.record_signal(_sig(symbol="SOL/USDT:USDT", entry=50.0, stop=55.0, tp=40.0,
+                               created_at="2026-01-01T00:30:00+00:00", setup="LTF-BB"))
+    journal.update_outcomes({"SOL/USDT:USDT": 56.0})           # stop -> loss #2
+    assert journal.consecutive_losses("LTF-BB", n=5) == 2
+    assert journal.consecutive_losses("LTF-BB", n=2) == 2      # порог достигнут -> ранний возврат
+    assert journal.consecutive_losses("1:1", n=5) == 0          # другой сетап — не задет
+
+
 def test_stats_empty(fresh_db):
     from app.brain import journal
     st = journal.stats()
@@ -64,12 +143,34 @@ def test_stats_empty(fresh_db):
 def test_semiauto_candidate_confirm(fresh_db):
     from app.brain import journal
     sid = journal.record_candidate(_sig())
-    assert fresh_db.query_one("SELECT status FROM signals WHERE id=?", (sid,))["status"] == "candidate"
+    row = fresh_db.query_one("SELECT status FROM signals WHERE id=?", (sid,))
+    assert row["status"] == "candidate"
     assert journal.stats()["open"] == 0                 # кандидат ещё не активен
     assert len(journal.open_candidates()) == 1
     assert journal.confirm_candidate(sid) is True
     assert fresh_db.query_one("SELECT status FROM signals WHERE id=?", (sid,))["status"] == "open"
     assert journal.confirm_candidate(sid) is False      # повторно — уже не кандидат
+
+
+def test_expire_stale_candidates(fresh_db):
+    from app import clock
+    from app.brain import journal
+    # старый кандидат: created_at из фикстуры (2026-01-01) — давно в прошлом относительно "сейчас"
+    sid_old = journal.record_candidate(_sig())
+    # свежий кандидат: created_at = реальное "сейчас"
+    sid_fresh = journal.record_candidate(_sig(symbol="ETH/USDT:USDT", entry=200.0, stop=210.0,
+                                              tp=180.0, created_at=clock.utcnow_iso()))
+    expired = journal.expire_stale_candidates(max_age_minutes=60)
+    assert expired == [sid_old]
+    assert fresh_db.query_one(
+        "SELECT status FROM signals WHERE id=?", (sid_old,))["status"] == "expired"
+    assert fresh_db.query_one(
+        "SELECT status FROM signals WHERE id=?", (sid_fresh,))["status"] == "candidate"
+    ev = fresh_db.query_one(
+        "SELECT event FROM signal_events WHERE signal_id=? ORDER BY id DESC LIMIT 1", (sid_old,))
+    assert ev["event"] == "expired"
+    assert journal.stats()["trades"] == 0               # result_r=NULL -> не в публичной стате
+    assert journal.expire_stale_candidates(max_age_minutes=60) == []  # идемпотентно
 
 
 def test_shadow_outcome_for_rejected(fresh_db):
@@ -143,7 +244,8 @@ def test_bars_outcome_requires_fill(fresh_db):
     # SHORT entry=100 (лимит выше рынка), рынок сразу упал и не вернулся
     journal.record_signal(_sig())                       # created 2026-01-01T00:00
     below = [(90, 91, 89, 90)] * 60                     # 60 баров без касания 100
-    res = journal.update_outcomes_from_bars({"BTC/USDT:USDT": _bars(below, start="2026-01-01T00:15:00+00:00")})
+    bars = {"BTC/USDT:USDT": _bars(below, start="2026-01-01T00:15:00+00:00")}
+    res = journal.update_outcomes_from_bars(bars)
     assert len(res) == 1 and res[0]["status"] == "expired"
     row = fresh_db.query_one("SELECT * FROM signals WHERE id=1")
     assert row["status"] == "expired" and row["result_r"] is None
@@ -153,14 +255,16 @@ def test_bars_outcome_requires_fill(fresh_db):
 def test_bars_outcome_stop_first_same_bar(fresh_db):
     """Бар задел и стоп и тейк -> консервативно стоп."""
     from app.brain import journal
-    journal.record_signal(_sig())                       # SHORT 100 / stop 110 / tp 80
+    journal.record_signal(_sig(setup="LTF-BB"))         # SHORT 100 / stop 110 / tp 80
     rows = [
         (100, 101, 99, 100),                            # fill (касание 100)
         (100, 111, 79, 90),                             # и стоп (111>110) и тейк (79<80)
     ]
-    journal.update_outcomes_from_bars({"BTC/USDT:USDT": _bars(rows, start="2026-01-01T00:15:00+00:00")})
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(rows, start="2026-01-01T00:15:00+00:00")})
     row = fresh_db.query_one("SELECT * FROM signals WHERE id=1")
     assert row["status"] == "stopped" and row["result_r"] == -1.0
+    assert res[0]["setup"] == "LTF-BB"                  # тег сетапа доступен caller'у (_on_close)
 
 
 def test_bars_outcome_chronology_tp(fresh_db):
@@ -172,7 +276,8 @@ def test_bars_outcome_chronology_tp(fresh_db):
         (95, 96, 79, 80),                               # тейк 80 (стоп не задет)
         (80, 120, 79, 115),                             # позже цена улетела за стоп — уже неважно
     ]
-    journal.update_outcomes_from_bars({"BTC/USDT:USDT": _bars(rows, start="2026-01-01T00:15:00+00:00")})
+    bars = {"BTC/USDT:USDT": _bars(rows, start="2026-01-01T00:15:00+00:00")}
+    journal.update_outcomes_from_bars(bars)
     row = fresh_db.query_one("SELECT * FROM signals WHERE id=1")
     assert row["status"] == "tp1" and row["result_r"] == 2.0
 
@@ -207,7 +312,31 @@ def test_semiauto_candidate_reject(fresh_db):
     from app.brain import journal
     sid = journal.record_candidate(_sig())
     assert journal.reject_candidate(sid) is True
-    assert fresh_db.query_one("SELECT status FROM signals WHERE id=?", (sid,))["status"] == "rejected"
+    row = fresh_db.query_one("SELECT status FROM signals WHERE id=?", (sid,))
+    assert row["status"] == "rejected"
     # событий: candidate + rejected
     n = fresh_db.query_one("SELECT COUNT(*) AS c FROM signal_events WHERE signal_id=?", (sid,))["c"]
     assert n == 2
+
+
+def test_export_public_trades_excludes_candidate_and_rejected(fresh_db):
+    from app.brain import journal
+    journal.record_signal(_sig(symbol="BTC/USDT:USDT"))              # open -> публичный
+    sid_cand = journal.record_candidate(_sig(symbol="ETH/USDT:USDT", entry=200.0, stop=210.0,
+                                             tp=180.0, created_at="2026-01-01T00:15:00+00:00"))
+    sid_rej = journal.record_candidate(_sig(symbol="SOL/USDT:USDT", entry=50.0, stop=55.0,
+                                            tp=40.0, created_at="2026-01-01T00:30:00+00:00"))
+    journal.reject_candidate(sid_rej)
+    rows = journal.export_public_trades()
+    statuses = {r["status"] for r in rows}
+    assert "candidate" not in statuses and "rejected" not in statuses
+    assert len(rows) == 1                                # только открытый BTC-сигнал
+    assert rows[0]["symbol"] == "BTC/USDT:USDT"
+    assert sid_cand and sid_rej                          # использованы (не мусорные id)
+
+
+def test_record_ledger_hash(fresh_db):
+    from app.brain import journal
+    journal.record_ledger_hash(5, "deadbeef")
+    row = fresh_db.query_one("SELECT * FROM ledger_hashes")
+    assert row["row_count"] == 5 and row["sha256"] == "deadbeef"

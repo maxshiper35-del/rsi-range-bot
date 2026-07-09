@@ -24,6 +24,21 @@ def test_backup_readable_by_separate_connection(fresh_db, tmp_path):
     assert rows == [("BTC/USDT:USDT", "LONG")]
 
 
+def test_main_records_backup_timestamp(fresh_db, monkeypatch, tmp_path):
+    """main() пишет timestamp успешного бэкапа в settings (runtime) — читает /health и
+    алерт о пропуске; backup_once замокан, чтобы не трогать реальный data/backups."""
+    from app import runtime
+    from scripts import backup_db
+
+    fake_path = tmp_path / "signals-fake.db"
+    fake_path.write_bytes(b"x")
+    monkeypatch.setattr(backup_db, "backup_once", lambda: fake_path)
+
+    assert runtime.last_backup_at() is None
+    backup_db.main()
+    assert runtime.last_backup_at() is not None
+
+
 def test_backup_rotation(fresh_db, tmp_path):
     from scripts.backup_db import backup_once
     dst_dir = tmp_path / "backups"

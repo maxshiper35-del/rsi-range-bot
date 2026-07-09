@@ -106,7 +106,44 @@ def min_impulse_atr() -> float:
 _DEFAULT_ENABLED_SETUPS = "1:1"
 
 
-def last_board_update_at() -> "str | None":
+def last_poller_tick_at() -> str | None:
+    """Метка времени последнего успешного такта poller'а — сигнал живости для /health."""
+    return _raw("last_poller_tick_at")
+
+
+def set_last_poller_tick_at(iso: str) -> None:
+    set_value("last_poller_tick_at", iso)
+
+
+def last_backup_at() -> str | None:
+    return _raw("last_backup_at")
+
+
+def set_last_backup_at(iso: str) -> None:
+    set_value("last_backup_at", iso)
+
+
+def last_backup_alert_at() -> str | None:
+    """Когда последний раз слали админу алерт о пропуске бэкапа — троттлинг (не спамить
+    на каждом такте poller, пока бэкап не появится)."""
+    return _raw("last_backup_alert_at")
+
+
+def set_last_backup_alert_at(iso: str) -> None:
+    set_value("last_backup_alert_at", iso)
+
+
+def trackrecord_last_week() -> str | None:
+    """ISO-неделя (YYYY-Www) последней публикации трек-рекорда в канал — не постить дважды
+    за одну календарную неделю."""
+    return _raw("trackrecord_last_week")
+
+
+def set_trackrecord_last_week(week_key: str) -> None:
+    set_value("trackrecord_last_week", week_key)
+
+
+def last_board_update_at() -> str | None:
     return _raw("last_board_update_at")
 
 
@@ -114,12 +151,12 @@ def set_last_board_update_at(iso: str) -> None:
     set_value("last_board_update_at", iso)
 
 
-def live_board_message_id() -> "int | None":
+def live_board_message_id() -> int | None:
     v = _raw("live_board_message_id")
     return int(v) if v else None            # "" тоже трактуем как «не установлено»
 
 
-def set_live_board_message_id(message_id: "int | None") -> None:
+def set_live_board_message_id(message_id: int | None) -> None:
     """message_id=None очищает — следующий цикл живого табло создаст новый закреплённый
     пост вместо повторных попыток редактировать протухшее/удалённое сообщение."""
     set_value("live_board_message_id", message_id if message_id is not None else "")
@@ -142,14 +179,25 @@ def price_usdt() -> float:
     return float(v) if v is not None else get_settings().sub_price_usdt
 
 
-def sub_days() -> int:
+def sub_days() -> float:
+    """Длительность подписки в днях. float (не int) — админ может выставить дробный срок
+    (напр. тестовая подписка на несколько часов: /price days 0.2083333333333333)."""
     v = _raw("sub_days")
-    return int(v) if v is not None else get_settings().sub_days
+    return float(v) if v is not None else get_settings().sub_days
 
 
 def free_per_week() -> int:
     v = _raw("free_signals_per_week")
     return int(v) if v is not None else get_settings().free_signals_per_week
+
+
+def trial_days() -> int:
+    """Длительность триала (задача 20) — короткий полный доступ для новых юзеров.
+    Нет .env-фолбэка (не настройка через Settings, как остальные) — дефолт 5 дней
+    зашит здесь же, по рекомендации бенчмарков конверсии (firstpagesage.com/1capture.io:
+    time-limited триал 3-7 дней даёт на порядок выше конверсию, чем бессрочный free-тир)."""
+    v = _raw("trial_days")
+    return int(v) if v is not None else 5
 
 
 def effective() -> dict:
@@ -169,4 +217,6 @@ def effective() -> dict:
         "price_usdt": price_usdt(),
         "sub_days": sub_days(),
         "free_per_week": free_per_week(),
+        "cornix_enabled": cornix_block_enabled(),
+        "trial_days": trial_days(),
     }

@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from app.config import get_settings
 
@@ -76,7 +77,15 @@ def upsert(table: str, keys: dict[str, Any], values: dict[str, Any]) -> None:
 
 
 def init_db(migrations_dir: Path = Path("migrations")) -> None:
-    """Прогон .sql-миграций по порядку, идемпотентно через schema_migrations."""
+    """Прогон .sql-миграций по порядку, идемпотентно через schema_migrations.
+
+    Каждая миграция — ОДНА атомарная транзакция (DDL-скрипт + запись в schema_migrations):
+    BEGIN/COMMIT встроены В ТЕКСТ скрипта (executescript иначе не транзакционен — коммитит
+    только ПРЕДШЕСТВУЮЩУЮ висящую транзакцию, но не оборачивает свои же statements).
+    Падение посреди .sql -> полный ROLLBACK, схема не остаётся частично применённой,
+    и на следующем рестарте миграция просто повторится с чистого листа, а не упадёт
+    на 'table already exists' от уже применённой половины прошлого прогона.
+    """
     conn = get_conn()
     conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations "
                  "(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))")
@@ -85,7 +94,13 @@ def init_db(migrations_dir: Path = Path("migrations")) -> None:
     for path in sorted(migrations_dir.glob("*.sql")):
         if path.name in applied:
             continue
+        script = path.read_text(encoding="utf-8")
+        name_escaped = path.name.replace("'", "''")     # свои файлы миграций, не внешний ввод
+        full = (f"BEGIN IMMEDIATE;\n{script}\n"
+               f"INSERT INTO schema_migrations(name) VALUES ('{name_escaped}');\nCOMMIT;")
         with _write_lock:
-            conn.executescript(path.read_text(encoding="utf-8"))
-            conn.execute("INSERT INTO schema_migrations(name) VALUES (?)", (path.name,))
-            conn.commit()
+            try:
+                conn.executescript(full)
+            except Exception:
+                conn.rollback()       # BEGIN мог открыться, COMMIT — нет; закрыть транзакцию явно
+                raise

@@ -10,6 +10,7 @@ USDT через CryptoBot — задел на будущее (создание �
 """
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from app import clock, db
@@ -25,7 +26,8 @@ def register_user(tg_id: int, username: str | None = None, lang: str = "ru") -> 
     db.execute(
         "INSERT INTO users(tg_id, username, lang, tier, joined_at, updated_at) "
         "VALUES(?,?,?, 'free', ?, ?) "
-        "ON CONFLICT(tg_id) DO UPDATE SET username=excluded.username, updated_at=excluded.updated_at",
+        "ON CONFLICT(tg_id) DO UPDATE SET "
+        "username=excluded.username, updated_at=excluded.updated_at",
         (tg_id, username, lang, now, now))
 
 
@@ -47,7 +49,7 @@ def active_subscriber_ids() -> list[int]:
 
 
 def grant_subscription(tg_id: int, method: str, amount: float, currency: str,
-                       days: int, invoice_id: str) -> bool:
+                       days: float, invoice_id: str) -> bool:
     """Идемпотентно выдать/продлить подписку. -> True если применено, False если дубль платежа.
 
     paid_until продлевается от максимума (сейчас, текущий paid_until) на days.
@@ -61,14 +63,81 @@ def grant_subscription(tg_id: int, method: str, amount: float, currency: str,
     with db.transaction() as conn:
         conn.execute(
             "INSERT INTO payments(tg_id, method, amount, currency, days, status, invoice_id, "
-            "telegram_payment_charge_id, created_at, paid_at) VALUES(?,?,?,?,?, 'paid', ?, ?, ?, ?)",
+            "telegram_payment_charge_id, created_at, paid_at) "
+            "VALUES(?,?,?,?,?, 'paid', ?, ?, ?, ?)",
             (tg_id, method, amount, currency, days, invoice_id, invoice_id, now, now))
         _extend_and_activate(conn, tg_id, days)
     return True
 
 
-def _extend_and_activate(conn, tg_id: int, days: int) -> str:
-    """Продлить подписку от max(сейчас, текущий paid_until) на days; tier=paid. -> new paid_until."""
+def grant_trial(tg_id: int, days: float) -> bool:
+    """Триал: короткий полный доступ для СОВСЕМ новых юзеров, один раз. НЕ платёж — не пишет
+    в payments, не награждает реферала (задача 22) просто тем, что не вызывает эту логику.
+
+    Условие — trial_granted_at IS NULL И paid_until IS NULL (никогда не было НИКАКОЙ
+    подписки, включая истёкшую — иначе лапсед-юзер получал бы триал заново при каждом
+    возврате). Атомарная условная UPDATE + rowcount — тот же TOCTOU-safe паттерн, что
+    journal._resolve_candidate: конкурентные /start не смогут оба «выиграть».
+    -> True если применено."""
+    register_user(tg_id)
+    now = clock.utcnow_iso()
+    with db.transaction() as conn:
+        cur = conn.execute(
+            "UPDATE users SET trial_granted_at=? WHERE tg_id=? "
+            "AND trial_granted_at IS NULL AND paid_until IS NULL",
+            (now, tg_id))
+        if cur.rowcount != 1:
+            return False
+        _extend_and_activate(conn, tg_id, days)
+    return True
+
+
+def create_promo(code: str, days: int, max_uses: int | None = None,
+                 expires_at: str | None = None) -> None:
+    """Создать промокод на +days подписки. code сохраняется как есть (регистр — на совести
+    вызывающего кода, /addpromo); max_uses=None — без лимита, expires_at=None — бессрочный."""
+    db.execute(
+        "INSERT INTO promo_codes(code, days, max_uses, used_count, expires_at, created_at) "
+        "VALUES(?,?,?,0,?,?)",
+        (code, days, max_uses, expires_at, clock.utcnow_iso()))
+
+
+def redeem_promo(tg_id: int, code: str) -> dict:
+    """Погасить промокод. -> {"ok": bool, "days": int|None, "reason": str|None}; reason при
+    ok=False: not_found|expired|exhausted|already_used. НЕ платёж — не пишет в payments, не
+    награждает реферала (задача 22), как и триал. Дедуп через UNIQUE(code, tg_id) в
+    promo_redemptions — конкурентные попытки применить дважды не смогут обе выиграть."""
+    row = db.query_one("SELECT * FROM promo_codes WHERE code=?", (code,))
+    if row is None:
+        return {"ok": False, "days": None, "reason": "not_found"}
+    now = clock.utcnow_iso()
+    if row["expires_at"] and row["expires_at"] < now:
+        return {"ok": False, "days": None, "reason": "expired"}
+    # already_used ПЕРЕД exhausted: иначе при низком max_uses (напр. 1) повторная попытка
+    # ТОГО ЖЕ юзера маскируется под "код исчерпан" вместо честного "вы уже применяли" —
+    # найдено живой проверкой, не юнит-тестами (max_uses=None в тестах не бил по этой ветке)
+    if db.query_one("SELECT 1 FROM promo_redemptions WHERE code=? AND tg_id=?", (code, tg_id)):
+        return {"ok": False, "days": None, "reason": "already_used"}
+    if row["max_uses"] is not None and row["used_count"] >= row["max_uses"]:
+        return {"ok": False, "days": None, "reason": "exhausted"}
+    register_user(tg_id)
+    try:
+        with db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO promo_redemptions(code, tg_id, redeemed_at) VALUES(?,?,?)",
+                (code, tg_id, now))
+            conn.execute(
+                "UPDATE promo_codes SET used_count = used_count + 1 WHERE code=?", (code,))
+            _extend_and_activate(conn, tg_id, row["days"])
+    except sqlite3.IntegrityError:
+        return {"ok": False, "days": None, "reason": "already_used"}
+    return {"ok": True, "days": row["days"], "reason": None}
+
+
+def _extend_and_activate(conn, tg_id: int, days: float) -> str:
+    """Продлить подписку от max(сейчас, текущий paid_until) на days; tier=paid.
+
+    -> new paid_until."""
     now = clock.utcnow_iso()
     u = get_user(tg_id)
     base = u["paid_until"] if (u and u["paid_until"] and u["paid_until"] > now) else now
@@ -105,7 +174,7 @@ def free_full_last_week(tg_id: int) -> int:
     since = (_now_dt() - timedelta(days=7)).isoformat()
     return db.query_one(
         "SELECT COUNT(*) AS c FROM deliveries WHERE tg_id=? AND kind='full' AND created_at >= ?",
-        (tg_id, since))["c"]
+        (tg_id, since))["c"]  # type: ignore[index]
 
 
 def plan_recipients(signal_id: int, free_limit: int, admin_ids) -> list:
@@ -204,8 +273,8 @@ def create_cryptobot_invoice(tg_id: int, days: int, amount: float | None = None)
     inv_id = str(res["invoice_id"])
     pay_url = res.get("bot_invoice_url") or res.get("pay_url") or res.get("mini_app_invoice_url")
     db.execute(
-        "INSERT INTO payments(tg_id, method, amount, currency, days, status, invoice_id, created_at) "
-        "VALUES(?,?,?,?,?, 'pending', ?, ?)",
+        "INSERT INTO payments(tg_id, method, amount, currency, days, status, "
+        "invoice_id, created_at) VALUES(?,?,?,?,?, 'pending', ?, ?)",
         (tg_id, "cryptobot", float(amount), "USDT", days, inv_id, clock.utcnow_iso()))
     return pay_url, inv_id
 
@@ -323,6 +392,20 @@ def set_acquisition_source(tg_id: int, source: str) -> None:
                (source, tg_id))
 
 
+def acquisition_breakdown() -> dict:
+    """Разбивка по acquisition_source для /growth: сколько приглашено, сколько РЕАЛЬНО
+    оплатили. "Оплатили" — EXISTS в payments(status='paid'), НЕ paid_until IS NOT NULL:
+    триал (grant_trial) и промокоды (redeem_promo) тоже ставят paid_until, но не пишут в
+    payments — иначе конверсия дашборда считала бы бесплатный триал платежом.
+    -> {source: {"total": int, "paid": int}}, source="—" — без метки (органика)."""
+    rows = db.query(
+        "SELECT COALESCE(acquisition_source, '—') AS source, COUNT(*) AS total, "
+        "SUM(CASE WHEN EXISTS (SELECT 1 FROM payments p WHERE p.tg_id = users.tg_id "
+        "AND p.status='paid') THEN 1 ELSE 0 END) AS paid "
+        "FROM users GROUP BY source ORDER BY total DESC")
+    return {r["source"]: {"total": r["total"], "paid": r["paid"]} for r in rows}
+
+
 def admin_revoke(tg_id: int) -> None:
     """Снять подписку (tier=free, paid_until в прошлое)."""
     db.execute("UPDATE users SET tier='free', paid_until=?, updated_at=? WHERE tg_id=?",
@@ -330,8 +413,15 @@ def admin_revoke(tg_id: int) -> None:
 
 
 def user_counts() -> dict:
-    total = db.query_one("SELECT COUNT(*) AS c FROM users")["c"]
+    total = db.query_one("SELECT COUNT(*) AS c FROM users")["c"]  # type: ignore[index]
     return {"total": total, "paid": len(active_subscriber_ids())}
+
+
+def _fmt_days(days: float) -> str:
+    """Человекочитаемая длительность: дробные дни (тестовые тарифы) -> часы."""
+    if days == int(days):
+        return f"{int(days)} дней"
+    return f"{round(days * 24)} часов"
 
 
 def subscription_status_text(tg_id: int) -> str:
@@ -342,9 +432,10 @@ def subscription_status_text(tg_id: int) -> str:
         "💳 Подписка RSI Range Signals\n"
         "────────────────────\n"
         "Все сигналы + автоведение журнала.\n"
-        f"Цена: {runtime.price_stars()}⭐ Telegram Stars за {runtime.sub_days()} дней.\n"
+        f"Цена: {runtime.price_stars()}⭐ Telegram Stars за {_fmt_days(runtime.sub_days())}.\n"
     )
     u = get_user(tg_id)
     if u and is_paid(tg_id):
-        return head + f"\n✅ Подписка активна до {u['paid_until'][:10]}. Можно продлить кнопкой ниже."
+        return head + (f"\n✅ Подписка активна до {u['paid_until'][:10]}. "
+                       "Можно продлить кнопкой ниже.")
     return head + "\nНажми кнопку ниже, чтобы оплатить через Telegram Stars 👇"
