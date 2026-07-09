@@ -113,3 +113,11 @@ def test_display_leverage(fresh_db):
     runtime.set_value("display_leverage", "мусор")      # битое значение -> дефолт, не падение
     assert runtime.display_leverage() == 10.0
     assert runtime.effective()["display_leverage"] == 10.0
+
+
+def test_signal_chart_enabled_flag(fresh_db):
+    from app import runtime
+    assert runtime.signal_chart_enabled() is False      # фича-флаг: дефолт выкл
+    runtime.set_value("signal_chart_enabled", "1")
+    assert runtime.signal_chart_enabled() is True
+    assert runtime.effective()["signal_chart_enabled"] is True

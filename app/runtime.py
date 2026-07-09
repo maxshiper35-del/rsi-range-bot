@@ -200,6 +200,13 @@ def trial_days() -> int:
     return int(v) if v is not None else 5
 
 
+def signal_chart_enabled() -> bool:
+    """Прикладывать ли к посту сигнала PNG-карту (свечи + зоны входа/стопа/тейков).
+    Дефолт выкл: включается из админки после живой проверки рендера (фича-флаг
+    из брифа — новый формат постов сначала за флагом)."""
+    return (_raw("signal_chart_enabled") or "0").lower() in _TRUE
+
+
 def display_leverage() -> float:
     """Плечо для ИЛЛЮСТРАЦИИ результата в постах канала (×N; 0 — строка выключена).
     Реального плеча бот не знает — сделки не исполняет, каждый выбирает своё;
@@ -232,4 +239,5 @@ def effective() -> dict:
         "cornix_enabled": cornix_block_enabled(),
         "trial_days": trial_days(),
         "display_leverage": display_leverage(),
+        "signal_chart_enabled": signal_chart_enabled(),
     }

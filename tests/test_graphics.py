@@ -66,3 +66,53 @@ def test_render_weekly_card_produces_valid_png():
     assert isinstance(png, bytes)
     assert png[:8] == b"\x89PNG\r\n\x1a\n"           # PNG magic bytes
     assert len(png) > 10_000                          # не пустая/битая картинка
+
+
+_CHART_DATA = {
+    "signal_id": 128,
+    "symbol": "BTC/USDT:USDT",
+    "side": "LONG",
+    "timeframe": "1h",
+    "entry": 104250.5,
+    "stop": 103180.0,
+    "tps": [106670.0],
+    "candles": [(104000 + i * 10, 104120 + i * 10, 103900 + i * 10, 104080 + i * 10)
+                for i in range(56)],
+    "rr": 2.26,
+    "confidence_pct": 82.0,
+    "updated_label": "10.07.2026 14:30 UTC",
+}
+
+
+def test_build_signal_chart_html_structure():
+    html = graphics.build_signal_chart_html(_CHART_DATA)
+    assert "<svg" in html and "Сигнал #128" in html
+    assert html.count('class="c-body"') == 56           # тело каждой свечи
+    assert html.count('class="zone"') == 2              # красная (стоп) + зелёная (тейк)
+    assert html.count('class="pill"') == 3              # Вход / Стоп / Тейк
+    # полные цены в подписях уровней ({:g} срезал бы 104250.5 до 104250)
+    assert "104250.5" in html and "103180" in html and "106670" in html
+    assert "LONG" in html and 'side-pill long' in html
+    assert "R/R 1:2.3" in html and "82%" in html
+    assert "Не финансовый совет" in html and "@rsi_range" in html
+
+
+def test_build_signal_chart_html_short_side_and_escape():
+    data = dict(_CHART_DATA, side="SHORT", symbol="<XSS>/USDT")
+    html = graphics.build_signal_chart_html(data)
+    assert 'side-pill short' in html
+    assert "<XSS>" not in html and "&lt;XSS&gt;" in html
+
+
+def test_build_signal_chart_html_multiple_tps():
+    data = dict(_CHART_DATA, tps=[105000.0, 106000.0, 107000.0])
+    html = graphics.build_signal_chart_html(data)
+    assert "TP1" in html and "TP2" in html and "TP3" in html
+    assert html.count('class="pill"') == 5              # Вход + Стоп + 3 TP
+
+
+def test_render_signal_chart_produces_valid_png():
+    pytest.importorskip("playwright")
+    png = graphics.render_signal_chart(_CHART_DATA)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    assert len(png) > 10_000

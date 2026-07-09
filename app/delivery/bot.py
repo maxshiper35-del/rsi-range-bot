@@ -7,6 +7,7 @@ SMC-интеграция реализована чистыми функциям�
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -394,6 +395,27 @@ def fill_is_fresh(c: dict, now: datetime, factor: float = 2.0, slack: float = 90
         filled = filled.replace(tzinfo=timezone.utc)
     tf_sec = _TF_SECONDS_VIEW.get(str(c.get("timeframe")), 3600)
     return (now - filled).total_seconds() <= factor * tf_sec + slack
+
+
+def caption_fits(html_text: str, limit: int = 1024) -> bool:
+    """Лимит Telegram на подпись к фото — 1024 символа ВИДИМОГО текста (теги не считаются)."""
+    return len(re.sub(r"<[^>]+>", "", html_text)) <= limit
+
+
+def build_signal_chart_data(sig: Signal, sid: int, df: pd.DataFrame,
+                            updated_label: str, max_bars: int = 56) -> dict:
+    """Собрать вход для graphics.build_signal_chart_html из Signal + свежих баров.
+    Чистая функция — тестируется без биржи и браузера."""
+    candles = df[["open", "high", "low", "close"]].tail(max_bars).values.tolist()
+    if not candles:
+        raise ValueError(f"нет баров для графика {sig.symbol} {sig.timeframe}")
+    return {
+        "signal_id": sid, "symbol": sig.symbol, "side": sig.side.value,
+        "timeframe": sig.timeframe, "entry": sig.entry, "stop": sig.stop,
+        "tps": list(sig.take_profits), "candles": candles,
+        "rr": sig.risk_reward, "confidence_pct": sig.confidence * 100,
+        "updated_label": updated_label,
+    }
 
 
 def should_refresh_board(last_update: str | None, now_iso: str, hours: int = 24) -> bool:
@@ -1139,6 +1161,8 @@ def main() -> None:
             [b(text=f"🤖 Режим: {eff['signal_mode']}", callback_data="adm_modetoggle"),
              b(text="🔕 Cornix выкл" if not eff["cornix_enabled"] else "🔔 Cornix вкл",
                callback_data="adm_cornixtoggle")],
+            [b(text="🖼 График сигнала: вкл" if eff["signal_chart_enabled"]
+               else "🖼 График сигнала: выкл", callback_data="adm_charttoggle")],
             [b(text="⚙️ Стратегия", callback_data="adm_nav_strategy"),
              b(text="💰 Цены", callback_data="adm_nav_prices")],
             [b(text="📈 Символы", callback_data="adm_nav_symbols")],
@@ -1528,6 +1552,9 @@ def main() -> None:
         elif data == "adm_cornixtoggle":
             await asyncio.to_thread(runtime.set_value, "cornix_block_enabled",
                                     "0" if runtime.cornix_block_enabled() else "1")
+        elif data == "adm_charttoggle":
+            await asyncio.to_thread(runtime.set_value, "signal_chart_enabled",
+                                    "0" if runtime.signal_chart_enabled() else "1")
         elif data == "adm_poststats":
             ch = runtime.signals_channel()
             if ch:
@@ -1610,6 +1637,14 @@ def main() -> None:
         await asyncio.to_thread(runtime.set_value, "symbols", ",".join(syms))
         await m.answer("Символы: " + ", ".join(syms))
 
+    def _signal_chart_png(sig, sid):
+        # синхронно (ccxt + Playwright) — вызывать только через asyncio.to_thread
+        from app.data.market_data import fetch_closed_ohlcv
+        df = fetch_closed_ohlcv(sig.symbol, sig.timeframe, limit=57)
+        data = build_signal_chart_data(
+            sig, sid, df, datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC"))
+        return graphics.render_signal_chart(data)
+
     async def _broadcast(sig, sid):
         try:
             # runtime, не cfg: иначе смена режима из админки без рестарта не меняла
@@ -1632,8 +1667,24 @@ def main() -> None:
                     ch_text += templates.esc(format_cornix_block(sig))
             else:
                 ch_text = teaser
+            # карта сигнала (фича-флаг): свечи + зоны входа/стопа/тейков; любой сбой
+            # рендера/биржи не блокирует пост — падаем обратно на текст
+            photo = None
+            if runtime.channel_mode() == "full" and runtime.signal_chart_enabled():
+                try:
+                    photo = await asyncio.to_thread(_signal_chart_png, sig, sid)
+                except Exception as e:                 # noqa: BLE001
+                    log.warning("график сигнала #%s: %s", sid, e)
             try:
-                await bot.send_message(channel, ch_text, parse_mode="HTML")
+                if photo is not None and caption_fits(ch_text):
+                    await bot.send_photo(
+                        channel, BufferedInputFile(photo, filename=f"signal_{sid}.png"),
+                        caption=ch_text, parse_mode="HTML")
+                else:
+                    if photo is not None:               # подпись не влезла — фото отдельно
+                        await bot.send_photo(
+                            channel, BufferedInputFile(photo, filename=f"signal_{sid}.png"))
+                    await bot.send_message(channel, ch_text, parse_mode="HTML")
             except Exception as e:                     # noqa: BLE001 — канал не роняет рассылку
                 log.warning("пост в канал %s: %s", channel, e)
         # воронка: админы/платные -> полный; free -> полный до лимита/нед, дальше тизер

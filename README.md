@@ -14,7 +14,7 @@ Telegram-бот торговых сигналов по крипто-фьючер
 ## Статус: работает вживую
 
 Бот запущен, ведёт канал, принимает подписки (Stars + USDT), полностью управляется из Telegram —
-кнопками или командами, без правки `.env` и рестартов. 174 теста, все зелёные.
+кнопками или командами, без правки `.env` и рестартов. 181 тест, все зелёные.
 
 ## Архитектура
 
@@ -34,7 +34,7 @@ app/
 ├── delivery/
 │   ├── bot.py                 # aiogram: кнопки+команды, рассылка, канал, админ-панель, FSM-диалоги
 │   ├── templates.py           # единый HTML-рендерер постов (сигнал/fill/expired/результат)
-│   ├── graphics.py            # PNG-карточка недели (HTML/CSS -> Playwright/Chromium)
+│   ├── graphics.py            # PNG: карточка недели + карта сигнала (HTML/CSS+SVG -> Chromium)
 │   └── payments.py            # подписка: Stars (авто), USDT (авто через CryptoBot API либо полу-ручной)
 ├── runtime.py                 # настройки поверх .env, правятся из Telegram без рестарта
 ├── db.py                      # SQLite WAL, соединение-на-поток, миграции атомарны (BEGIN/COMMIT)
@@ -53,7 +53,7 @@ pip install -r requirements.txt
 make install-playwright     # headless Chromium для карточки недели (разово)
 cp .env.example .env        # заполни TELEGRAM_BOT_TOKEN и TELEGRAM_ADMIN_IDS
 make init-db
-make test                    # 174 теста, секреты не нужны (conftest подставляет dummy)
+make test                    # 181 тест, секреты не нужны (conftest подставляет dummy)
 make install-hooks           # git pre-commit: lint+typecheck+test перед каждым коммитом
 make run                     # запуск (или через launchd — см. ниже)
 ```
@@ -80,7 +80,8 @@ launchctl kickstart -k "gui/$(id -u)/com.rsirange.bot"
 1. **Poller** (`market_data.run_poller`) на закрытии каждой 15m-свечи сканирует watchlist
    (`SMCEngine.analyze`), находит сетапы.
 2. **Режим `auto`** (по умолчанию): сигнал сразу пишется в журнал и рассылается — в канал
-   (полный пост) + подписчикам (по тиру: платные/админы получают всё, free — лимит/нед, дальше
+   (полный пост; при включённом флаге `signal_chart_enabled` — фото-карта сигнала: свечи +
+   зоны входа/стопа/тейков, тумблер «🖼 График сигнала» в /admin) + подписчикам (по тиру: платные/админы получают всё, free — лимит/нед, дальше
    тизер). **Режим `semiauto`**: сигнал становится кандидатом, ждёт подтверждения оператора
    (форвард-эксперимент «человек vs механика», код есть — сейчас выключен).
 3. Каждый такт `journal.update_outcomes_from_bars` скорит исходы по свежим барам (обязательное
@@ -123,7 +124,7 @@ launchctl kickstart -k "gui/$(id -u)/com.rsirange.bot"
 ## Тестирование
 
 ```bash
-make test        # 174 теста: детекторы, сетапы, бэктест, журнал, платежи, runtime, бот, графика
+make test        # 181 тест: детекторы, сетапы, бэктест, журнал, платежи, runtime, бот, графика
 make lint         # ruff (весь репозиторий)
 make typecheck    # mypy app
 make backtest     # walk-forward прогон на живых/синтетических данных

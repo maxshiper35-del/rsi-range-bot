@@ -267,3 +267,146 @@ def render_html_to_png(html: str, width: int = _CARD_WIDTH, scale: int = 2) -> b
 
 def render_weekly_card(data: dict) -> bytes:
     return render_html_to_png(build_weekly_card_html(data))
+
+
+# ---------------------------------------------------------------------------
+# График сигнала: свечи + зоны входа/стопа/тейков (SVG внутри той же HTML-темы).
+# mplfinance сознательно не используется — matplotlib забракован эстетически
+# (см. шапку файла); свечи рисуются своим SVG в стиле карточки недели.
+# ---------------------------------------------------------------------------
+
+_CHART_STYLE = """
+  .chart-card { padding: 22px 24px 18px; }
+  .chart-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  .chart-title { display: flex; align-items: center; gap: 12px; }
+  .side-pill {
+    padding: 6px 14px; border-radius: 9px; font-size: 14px; font-weight: 800; letter-spacing: 0.04em;
+  }
+  .side-pill.long { background: rgba(74,222,156,0.14); border: 1px solid rgba(74,222,156,0.45); color: #6FE3AC; }
+  .side-pill.short { background: rgba(241,101,101,0.13); border: 1px solid rgba(241,101,101,0.45); color: #F58787; }
+  .chart-symbol { font-size: 19px; font-weight: 700; color: #F1F2F5; letter-spacing: -0.2px; }
+  .chart-tf { font-size: 14px; font-weight: 600; color: #6B7280; }
+  .chart-meta { font-size: 13.5px; font-weight: 600; color: #A6ABB5; font-variant-numeric: tabular-nums; }
+  svg text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+"""
+
+_CHART_BODY = Template("""
+<div class="canvas"><div class="wrap">
+
+  <div class="header">
+    <div class="brand">
+      <div class="mark">R</div>
+      <div class="brand-text">
+        <div class="name">RSI Range Signals</div>
+        <div class="handle">@rsi_range</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="eyebrow">Карта сигнала</div>
+      <div class="period">Сигнал #$signal_id</div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="card chart-card">
+    <div class="chart-head">
+      <div class="chart-title">
+        <span class="side-pill $side_class">$side</span>
+        <span class="chart-symbol">$symbol</span>
+        <span class="chart-tf">$timeframe</span>
+      </div>
+      <div class="chart-meta">$meta</div>
+    </div>
+    $svg
+  </div>
+
+  <div class="footer">
+    <div class="footer-left">⚠️ Не финансовый совет · риск 1–2% на сделку</div>
+    <div class="footer-right">@rsi_range · $updated</div>
+  </div>
+
+</div></div>
+""")
+
+_GREEN, _RED, _INDIGO = "#4ADE9C", "#F16565", "#9BA8FA"
+
+
+def _price_label(x: float) -> str:
+    """Полная запись цены без экспоненты и потери точности ({:g} режет BTC>100k)."""
+    return f"{float(x):.8f}".rstrip("0").rstrip(".")
+
+
+def _chart_svg(candles: list, entry: float, stop: float, tps: list,
+               w: int = 1112, h: int = 560, gutter: int = 176) -> str:
+    """SVG свечного графика с зонами: красная entry<->stop, зелёная entry<->дальний TP,
+    уровни пунктиром + подписи-пилюли в правом жёлобе. candles: [(o,h,l,c), ...].
+    Чистая функция — тестируется без браузера."""
+    plot_w = w - gutter
+    levels = [entry, stop, *tps]
+    lo = min(min(c[2] for c in candles), *levels)
+    hi = max(max(c[1] for c in candles), *levels)
+    pad = (hi - lo) * 0.06 or 1.0
+    lo, hi = lo - pad, hi + pad
+
+    def y(p: float) -> float:
+        return round((hi - p) / (hi - lo) * (h - 24) + 12, 2)
+
+    parts = []
+    # зоны риска/цели на всю ширину плота (под свечами)
+    far_tp = max(tps, key=lambda t: abs(t - entry))
+    for a, b, color, op in ((entry, stop, _RED, 0.09), (entry, far_tp, _GREEN, 0.07)):
+        top, bot = min(y(a), y(b)), max(y(a), y(b))
+        parts.append(f'<rect class="zone" x="0" y="{top}" width="{plot_w}" '
+                     f'height="{max(bot - top, 1):.2f}" fill="{color}" fill-opacity="{op}"/>')
+    # свечи
+    slot = plot_w / len(candles)
+    bw = max(slot * 0.62, 2.0)
+    for i, (o, hi_, lo_, c) in enumerate(candles):
+        color = _GREEN if c >= o else _RED
+        cx = round(i * slot + slot / 2, 2)
+        parts.append(f'<line x1="{cx}" y1="{y(hi_)}" x2="{cx}" y2="{y(lo_)}" '
+                     f'stroke="{color}" stroke-width="1.4" stroke-opacity="0.85"/>')
+        top, bot = min(y(o), y(c)), max(y(o), y(c))
+        parts.append(f'<rect class="c-body" x="{cx - bw / 2:.2f}" y="{top}" width="{bw:.2f}" '
+                     f'height="{max(bot - top, 1.4):.2f}" rx="1.5" fill="{color}"/>')
+    # уровни: вход сплошным, стоп/тейки пунктиром + подписи-пилюли справа
+    labels = [("Вход", entry, _INDIGO, "none"), ("Стоп", stop, _RED, "6 5")]
+    labels += [(f"TP{i}" if len(tps) > 1 else "Тейк", tp, _GREEN, "6 5")
+               for i, tp in enumerate(tps, 1)]
+    for name, price, color, dash in labels:
+        yy = y(price)
+        dash_attr = f' stroke-dasharray="{dash}"' if dash != "none" else ""
+        parts.append(f'<line x1="0" y1="{yy}" x2="{plot_w}" y2="{yy}" stroke="{color}" '
+                     f'stroke-width="1.6" stroke-opacity="0.9"{dash_attr}/>')
+        ly = min(max(yy - 14, 4), h - 32)               # пилюля не вылезает за края
+        parts.append(
+            f'<rect class="pill" x="{plot_w + 10}" y="{ly:.2f}" width="{gutter - 16}" height="28" '
+            f'rx="8" fill="{color}" fill-opacity="0.13" stroke="{color}" stroke-opacity="0.45"/>'
+            f'<text x="{plot_w + 22}" y="{ly + 19:.2f}" font-size="13.5" font-weight="700" '
+            f'fill="{color}">{name}  {_price_label(price)}</text>')
+    return (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" '
+            f'xmlns="http://www.w3.org/2000/svg">{"".join(parts)}</svg>')
+
+
+def build_signal_chart_html(data: dict) -> str:
+    """data: {signal_id, symbol, side ('LONG'/'SHORT'), timeframe, entry, stop,
+    tps: list[float], candles: [(o,h,l,c),...], rr, confidence_pct, updated_label}
+    -> заполненный HTML. Чистая функция — тестируется без Playwright/браузера."""
+    svg = _chart_svg(data["candles"], data["entry"], data["stop"], list(data["tps"]))
+    body = _CHART_BODY.substitute(
+        signal_id=int(data["signal_id"]),
+        side=_esc(data["side"]),
+        side_class="long" if data["side"] == "LONG" else "short",
+        symbol=_esc(data["symbol"]),
+        timeframe=_esc(data["timeframe"]),
+        meta=_esc(f"R/R 1:{data['rr']:.1f} · уверенность {data['confidence_pct']:.0f}% · "
+                  f"{len(data['candles'])} закрытых баров"),
+        svg=svg,
+        updated=_esc(data["updated_label"]),
+    )
+    return f"<style>{_STYLE}{_CHART_STYLE}</style>{body}"
+
+
+def render_signal_chart(data: dict) -> bytes:
+    return render_html_to_png(build_signal_chart_html(data))

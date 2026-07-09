@@ -512,3 +512,31 @@ def test_send_raw_telegram_message_posts_to_bot_api(monkeypatch):
     url, data = calls[0]
     assert url == "https://api.telegram.org/botTOK/sendMessage"
     assert b"123" in data
+
+
+def test_caption_fits():
+    assert bot.caption_fits("<b>короткая подпись</b>") is True
+    # теги не считаются: 1000 видимых символов + жирные теги -> влезает
+    assert bot.caption_fits("<b>" + "x" * 1000 + "</b>") is True
+    assert bot.caption_fits("y" * 1025) is False
+
+
+def test_build_signal_chart_data():
+    import pandas as pd
+
+    from app.core.signal_engine import Side, Signal
+    sig = Signal(symbol="BTC/USDT:USDT", side=Side.LONG, timeframe="1h", entry=104250.5,
+                 stop=103180.0, take_profits=[106670.0], risk_reward=2.26, confidence=0.82,
+                 reasons=["r"], created_at="2026-07-10T00:00:00+00:00",
+                 indicators_snapshot={"setup": "1:1"})
+    df = pd.DataFrame({"open": range(100), "high": range(1, 101), "low": range(100),
+                       "close": range(100), "volume": [1.0] * 100})
+    data = bot.build_signal_chart_data(sig, 7, df, "10.07.2026", max_bars=56)
+    assert data["signal_id"] == 7 and data["side"] == "LONG"
+    assert len(data["candles"]) == 56                   # хвост, не все 100
+    assert data["candles"][-1][0] == 99                 # последние бары, не первые
+    assert data["tps"] == [106670.0] and data["confidence_pct"] == 82.0
+    # пустой df -> явная ошибка (caller ловит и падает на текстовый пост)
+    import pytest
+    with pytest.raises(ValueError):
+        bot.build_signal_chart_data(sig, 7, df.iloc[0:0], "10.07.2026")
