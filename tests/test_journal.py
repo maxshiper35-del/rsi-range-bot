@@ -253,7 +253,7 @@ def test_bars_outcome_requires_fill(fresh_db):
 
 
 def test_bars_outcome_stop_first_same_bar(fresh_db):
-    """Бар задел и стоп и тейк -> консервативно стоп."""
+    """Бар задел и стоп и тейк -> консервативно стоп. Fill идёт отдельным событием."""
     from app.brain import journal
     journal.record_signal(_sig(setup="LTF-BB"))         # SHORT 100 / stop 110 / tp 80
     rows = [
@@ -264,7 +264,32 @@ def test_bars_outcome_stop_first_same_bar(fresh_db):
         {"BTC/USDT:USDT": _bars(rows, start="2026-01-01T00:15:00+00:00")})
     row = fresh_db.query_one("SELECT * FROM signals WHERE id=1")
     assert row["status"] == "stopped" and row["result_r"] == -1.0
-    assert res[0]["setup"] == "LTF-BB"                  # тег сетапа доступен caller'у (_on_close)
+    assert [c["status"] for c in res] == ["filled", "stopped"]  # fill хронологически первым
+    assert res[1]["setup"] == "LTF-BB"                  # тег сетапа доступен caller'у (_on_close)
+    # расширенные поля для поста результата: цены и движение в пользу сделки (SHORT в стоп < 0)
+    assert res[1]["entry"] == 100.0 and res[1]["exit_price"] == 110.0
+    assert res[1]["price_move_pct"] == -10.0
+    assert row["filled_at"] is not None                 # филл персистится (миграция 009)
+
+
+def test_bars_fill_event_once_then_outcome(fresh_db):
+    """Fill без развязки -> событие 'filled' ровно один раз; исход приходит позже."""
+    from app.brain import journal
+    journal.record_signal(_sig())                       # SHORT 100 / stop 110 / tp 80
+    fill_only = {"BTC/USDT:USDT": _bars([(100, 101, 99, 100)],
+                                        start="2026-01-01T00:15:00+00:00")}
+    res = journal.update_outcomes_from_bars(fill_only)
+    assert len(res) == 1 and res[0]["status"] == "filled"
+    assert res[0]["filled_at"] is not None and res[0]["result_r"] is None
+    row = fresh_db.query_one("SELECT * FROM signals WHERE id=1")
+    assert row["status"] == "open" and row["filled_at"] == res[0]["filled_at"]
+    assert journal.update_outcomes_from_bars(fill_only) == []   # повторно не сообщается
+    # развязка на новых барах -> терминальный исход, без второго 'filled'
+    rows = [(100, 101, 99, 100), (95, 96, 79, 80)]      # тейк 80
+    res2 = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(rows, start="2026-01-01T00:15:00+00:00")})
+    assert [c["status"] for c in res2] == ["tp1"]
+    assert res2[0]["exit_price"] == 80.0 and res2[0]["price_move_pct"] == 20.0
 
 
 def test_bars_outcome_chronology_tp(fresh_db):

@@ -191,24 +191,19 @@ def test_stats_small_sample_and_no_manual_edits_marks():
     assert "без ручных правок" in ch_empty
 
 
-def test_format_channel_signal():
-    from app.core.signal_engine import Side, Signal
-    sig = Signal(symbol="BTC/USDT:USDT", side=Side.SHORT, timeframe="15m", entry=62340.0,
-                 stop=62980.0, take_profits=[60893.0, 59000.0], risk_reward=2.26,
-                 confidence=0.65, reasons=["свип хая", "слом CHOCH"],
-                 created_at="2026-01-01T00:00:00+00:00", indicators_snapshot={"setup": "6226"})
-    txt = bot.format_channel_signal(sig, 7)
-    assert "RSI RANGE" in txt and "Сигнал #7" in txt and "🔴 SHORT" in txt
-    assert "62340" in txt and "60893 / 59000" in txt and "@rsirange_bot" in txt
-
-
-def test_format_channel_result():
-    tp = bot.format_channel_result({"id": 5, "symbol": "ETH/USDT:USDT", "side": "LONG",
-                                    "timeframe": "15m", "status": "tp1", "result_r": 2.0})
-    assert "✅" in tp and "#5" in tp and "+2.00R" in tp
-    st = bot.format_channel_result({"id": 6, "symbol": "BTC/USDT:USDT", "side": "SHORT",
-                                    "timeframe": "1h", "status": "stopped", "result_r": -1.0})
-    assert "🛑" in st and "-1.00R" in st
+def test_fill_is_fresh():
+    # шаблоны постов сигнального цикла — в tests/test_templates.py; здесь — гейт свежести
+    from datetime import datetime, timezone
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    fresh = {"timeframe": "1h", "filled_at": "2026-01-01T11:00:00+00:00"}   # час назад, 1h ТФ
+    assert bot.fill_is_fresh(fresh, now) is True
+    stale = {"timeframe": "1h", "filled_at": "2026-01-01T02:00:00+00:00"}   # 10 часов назад
+    assert bot.fill_is_fresh(stale, now) is False
+    # неизвестный ТФ -> дефолт 1h; битый/отсутствующий filled_at -> не свежий (не постим)
+    assert bot.fill_is_fresh({"timeframe": "?", "filled_at": "2026-01-01T11:30:00+00:00"},
+                             now) is True
+    assert bot.fill_is_fresh({"timeframe": "1h", "filled_at": None}, now) is False
+    assert bot.fill_is_fresh({"timeframe": "1h"}, now) is False
 
 
 def test_format_channel_stats():

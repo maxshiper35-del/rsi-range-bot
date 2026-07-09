@@ -224,7 +224,8 @@ def _outcome_from_bars(row, df) -> tuple | None:
     Фазы: (1) ждём касания entry (лимитный вход, low<=entry<=high) — без fill сделки НЕТ;
     (2) после fill: стоп и тейк проверяются по high/low каждого бара, при касании обоих
     в одном баре — консервативно СТОП. Если fill не случился за max_wait баров -> 'expired'.
-    -> (status, event, result_r|None) | None (ещё не разрешился).
+    -> (status, event, result_r|None, exit_price|None, fill_dt_iso|None)
+       | None (ждём fill, баров мало). status='open' — вход исполнен, развязки ещё нет.
     """
     import pandas as pd
 
@@ -241,6 +242,7 @@ def _outcome_from_bars(row, df) -> tuple | None:
         return None
 
     filled = False
+    fill_dt = None
     waited = 0
     for _, b in bars.iterrows():
         hi, lo = float(b["high"]), float(b["low"])
@@ -248,31 +250,54 @@ def _outcome_from_bars(row, df) -> tuple | None:
             waited += 1
             if lo <= entry <= hi:
                 filled = True                        # вход исполнен; стоп/тейк — с этого же бара
+                fill_dt = pd.to_datetime(b["dt"], utc=True).isoformat()
             elif waited >= max_wait:
-                return ("expired", "expired", None)  # лимитка не исполнилась — сделки не было
+                # лимитка не исполнилась — сделки не было
+                return ("expired", "expired", None, None, None)
             else:
                 continue
         if side == "LONG":
             if lo <= stop:
-                return ("stopped", "stopped", -1.0)  # стоп-первым (консервативно)
+                return ("stopped", "stopped", -1.0, stop, fill_dt)  # стоп-первым (консервативно)
             hit = [(c, tp) for c, tp in tps if hi >= tp]
         else:
             if hi >= stop:
-                return ("stopped", "stopped", -1.0)
+                return ("stopped", "stopped", -1.0, stop, fill_dt)
             hit = [(c, tp) for c, tp in tps if lo <= tp]
         if hit:
             col, tp = hit[-1]                        # лучший достигнутый в этом баре тейк
             r = (tp - entry) / risk if side == "LONG" else (entry - tp) / risk
-            return (col, col, r)
-    return None                                      # позиция ещё открыта / ждёт fill
+            return (col, col, r, tp, fill_dt)
+    if filled:
+        return ("open", None, None, None, fill_dt)   # вход есть, развязки нет — сообщить о филле
+    return None                                      # всё ещё ждём fill
+
+
+def _setup_of(row) -> str:
+    """Тег сетапа из snapshot_json ('6226'/'1:1'/'LTF-BB'/... либо '?')."""
+    try:
+        return json.loads(row["snapshot_json"] or "{}").get("setup", "?")
+    except (ValueError, TypeError):
+        return "?"
+
+
+def _price_move_pct(side: str, entry: float, exit_price) -> float | None:
+    """Движение цены в % в пользу сделки (без плеча): для SHORT знак инвертирован."""
+    if exit_price is None or not entry:
+        return None
+    move = (exit_price - entry) / entry * 100.0
+    return round(move if side == "LONG" else -move, 4)
 
 
 def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
     """Продовый скоринг исходов по OHLCV-барам (см. _outcome_from_bars).
 
-    -> список закрытых {id, symbol, side, timeframe, status, result_r, shadow}
-       (для постинга результатов в канал; caller фильтрует shadow/expired сам).
-    Идемпотентен: сигнал скорится один раз (дальше отфильтрован по result_r/closed_at).
+    -> список событий {id, symbol, side, timeframe, status, result_r, shadow, setup,
+       entry, exit_price, price_move_pct, filled_at}:
+       status='filled' — лимитка исполнилась (не тень; сигнал остаётся open),
+       остальные — терминальные исходы. Caller фильтрует shadow/expired/filled сам.
+    Идемпотентен: исход скорится один раз (фильтр по result_r/closed_at),
+    filled — один раз (фильтр по filled_at IS NULL).
     Для rejected пишется теневой исход (статус не меняется, событие 'shadow').
     """
     closed = []
@@ -285,9 +310,23 @@ def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
         res = _outcome_from_bars(row, df)
         if res is None:
             continue
-        status, event, result_r = res
+        status, event, result_r, exit_price, fill_dt = res
         now = clock.utcnow_iso()
         shadow = row["status"] == "rejected"
+        base = {"id": row["id"], "symbol": row["symbol"], "side": row["side"],
+                "timeframe": row["timeframe"], "shadow": shadow,
+                "setup": _setup_of(row), "entry": row["entry"], "filled_at": fill_dt}
+        # первый раз увидели исполнение лимитки — персистим; уведомление — не для теней
+        if fill_dt is not None and row["filled_at"] is None:
+            with db.transaction() as conn:
+                conn.execute("UPDATE signals SET filled_at=?, updated_at=? "
+                             "WHERE id=? AND filled_at IS NULL",
+                             (fill_dt, now, row["id"]))
+            if not shadow:
+                closed.append({**base, "status": "filled", "result_r": None,
+                               "exit_price": None, "price_move_pct": None})
+        if status == "open":
+            continue                                 # вход есть, развязки ещё нет
         r_val = round(result_r, 4) if result_r is not None else None
         with db.transaction() as conn:
             conn.execute(
@@ -300,13 +339,8 @@ def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
                 (row["id"], ("shadow" if event != "expired" else "expired") if shadow else event,
                  None, r_val, now),
             )
-        try:
-            setup = json.loads(row["snapshot_json"] or "{}").get("setup", "?")
-        except (ValueError, TypeError):
-            setup = "?"
-        closed.append({"id": row["id"], "symbol": row["symbol"], "side": row["side"],
-                       "timeframe": row["timeframe"], "status": status,
-                       "result_r": r_val, "shadow": shadow, "setup": setup})
+        closed.append({**base, "status": status, "result_r": r_val, "exit_price": exit_price,
+                       "price_move_pct": _price_move_pct(row["side"], row["entry"], exit_price)})
     return closed
 
 

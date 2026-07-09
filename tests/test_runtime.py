@@ -99,3 +99,17 @@ def test_format_admin_status():
     txt = bot.format_admin_status(eff, {"total": 5, "paid": 2})
     assert "НА ПАУЗЕ" in txt and "BTC/USDT:USDT" in txt and "платных 2" in txt
     assert "1000⭐" in txt
+
+
+def test_display_leverage(fresh_db):
+    from app import runtime
+    assert runtime.display_leverage() == 10.0           # дефолт: иллюстрация ×10
+    runtime.set_value("display_leverage", 25)
+    assert runtime.display_leverage() == 25.0
+    runtime.set_value("display_leverage", 0)            # 0 = строка плеча выключена
+    assert runtime.display_leverage() == 0.0
+    runtime.set_value("display_leverage", -5)           # отрицательное не имеет смысла -> off
+    assert runtime.display_leverage() == 0.0
+    runtime.set_value("display_leverage", "мусор")      # битое значение -> дефолт, не падение
+    assert runtime.display_leverage() == 10.0
+    assert runtime.effective()["display_leverage"] == 10.0

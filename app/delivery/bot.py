@@ -16,7 +16,7 @@ from app.brain import journal
 from app.brain.risk import calculate_position
 from app.brain.smc_setups import SMCEngine
 from app.core.signal_engine import Signal
-from app.delivery import graphics
+from app.delivery import graphics, templates
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +247,8 @@ _ADMIN_NUMERIC_FIELDS = {
     "trial_days": ("Длительность триала для новых юзеров, дней (целое число)", "int"),
     "min_confidence": ("Мин. уверенность сетапа, 0..1", "unit"),
     "min_impulse_atr": ("Мин. размер импульса в ATR", "float"),
+    "display_leverage": ("Плечо для показа результата в постах, ×N (0 — выключить строку)",
+                         "float"),
 }
 
 
@@ -370,40 +372,28 @@ def format_cornix_block(signal: Signal) -> str:
     )
 
 
-def format_channel_signal(signal: Signal, signal_id: int) -> str:
-    """Брендированный пост сигнала для канала (публичная лента)."""
-    arrow = "🟢 LONG" if signal.side.value == "LONG" else "🔴 SHORT"
-    tps = " / ".join(f"{t:g}" for t in signal.take_profits)
-    reasons = "\n".join(f"• {r}" for r in signal.reasons)
-    market = (signal.indicators_snapshot or {}).get("market")
-    market_line = f"💹 Цена сейчас:  {market:g}\n" if market else ""
-    return (
-        f"📊 RSI RANGE — Сигнал #{signal_id}\n{_LINE}\n"
-        f"{arrow}   {signal.symbol}   ·   {signal.timeframe}\n\n"
-        f"{market_line}"
-        f"📍 Вход:  {signal.entry:g}  (лимит)\n"
-        f"🛑 Стоп:  {signal.stop:g}\n"
-        f"🎯 Цели:  {tps}\n"
-        f"⚖️ R/R 1:{signal.risk_reward:.1f}    🔎 {int(signal.confidence * 100)}%\n\n"
-        f"Почему:\n{reasons}\n{_LINE}\n"
-        "⚠️ Не финсовет. Риск 1–2% на сделку.\n"
-        "🔔 Сигналы в личку + статистика: @rsirange_bot"
-    )
+# Шаблоны постов сигнального цикла (сигнал/тизер/fill/expired/результат) — в
+# app/delivery/templates.py (единый HTML-рендерер). Здесь остаются только
+# сервисные format_* (статистика, админка, алерты) — они шлются plain text.
+
+_TF_SECONDS_VIEW = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+                    "1h": 3600, "4h": 14400, "1d": 86400}
 
 
-def format_channel_result(c: dict) -> str:
-    """Пост-результат закрытой сделки (публичный трек-рекорд)."""
-    side = "🟢 LONG" if c["side"] == "LONG" else "🔴 SHORT"
-    r = c["result_r"] or 0.0
-    if c["status"] == "stopped":
-        head, emoji = f"🛑 Сигнал #{c['id']} — стоп", "📉"
-    else:
-        head, emoji = f"✅ Сигнал #{c['id']} — {c['status'].upper()}", "📈"
-    return (
-        f"{head}\n{side}   {c['symbol']}   ·   {c['timeframe']}\n"
-        f"Результат: {r:+.2f}R  {emoji}\n{_LINE}\n"
-        "Вся статистика честно: /stats у @rsirange_bot"
-    )
+def fill_is_fresh(c: dict, now: datetime, factor: float = 2.0, slack: float = 900.0) -> bool:
+    """Свежий ли филл: не старее factor×TF + slack от dt бара касания.
+
+    Отсекает «исторические» филлы, которые первый тик после деплоя/рестарта
+    находит по старым открытым сигналам (filled_at появился миграцией 009) —
+    пост «вход исполнен» задним числом только запутает канал."""
+    try:
+        filled = datetime.fromisoformat(str(c.get("filled_at")))
+    except (TypeError, ValueError):
+        return False
+    if filled.tzinfo is None:
+        filled = filled.replace(tzinfo=timezone.utc)
+    tf_sec = _TF_SECONDS_VIEW.get(str(c.get("timeframe")), 3600)
+    return (now - filled).total_seconds() <= factor * tf_sec + slack
 
 
 def should_refresh_board(last_update: str | None, now_iso: str, hours: int = 24) -> bool:
@@ -709,17 +699,6 @@ def _fmt_days(days: float) -> str:
     if days == int(days):
         return f"{int(days)} дней"
     return f"{round(days * 24)} часов"
-
-
-def format_teaser(signal: Signal, signal_id: int) -> str:
-    """Превью сигнала для free-юзера сверх недельного лимита (без уровней входа)."""
-    arrow = "🟢 LONG" if signal.side.value == "LONG" else "🔴 SHORT"
-    return (
-        f"🔒 СИГНАЛ #{signal_id} — превью\n"
-        f"{arrow}  {signal.symbol}  ({signal.timeframe})\n"
-        "Вход, стоп, тейки и разбор — по подписке.\n"
-        "/subscribe — открыть все сигналы"
-    )
 
 
 def format_candidate_alert(signal: Signal, signal_id: int) -> str:
@@ -1192,6 +1171,9 @@ def main() -> None:
             [b(text=f"🆓 Free/нед: {eff['free_per_week']}",
                callback_data="adm_prompt_free_signals_per_week")],
             [b(text=f"🎁 Триал: {eff['trial_days']} дн", callback_data="adm_prompt_trial_days")],
+            [b(text=f"📢 Плечо в постах: ×{eff['display_leverage']:g}"
+                    if eff['display_leverage'] else "📢 Плечо в постах: выкл",
+               callback_data="adm_prompt_display_leverage")],
             [b(text="◀️ Назад", callback_data="adm_nav_main")],
         ])
 
@@ -1630,25 +1612,28 @@ def main() -> None:
 
     async def _broadcast(sig, sid):
         try:
-            if cfg.signal_mode == "auto":
-                full = f"🔔 СИГНАЛ #{sid}\n\n" + sig.format_message()
+            # runtime, не cfg: иначе смена режима из админки без рестарта не меняла
+            # бы тело рассылки (poller-то уже решает по runtime.signal_mode())
+            if runtime.signal_mode() == "auto":
+                full = templates.render_signal_dm(sig, sid)
             else:
-                full = format_candidate_alert(sig, sid)
+                # алерт оператору — plain-шаблон, экранируем под parse_mode=HTML
+                full = templates.esc(format_candidate_alert(sig, sid))
         except Exception:                              # noqa: BLE001 — формат не роняет цикл
             log.exception("формат алерта #%s", sid)
             full = f"🔔 Сигнал #{sid} (ошибка форматирования — детали в журнале)"
-        teaser = format_teaser(sig, sid)
+        teaser = templates.render_teaser(sig, sid)
         # пост в канал (если включён) — полный или тизер, по режиму канала
         channel = runtime.signals_channel()
         if channel and runtime.channel_enabled():
             if runtime.channel_mode() == "full":
-                ch_text = format_channel_signal(sig, sid)
+                ch_text = templates.render_signal_channel(sig, sid)
                 if runtime.cornix_block_enabled():      # машиночитаемый блок для Cornix-юзеров
-                    ch_text += format_cornix_block(sig)
+                    ch_text += templates.esc(format_cornix_block(sig))
             else:
                 ch_text = teaser
             try:
-                await bot.send_message(channel, ch_text)
+                await bot.send_message(channel, ch_text, parse_mode="HTML")
             except Exception as e:                     # noqa: BLE001 — канал не роняет рассылку
                 log.warning("пост в канал %s: %s", channel, e)
         # воронка: админы/платные -> полный; free -> полный до лимита/нед, дальше тизер
@@ -1657,7 +1642,8 @@ def main() -> None:
         sent = 0
         for uid, kind in plan:
             try:
-                await bot.send_message(uid, full if kind == "full" else teaser)
+                await bot.send_message(uid, full if kind == "full" else teaser,
+                                       parse_mode="HTML")
                 await asyncio.to_thread(payments.record_delivery, uid, sid, kind)
                 sent += 1
             except Exception as e:                     # noqa: BLE001 — один получатель не роняет рассылку
@@ -1837,7 +1823,9 @@ def main() -> None:
         # только сигнал, без авто-отключения (решение за оператором). Не зависит от того,
         # включён ли канал — это отдельный контур от постинга результатов ниже.
         enabled = set(runtime.enabled_setups())
-        fresh_setups = {c["setup"] for c in closed if not c.get("shadow") and c.get("setup")}
+        fresh_setups = {c["setup"] for c in closed
+                        if not c.get("shadow") and c.get("setup")
+                        and c["status"] in ("tp1", "tp2", "tp3", "stopped")}
         for setup in fresh_setups:
             if setup not in enabled:
                 continue
@@ -1851,17 +1839,33 @@ def main() -> None:
                     except Exception as e:              # noqa: BLE001
                         log.warning("consecutive_losses алерт админу %s: %s", admin_id, e)
 
-        # публикуем в канал результаты закрытых сделок (не тени, реальные TP/SL)
+        # публикуем в канал жизненный цикл сделок: вход исполнен / отменён / результат
         channel = runtime.signals_channel()
         if not channel or not runtime.channel_enabled():
             return
+        now_dt = datetime.now(timezone.utc)
+        resolved_ids = {c["id"] for c in closed if c["status"] != "filled"}
+        show_price = runtime.channel_mode() == "full"   # в teaser-режиме цену входа не раскрываем
         for c in closed:
-            if c.get("shadow") or c["status"] not in ("tp1", "tp2", "tp3", "stopped"):
+            if c.get("shadow"):
                 continue
             try:
-                await bot.send_message(channel, format_channel_result(c))
+                if c["status"] == "filled":
+                    # только свежие филлы (не «исторические» после деплоя/рестарта) и только
+                    # если сделка не закрылась этим же тиком — результат сам скажет, что вход был
+                    if c["id"] in resolved_ids or not fill_is_fresh(c, now_dt):
+                        continue
+                    await bot.send_message(channel, templates.render_fill(c, show_price),
+                                           parse_mode="HTML")
+                elif c["status"] == "expired":
+                    await bot.send_message(channel, templates.render_expired(c),
+                                           parse_mode="HTML")
+                elif c["status"] in ("tp1", "tp2", "tp3", "stopped"):
+                    await bot.send_message(
+                        channel, templates.render_result(c, runtime.display_leverage()),
+                        parse_mode="HTML")
             except Exception as e:                     # noqa: BLE001
-                log.warning("результат в канал #%s: %s", c["id"], e)
+                log.warning("пост цикла сделки в канал #%s: %s", c["id"], e)
 
     @dp.error()
     async def _on_handler_error(event) -> bool:

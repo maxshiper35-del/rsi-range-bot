@@ -200,6 +200,18 @@ def trial_days() -> int:
     return int(v) if v is not None else 5
 
 
+def display_leverage() -> float:
+    """Плечо для ИЛЛЮСТРАЦИИ результата в постах канала (×N; 0 — строка выключена).
+    Реального плеча бот не знает — сделки не исполняет, каждый выбирает своё;
+    строка в посте — арифметика «цена ×N», сырое движение цены показывается рядом."""
+    v = _raw("display_leverage")
+    try:
+        lev = float(v) if v is not None else 10.0
+    except (TypeError, ValueError):
+        lev = 10.0
+    return max(lev, 0.0)
+
+
 def effective() -> dict:
     """Все действующие настройки — для /status и /admin."""
     return {
@@ -219,4 +231,5 @@ def effective() -> dict:
         "free_per_week": free_per_week(),
         "cornix_enabled": cornix_block_enabled(),
         "trial_days": trial_days(),
+        "display_leverage": display_leverage(),
     }
