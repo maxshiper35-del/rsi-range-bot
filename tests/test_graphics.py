@@ -116,3 +116,57 @@ def test_render_signal_chart_produces_valid_png():
     png = graphics.render_signal_chart(_CHART_DATA)
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
     assert len(png) > 10_000
+
+
+_DASH = {
+    "period_label": "всё время",
+    "updated_label": "11.07.2026 00:30 UTC",
+    "stats": {"trades": 24, "open": 8, "winrate": 0.5417, "expectancy_r": 0.11,
+              "total_r": 2.64, "wins": 13, "losses": 11},
+    "equity": [2.26, -1.0, -1.0, 2.26, 1.0, -1.0, 2.26, -1.0, -1.0, 1.0,
+               2.26, -1.0, 2.26, -1.0, -1.0, 2.26, 1.0, -1.0, -1.0, 2.26,
+               -1.0, 1.0, -1.0, 2.0],
+    "by_symbol": {"BTC/USDT:USDT": {"trades": 10, "wins": 6, "winrate": 0.6,
+                                    "expectancy_r": 0.3, "total_r": 3.0},
+                  "ETH/USDT:USDT": {"trades": 14, "wins": 7, "winrate": 0.5,
+                                    "expectancy_r": -0.02, "total_r": -0.36}},
+    "by_setup": {"1:1": {"trades": 24, "wins": 13, "winrate": 0.54,
+                         "expectancy_r": 0.11, "total_r": 2.64}},
+    "milestone": {"current": 24, "next": 25},
+}
+
+
+def test_build_dashboard_html_self_contained_and_real():
+    html = graphics.build_dashboard_html(_DASH)
+    assert html.startswith("<!DOCTYPE html>") and "<svg" in html          # полный документ + SVG
+    assert "+2.6R" in html and "+0.11R" in html and "54%" in html          # тайлы
+    assert "BTC/USDT:USDT" in html and "1:1" in html                       # разбивки
+    assert "24 из 25" in html                                              # прогресс вехи
+    assert "Не финансовый совет" in html                                   # честность
+    # самодостаточность: ни одной ЗАГРУЗКИ ресурса. SVG-namespace (xmlns) — не запрос.
+    body = html.replace("http://www.w3.org/2000/svg", "")
+    for ext in ("http://", "https://", "src=", "@import", "fetch(", "XMLHttpRequest"):
+        assert ext not in body, f"внешняя зависимость: {ext}"
+
+
+def test_build_dashboard_html_empty_fallback():
+    data = dict(_DASH, equity=[], by_symbol={}, by_setup={},
+                stats={"trades": 0, "open": 0, "winrate": 0.0, "expectancy_r": 0.0,
+                       "total_r": 0.0, "wins": 0, "losses": 0},
+                milestone={"current": 0, "next": 10})
+    html = graphics.build_dashboard_html(data)
+    assert "появится после первых закрытых" in html and "Данных пока нет" in html
+    assert "<svg" not in html                                             # нет кривой на 0 сделок
+
+
+def test_equity_svg_sign_color():
+    up = graphics._equity_svg([1.0, 2.0, 1.0])       # +4R итог -> зелёный
+    assert "#4ADE9C" in up and "+4.0R" in up
+    down = graphics._equity_svg([-1.0, -1.0, 1.0])   # -1R итог -> красный
+    assert "#F16565" in down and "-1.0R" in down
+
+
+def test_render_dashboard_png():
+    pytest.importorskip("playwright")
+    png = graphics.render_dashboard_png(_DASH)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 10_000

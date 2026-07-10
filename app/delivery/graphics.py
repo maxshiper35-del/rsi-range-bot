@@ -410,3 +410,165 @@ def build_signal_chart_html(data: dict) -> str:
 
 def render_signal_chart(data: dict) -> bytes:
     return render_html_to_png(build_signal_chart_html(data))
+
+
+# ---------------------------------------------------------------------------
+# Дашборд трек-рекорда: самодостаточная страница (эквити-кривая + разбивки).
+# Отдаётся файлом (как verifier.html) — работает офлайн, без сервера/туннеля;
+# тот же документ переиспользуется как страница Telegram Mini App, когда у бота
+# появится публичный HTTPS-URL (runtime.webapp_url). Ноль внешних запросов.
+# ---------------------------------------------------------------------------
+
+_DASH_CSS = """
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:linear-gradient(180deg,#0D0F14,#0B0D11 55%,#0A0C10); color:#EDEFF3;
+         font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         -webkit-font-smoothing:antialiased; padding:28px 16px; display:flex;
+         justify-content:center; min-height:100vh; }
+  .wrap { width:100%; max-width:900px; display:flex; flex-direction:column; gap:16px; }
+  .brand { display:flex; align-items:center; gap:14px; }
+  .mark { width:44px; height:44px; border-radius:12px; flex:0 0 auto;
+          background:linear-gradient(155deg,#4C6EF5,#7C5CFC); display:flex;
+          align-items:center; justify-content:center; font-weight:800; font-size:20px;
+          color:#F5F6FA; }
+  .brand .name { font-size:20px; font-weight:700; }
+  .brand .sub { font-size:13px; color:#6B7280; margin-top:2px; }
+  .tiles { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+  @media (max-width:620px){ .tiles{ grid-template-columns:repeat(2,1fr); } }
+  .card { background:linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0.012));
+          border:1px solid rgba(255,255,255,0.08); border-radius:16px; padding:18px 20px; }
+  .tile .lbl { font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+               color:#767C88; }
+  .tile .val { font-size:30px; font-weight:800; letter-spacing:-1px; margin-top:6px;
+               font-variant-numeric:tabular-nums; }
+  .positive { color:#4ADE9C; } .negative { color:#F16565; } .neutral { color:#F1F2F5; }
+  .tile .sub { font-size:12px; color:#868C97; margin-top:4px; }
+  h3 { font-size:14px; color:#D6D9E0; margin-bottom:12px; }
+  svg { width:100%; height:auto; display:block; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; }
+  th { text-align:left; font-size:11px; font-weight:700; letter-spacing:.06em;
+       text-transform:uppercase; color:#767C88; padding:6px 8px; }
+  td { padding:7px 8px; border-top:1px solid rgba(255,255,255,0.06);
+       font-variant-numeric:tabular-nums; }
+  td.r { text-align:right; }
+  .bar-track { height:8px; border-radius:5px; background:rgba(255,255,255,0.07);
+               overflow:hidden; margin-top:10px; }
+  .bar-fill { height:100%; border-radius:5px; background:linear-gradient(90deg,#4C6EF5,#7C5CFC); }
+  .dash-empty { color:#767C88; font-size:14px; padding:24px 0; text-align:center; }
+  .note { font-size:13px; line-height:1.55; color:#868C97; }
+  .note b { color:#C7CBD4; }
+  .foot { font-size:12px; color:#565C68; text-align:center; }
+"""
+
+_DASH_DOC = Template("""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RSI Range Signals — дашборд трек-рекорда</title><style>$css</style></head>
+<body><div class="wrap">
+  <div class="brand"><div class="mark">R</div><div>
+    <div class="name">Дашборд трек-рекорда</div>
+    <div class="sub">RSI Range Signals · @rsi_range · $period</div></div></div>
+  <div class="tiles">
+    <div class="card tile"><div class="lbl">Итог</div>
+      <div class="val $total_class">$total_r</div><div class="sub">$closed закрытых</div></div>
+    <div class="card tile"><div class="lbl">Матожидание</div>
+      <div class="val $exp_class">$exp_r</div><div class="sub">на сделку</div></div>
+    <div class="card tile"><div class="lbl">Winrate</div>
+      <div class="val neutral">$winrate%</div><div class="sub">$wins побед · $losses пораж.</div></div>
+    <div class="card tile"><div class="lbl">В работе</div>
+      <div class="val neutral">$open</div><div class="sub">открытых сигналов</div></div>
+  </div>
+  <div class="card"><h3>Эквити-кривая (накопленный R)</h3>$equity</div>
+  <div class="card"><h3>По инструментам</h3>$by_symbol</div>
+  <div class="card"><h3>По сетапам</h3>$by_setup</div>
+  <div class="card"><h3>Прогресс до следующей вехи</h3>$milestone</div>
+  <div class="card note"><b>Честно:</b> публикуем 100% исходов, включая убыточные.
+    Бэктест устойчивого края не показал — это инструмент и проверяемая история,
+    не обещание прибыли. Каждая сделка — в CSV с sha256 (/trackrecord).
+    Не финансовый совет.</div>
+  <div class="foot">Обновлено $updated · страница самодостаточна: без внешних скриптов и запросов.</div>
+</div></body></html>""")
+
+
+def _equity_svg(series: list, w: int = 860, h: int = 240, pad: int = 18) -> str:
+    """Инлайн-SVG накопленного R по закрытым сделкам (нулевая база, заливка по знаку)."""
+    if not series:
+        return '<div class="dash-empty">Эквити-кривая появится после первых закрытых сделок.</div>'
+    cum, run = [], 0.0
+    for r in series:
+        run += r
+        cum.append(run)
+    pts = [(0, 0.0)] + [(i, v) for i, v in enumerate(cum, start=1)]
+    n = len(pts) - 1
+    lo, hi = min(0.0, min(cum)), max(0.0, max(cum))
+    span = (hi - lo) or 1.0
+
+    def x(i: float) -> float:
+        return round(pad + i / n * (w - 2 * pad), 2)
+
+    def y(v: float) -> float:
+        return round(h - pad - (v - lo) / span * (h - 2 * pad), 2)
+
+    zero = y(0.0)
+    line = " ".join(f"{x(i)},{y(v)}" for i, v in pts)
+    area = f"{x(0)},{zero} {line} {x(n)},{zero}"
+    color = "#4ADE9C" if cum[-1] >= 0 else "#F16565"
+    end_x, end_y = x(n), y(cum[-1])
+    return (
+        f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">'
+        f'<polygon points="{area}" fill="{color}" fill-opacity="0.10"/>'
+        f'<line x1="{pad}" y1="{zero}" x2="{w - pad}" y2="{zero}" '
+        f'stroke="rgba(255,255,255,0.18)" stroke-width="1" stroke-dasharray="4 4"/>'
+        f'<polyline points="{line}" fill="none" stroke="{color}" stroke-width="2.4" '
+        f'stroke-linejoin="round" stroke-linecap="round"/>'
+        f'<circle cx="{end_x}" cy="{end_y}" r="4" fill="{color}"/>'
+        f'<text x="{end_x - 6}" y="{max(end_y - 10, 14):.0f}" text-anchor="end" '
+        f'font-size="14" font-weight="700" fill="{color}" '
+        f'font-family="-apple-system,sans-serif">{cum[-1]:+.1f}R</text></svg>'
+    )
+
+
+def _dash_table(d: dict) -> str:
+    """Таблица разбивки (символы/сетапы) -> HTML tbody-строки; пусто -> заглушка."""
+    if not d:
+        return '<div class="dash-empty">Данных пока нет.</div>'
+    rows = "".join(
+        f"<tr><td>{_esc(k)}</td><td class='r'>{s['trades']}</td>"
+        f"<td class='r'>{s['winrate'] * 100:.0f}%</td>"
+        f"<td class='r {_r_class(s['expectancy_r'])}'>{s['expectancy_r']:+.2f}R</td>"
+        f"<td class='r {_r_class(s['total_r'])}'>{s['total_r']:+.1f}R</td></tr>"
+        for k, s in sorted(d.items(), key=lambda kv: kv[1]["total_r"], reverse=True))
+    return ("<table><thead><tr><th>—</th><th class='r'>сд</th><th class='r'>WR</th>"
+            "<th class='r'>эксп</th><th class='r'>итог</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>")
+
+
+def _dash_milestone(current: int, nxt) -> str:
+    if not nxt:
+        return '<div class="dash-empty">Все вехи взяты — новые появятся с ростом истории.</div>'
+    pct = min(round(current / nxt * 100), 100)
+    return (f"<div>{current} из {nxt} закрытых сделок — впереди веха {nxt}.</div>"
+            f'<div class="bar-track"><div class="bar-fill" style="width:{pct}%"></div></div>')
+
+
+def build_dashboard_html(data: dict) -> str:
+    """Самодостаточный HTML-дашборд. data: {period_label, updated_label, stats, equity,
+    by_symbol, by_setup, milestone:{current,next}}. Чистая функция — тестируется без браузера."""
+    st = data["stats"]
+    return _DASH_DOC.substitute(
+        css=_DASH_CSS,
+        period=_esc(data["period_label"]),
+        updated=_esc(data["updated_label"]),
+        total_r=f"{st['total_r']:+.1f}R", total_class=_r_class(st["total_r"]),
+        exp_r=f"{st['expectancy_r']:+.2f}R", exp_class=_r_class(st["expectancy_r"]),
+        winrate=f"{st['winrate'] * 100:.0f}",
+        wins=st["wins"], losses=st["losses"], closed=st["trades"], open=st["open"],
+        equity=_equity_svg(data["equity"]),
+        by_symbol=_dash_table(data["by_symbol"]),
+        by_setup=_dash_table(data["by_setup"]),
+        milestone=_dash_milestone(data["milestone"]["current"], data["milestone"]["next"]),
+    )
+
+
+def render_dashboard_png(data: dict) -> bytes:
+    """Дашборд -> PNG (для инлайн-превью/визуального QA). Тяжёлый Playwright — через to_thread."""
+    return render_html_to_png(build_dashboard_html(data), width=920)

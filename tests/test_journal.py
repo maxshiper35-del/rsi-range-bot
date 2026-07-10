@@ -365,3 +365,17 @@ def test_record_ledger_hash(fresh_db):
     journal.record_ledger_hash(5, "deadbeef")
     row = fresh_db.query_one("SELECT * FROM ledger_hashes")
     assert row["row_count"] == 5 and row["sha256"] == "deadbeef"
+
+
+def test_equity_series_matches_total(fresh_db):
+    """equity_series хронологична и суммируется в тот же total_r, что stats()."""
+    from app.brain import journal
+    # 2 закрытых сделки: tp (+2R) и стоп (-1R)
+    journal.record_signal(_sig(symbol="BTC/USDT:USDT"))
+    journal.record_signal(_sig(symbol="ETH/USDT:USDT", entry=200.0, stop=210.0, tp=180.0))
+    b1 = _bars([(100, 101, 99, 100), (95, 96, 79, 80)], start="2026-01-01T00:15:00+00:00")
+    b2 = _bars([(200, 201, 199, 200), (205, 215, 204, 214)], start="2026-01-01T00:15:00+00:00")
+    journal.update_outcomes_from_bars({"BTC/USDT:USDT": b1, "ETH/USDT:USDT": b2})
+    series = journal.equity_series()
+    assert len(series) == 2
+    assert abs(sum(series) - journal.stats()["total_r"]) < 1e-9

@@ -419,6 +419,24 @@ _UNLOCK_DENIALS = {
 MILESTONES = (10, 25, 50, 100, 250, 500, 1000)
 
 
+def next_milestone(trades: int, levels: tuple = MILESTONES) -> int | None:
+    """Ближайшая непройденная веха (для прогресс-бара дашборда). None — все взяты."""
+    for m in levels:
+        if trades < m:
+            return m
+    return None
+
+
+def dashboard_data(st: dict, equity: list, by_symbol: dict, by_setup: dict,
+                   updated_label: str, period_label: str = "всё время") -> dict:
+    """Сборка входа для graphics.build_dashboard_html из журнала. Чистая — тестируется без БД."""
+    return {
+        "period_label": period_label, "updated_label": updated_label,
+        "stats": st, "equity": equity, "by_symbol": by_symbol, "by_setup": by_setup,
+        "milestone": {"current": st["trades"], "next": next_milestone(st["trades"])},
+    }
+
+
 def milestone_reached(prev: int, trades: int, levels: tuple = MILESTONES) -> int | None:
     """Наибольшая ТОЛЬКО ЧТО достигнутая веха закрытых сделок (prev < m <= trades).
 
@@ -616,6 +634,7 @@ USER_COMMANDS = [
     ("help", "список команд"),
     ("stats", "публичная статистика (честный журнал)"),
     ("trackrecord", "полный CSV-журнал сигналов + sha256 (проверяемый трек-рекорд)"),
+    ("dashboard", "визуальный дашборд: эквити-кривая, разбивки, вехи"),
     ("calc", "калькулятор позиции: /calc <деп> <риск%> <вход> <стоп>"),
     ("subscribe", "подписка — все сигналы"),
     ("promo", "применить промокод: /promo <код>"),
@@ -675,17 +694,17 @@ def main_menu_layout(is_admin: bool = False) -> list:
     if is_admin:
         return [
             ["📊 Статистика", "📄 Трек-рекорд"],
-            ["🛠 Админ-панель", "📟 Статус"],
-            ["🩺 Health", "👥 Юзеры"],
-            ["📈 Growth", "🎯 По сетапам"],
-            ["❓ Помощь"],
+            ["📈 Дашборд", "🛠 Админ-панель"],
+            ["📟 Статус", "🩺 Health"],
+            ["👥 Юзеры", "📈 Growth"],
+            ["🎯 По сетапам", "❓ Помощь"],
         ]
     return [
         ["📊 Статистика", "📄 Трек-рекорд"],
-        ["🧮 Калькулятор", "💳 Подписка"],
-        ["ℹ️ О боте", "🧪 Бэктест"],
-        ["📖 Глоссарий", "🎟 Промокод"],
-        ["❓ Помощь"],
+        ["📈 Дашборд", "🧮 Калькулятор"],
+        ["💳 Подписка", "ℹ️ О боте"],
+        ["🧪 Бэктест", "📖 Глоссарий"],
+        ["🎟 Промокод", "❓ Помощь"],
     ]
 
 
@@ -922,6 +941,7 @@ def main() -> None:
         KeyboardButton,
         LabeledPrice,
         ReplyKeyboardMarkup,
+        WebAppInfo,
     )
 
     from app import db, runtime
@@ -956,8 +976,17 @@ def main() -> None:
         """Постоянное меню внизу чата — юзеру не нужно помнить команды.
         is_persistent: Telegram держит клавиатуру на экране всегда (Bot API 6.7),
         даже если юзер её сворачивал; у админа — дополнительные кнопки."""
+        # «📈 Дашборд»: при заданном webapp_url — web_app-кнопка (Mini App внутри
+        # Telegram), иначе обычная (хэндлер отдаёт самодостаточный HTML-файл).
+        wurl = runtime.webapp_url()
+
+        def _btn(text: str) -> KeyboardButton:
+            if text == "📈 Дашборд" and wurl.startswith("https://"):
+                return KeyboardButton(text=text, web_app=WebAppInfo(url=wurl))
+            return KeyboardButton(text=text)
+
         return ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True, keyboard=[
-            [KeyboardButton(text=t) for t in row] for row in main_menu_layout(is_admin)])
+            [_btn(t) for t in row] for row in main_menu_layout(is_admin)])
 
     def _subscribe_kb() -> InlineKeyboardMarkup:
         rows = []
@@ -1362,6 +1391,22 @@ def main() -> None:
             BufferedInputFile(load_verifier_html(), filename="verifier.html"),
             caption="🔍 Проверка в 1 клик: откройте файл в браузере, перетащите CSV — "
                     "sha256 посчитается локально (офлайн, без отправки куда-либо).")
+
+    @dp.message(Command("dashboard"))
+    @dp.message(F.text == "📈 Дашборд")
+    async def _dashboard(m):
+        # web_app-кнопка (если webapp_url задан) открывает Mini App сама и сюда не доходит;
+        # этот путь — самодостаточный HTML-файл (офлайн, тот же документ, что и Mini App).
+        def _build():
+            updated = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+            data = dashboard_data(journal.stats(), journal.equity_series(),
+                                  journal.stats_by_symbol(), journal.stats_by_setup(), updated)
+            return graphics.build_dashboard_html(data)
+        html = await asyncio.to_thread(_build)
+        await m.answer_document(
+            BufferedInputFile(html.encode("utf-8"), filename="dashboard.html"),
+            caption="📈 Дашборд трек-рекорда — откройте в браузере: эквити-кривая, "
+                    "разбивка по инструментам и сетапам, прогресс до вехи. Работает офлайн.")
 
     def _is_admin(m) -> bool:
         return bool(m.from_user) and m.from_user.id in cfg.admin_ids

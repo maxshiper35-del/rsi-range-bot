@@ -569,8 +569,9 @@ def test_build_signal_chart_data():
 def test_main_menu_layout_user():
     user = bot.main_menu_layout(is_admin=False)
     flat = [t for row in user for t in row]
-    for label in ("📊 Статистика", "📄 Трек-рекорд", "🧮 Калькулятор", "💳 Подписка",
-                  "ℹ️ О боте", "🧪 Бэктест", "📖 Глоссарий", "🎟 Промокод", "❓ Помощь"):
+    for label in ("📊 Статистика", "📄 Трек-рекорд", "📈 Дашборд", "🧮 Калькулятор",
+                  "💳 Подписка", "ℹ️ О боте", "🧪 Бэктест", "📖 Глоссарий", "🎟 Промокод",
+                  "❓ Помощь"):
         assert label in flat, label
     assert "🛠 Админ-панель" not in flat                # админ-кнопки не текут юзерам
     assert all(len(row) <= 2 for row in user)           # компактные ряды по 1-2 кнопки
@@ -579,8 +580,9 @@ def test_main_menu_layout_user():
 def test_main_menu_layout_admin():
     # админу — операционные отчёты, БЕЗ подписческого контента (он и так получает всё)
     admin = [t for row in bot.main_menu_layout(is_admin=True) for t in row]
-    for label in ("📊 Статистика", "📄 Трек-рекорд", "🛠 Админ-панель", "📟 Статус",
-                  "🩺 Health", "👥 Юзеры", "📈 Growth", "🎯 По сетапам", "❓ Помощь"):
+    for label in ("📊 Статистика", "📄 Трек-рекорд", "📈 Дашборд", "🛠 Админ-панель",
+                  "📟 Статус", "🩺 Health", "👥 Юзеры", "📈 Growth", "🎯 По сетапам",
+                  "❓ Помощь"):
         assert label in admin, label
     for label in ("ℹ️ О боте", "🧪 Бэктест", "📖 Глоссарий", "🎟 Промокод",
                   "🧮 Калькулятор", "💳 Подписка"):
@@ -669,3 +671,14 @@ def test_bot_description_within_telegram_limit():
     assert "100% исходов" in bot.BOT_DESCRIPTION
     assert "Не финансовый совет" in bot.BOT_DESCRIPTION
     assert "не обещание прибыли" in bot.BOT_DESCRIPTION
+
+
+def test_next_milestone_and_dashboard_data():
+    assert bot.next_milestone(0) == 10
+    assert bot.next_milestone(24) == 25
+    assert bot.next_milestone(1000) is None
+    st = {"trades": 24, "open": 3, "winrate": 0.5, "expectancy_r": 0.1, "total_r": 2.4,
+          "wins": 12, "losses": 12}
+    d = bot.dashboard_data(st, [1.0, -1.0], {"BTC": {}}, {"1:1": {}}, "now")
+    assert d["milestone"] == {"current": 24, "next": 25}
+    assert d["stats"] is st and d["equity"] == [1.0, -1.0]

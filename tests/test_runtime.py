@@ -160,3 +160,10 @@ def test_long_tiers_and_watchlist_settings(fresh_db):
     assert runtime.last_milestone() == 0
     runtime.set_value("last_milestone", "25")
     assert runtime.last_milestone() == 25
+
+
+def test_webapp_url(fresh_db):
+    from app import runtime
+    assert runtime.webapp_url() == ""                       # пусто -> кнопка отдаёт файл
+    runtime.set_value("webapp_url", "https://example.com/app")
+    assert runtime.webapp_url() == "https://example.com/app"

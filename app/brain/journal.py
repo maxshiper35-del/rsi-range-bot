@@ -448,6 +448,15 @@ def stats_for_period(start_iso: str, end_iso: str) -> dict:
     }
 
 
+def equity_series() -> list:
+    """Хронологический список result_r закрытых сделок (по closed_at) — для эквити-кривой
+    дашборда. Тот же фильтр, что stats(): суммы совпадут с total_r до копейки."""
+    rows = db.query(
+        "SELECT result_r FROM signals WHERE status IN ('tp1','tp2','tp3','stopped','expired') "
+        "AND result_r IS NOT NULL ORDER BY closed_at")
+    return [r["result_r"] for r in rows]
+
+
 def stats_by_symbol() -> dict:
     """Разбивка публичной статистики по символам — для живого табло в канале."""
     rows = db.query(

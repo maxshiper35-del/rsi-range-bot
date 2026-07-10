@@ -205,6 +205,13 @@ def intro_hours() -> float:
     return float(v) if v is not None else 5.0
 
 
+def webapp_url() -> str:
+    """Публичный HTTPS-URL страницы Mini App (Cloudflare Tunnel / статик-хост). Пусто —
+    кнопка «Дашборд» отдаёт самодостаточный HTML-файл; при заданном URL становится
+    web_app-кнопкой (открывает Mini App внутри Telegram). Мега-план: «один URL away»."""
+    return _raw("webapp_url") or ""
+
+
 def stream_enabled() -> bool:
     """Реалтайм-стрим Bybit (мгновенное «вход исполнен»). Дефолт ВЫКЛ — фича за флагом;
     официальный bar-скоринг исходов от стрима не зависит, poller — бэкстоп."""
