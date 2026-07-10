@@ -16,6 +16,22 @@ from app.core.signal_engine import Side, Signal
 _TP_COLS = ("tp1", "tp2", "tp3")
 
 
+def unfilled_open_signals(symbol: str) -> list:
+    """Открытые сигналы символа без зафиксированного филла (для реалтайм-стрима)."""
+    return db.query("SELECT * FROM signals WHERE symbol=? AND status='open' "
+                    "AND result_r IS NULL AND filled_at IS NULL", (symbol,))
+
+
+def try_mark_filled(signal_id: int, iso_ts: str) -> bool:
+    """Атомарно зафиксировать филл (guard filled_at IS NULL) — гонку стрим vs
+    bar-скоринг выигрывает ровно один, второй молчит. -> True если выиграли."""
+    with db.transaction() as conn:
+        cur = conn.execute(
+            "UPDATE signals SET filled_at=?, updated_at=? WHERE id=? AND filled_at IS NULL",
+            (iso_ts, clock.utcnow_iso(), signal_id))
+        return cur.rowcount == 1
+
+
 def signal_row(signal_id: int):
     """Строка signals по id (или None) — для разовой покупки/переформатирования."""
     return db.query_one("SELECT * FROM signals WHERE id=?", (signal_id,))

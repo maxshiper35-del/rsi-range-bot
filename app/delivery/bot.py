@@ -1418,7 +1418,9 @@ def main() -> None:
              b(text="🔕 Cornix выкл" if not eff["cornix_enabled"] else "🔔 Cornix вкл",
                callback_data="adm_cornixtoggle")],
             [b(text="🖼 График сигнала: вкл" if eff["signal_chart_enabled"]
-               else "🖼 График сигнала: выкл", callback_data="adm_charttoggle")],
+               else "🖼 График сигнала: выкл", callback_data="adm_charttoggle"),
+             b(text="⚡️ Стрим: вкл" if eff["stream_enabled"] else "⚡️ Стрим: выкл",
+               callback_data="adm_streamtoggle")],
             [b(text="⚙️ Стратегия", callback_data="adm_nav_strategy"),
              b(text="💰 Цены", callback_data="adm_nav_prices")],
             [b(text="📈 Символы", callback_data="adm_nav_symbols")],
@@ -1864,6 +1866,9 @@ def main() -> None:
         elif data == "adm_charttoggle":
             await asyncio.to_thread(runtime.set_value, "signal_chart_enabled",
                                     "0" if runtime.signal_chart_enabled() else "1")
+        elif data == "adm_streamtoggle":
+            await asyncio.to_thread(runtime.set_value, "stream_enabled",
+                                    "0" if runtime.stream_enabled() else "1")
         elif data == "adm_poststats":
             ch = runtime.signals_channel()
             if ch:
@@ -2347,6 +2352,49 @@ def main() -> None:
                 log.exception("не удалось отправить алерт об ошибке хендлера админу %s", admin_id)
         return True
 
+    async def _on_intrabar(symbol_ws: str, high: float, low: float):
+        # реалтайм-филл: касание entry внутри бара -> мгновенный «вход исполнен».
+        # Гонку с bar-скорингом решает атомарный try_mark_filled; официальный исход
+        # сделки по-прежнему считает ТОЛЬКО bar-скоринг (контракт трек-рекорда).
+        from app.data.stream import entry_touched, ws_symbol
+        for symbol in runtime.symbols():
+            if ws_symbol(symbol) != symbol_ws:
+                continue
+            rows = await asyncio.to_thread(journal.unfilled_open_signals, symbol)
+            for row in rows:
+                if not entry_touched(row["entry"], high, low):
+                    continue
+                now_iso = clock.utcnow_iso()
+                if not await asyncio.to_thread(journal.try_mark_filled, row["id"], now_iso):
+                    continue                            # бар-скоринг успел первым
+                channel = runtime.signals_channel()
+                if not channel or not runtime.channel_enabled():
+                    continue
+                c = {"id": row["id"], "symbol": row["symbol"], "side": row["side"],
+                     "timeframe": row["timeframe"], "status": "filled",
+                     "entry": row["entry"], "filled_at": now_iso}
+                try:
+                    msg = await bot.send_message(
+                        channel,
+                        templates.render_fill(c, runtime.channel_mode() == "full"),
+                        parse_mode="HTML")
+                    log.info("сигнал #%s: пост filled OK (msg_id=%s, realtime)",
+                             row["id"], msg.message_id)
+                except Exception as e:                 # noqa: BLE001
+                    log.warning("realtime fill #%s: %s", row["id"], e)
+            break
+
+    async def _stream():
+        from app.data.market_data import _TF_SECONDS
+        from app.data.stream import run_stream
+
+        def _youngest_tf() -> str:
+            tfs = [tf for tf in runtime.timeframes() if tf in _TF_SECONDS] or ["1h"]
+            return min(tfs, key=lambda t: _TF_SECONDS[t])
+
+        await run_stream(runtime.symbols, _youngest_tf, _on_intrabar,
+                         runtime.stream_enabled, log)
+
     async def _poller():
         from app.data.market_data import run_poller
         # engine=None -> poller строит движок из runtime.min_confidence() каждый такт
@@ -2368,10 +2416,14 @@ def main() -> None:
             log.warning("register_bot_commands: %s", e)
         poller = asyncio.create_task(_poller())
         poller.add_done_callback(_poller_done)
+        # реалтайм-стрим (за флагом stream_enabled; при выключенном флаге тихо спит)
+        stream_task = asyncio.create_task(_stream())
+        stream_task.add_done_callback(_poller_done)     # смерть стрима тоже не молчит
         try:
             await dp.start_polling(bot)
         finally:
             poller.cancel()
+            stream_task.cancel()
 
     # TODO: /calc интерактивный (пока формат через format_calc); USDT через CryptoBot.
     log.info("bot запущен, engine=SMC, polling+poller, платежи=Stars")

@@ -205,6 +205,12 @@ def intro_hours() -> float:
     return float(v) if v is not None else 5.0
 
 
+def stream_enabled() -> bool:
+    """Реалтайм-стрим Bybit (мгновенное «вход исполнен»). Дефолт ВЫКЛ — фича за флагом;
+    официальный bar-скоринг исходов от стрима не зависит, poller — бэкстоп."""
+    return (_raw("stream_enabled") or "0").lower() in _TRUE
+
+
 def watchlist_auto_enabled() -> bool:
     """Авто-ротация watchlist по ликвидности (мега-план MAX, ставка 3). Дефолт ВЫКЛ —
     включает владелец; кандидаты проходят бэктест-гейт перед добавлением."""
@@ -324,4 +330,5 @@ def effective() -> dict:
         "lifetime_price_stars": lifetime_price_stars(),
         "watchlist_auto_enabled": watchlist_auto_enabled(),
         "watchlist_size": watchlist_size(),
+        "stream_enabled": stream_enabled(),
     }
