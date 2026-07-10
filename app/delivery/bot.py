@@ -98,12 +98,12 @@ def format_stats(st: dict) -> str:
                 f"Открытых сигналов: {st['open']}.\n"
                 f"{NO_MANUAL_EDITS_LINE}")
     return (
-        "📊 Публичная статистика (по закрытым сделкам)\n"
+        "📊 <b>Публичная статистика</b> (по закрытым сделкам)\n"
         "────────────────────\n"
-        f"Сделок: {st['trades']}  |  открыто: {st['open']}\n"
-        f"Winrate: {st['winrate']:.0%}  ({st['wins']}/{st['trades']})\n"
-        f"Матожидание: {st['expectancy_r']:+.2f}R на сделку\n"
-        f"Суммарно: {st['total_r']:+.2f}R\n"
+        f"Сделок: <b>{st['trades']}</b>  |  открыто: {st['open']}\n"
+        f"Winrate: <b>{st['winrate']:.0%}</b>  ({st['wins']}/{st['trades']})\n"
+        f"Матожидание: <b>{st['expectancy_r']:+.2f}R</b> на сделку\n"
+        f"Суммарно: <b>{st['total_r']:+.2f}R</b>\n"
         "────────────────────\n"
         f"{_small_sample_warning(st['trades'])}"
         f"{NO_MANUAL_EDITS_LINE}\n"
@@ -563,26 +563,26 @@ def format_channel_live_board(st: dict, by_symbol: dict, cohort: dict | None = N
                               by_setup: dict | None = None) -> str:
     """Живое табло для закреплённого поста канала: не winrate (самая манипулируемая метрика
     ниши), а матожидание в R, размер выборки, разбивка по символам/сетапам, когорты (semiauto)."""
-    lines = [f"📌 RSI RANGE — живое табло\n{_LINE}"]
+    lines = [f"📌 <b>RSI RANGE — живое табло</b>\n{_LINE}"]
     if st["trades"] == 0:
         lines.append("Сделки ещё копятся, первые результаты скоро появятся здесь.")
     else:
-        lines.append(f"Всего закрыто: {st['trades']}  (открыто {st['open']})")
-        lines.append(f"Матожидание: {st['expectancy_r']:+.2f}R на сделку  |  "
-                     f"Итог: {st['total_r']:+.2f}R  |  Winrate: {st['winrate']:.0%}")
+        lines.append(f"Всего закрыто: <b>{st['trades']}</b>  (открыто {st['open']})")
+        lines.append(f"Матожидание: <b>{st['expectancy_r']:+.2f}R</b> на сделку  |  "
+                     f"Итог: <b>{st['total_r']:+.2f}R</b>  |  Winrate: {st['winrate']:.0%}")
         warn = _small_sample_warning(st["trades"]).rstrip()
         if warn:
             lines.append(warn)
         if by_symbol:
-            lines.append("\nПо инструментам:")
+            lines.append("\n<b>По инструментам:</b>")
             for symbol, s in sorted(by_symbol.items()):
-                lines.append(f"  • {symbol}: {s['trades']} сд, exp {s['expectancy_r']:+.2f}R, "
-                             f"итог {s['total_r']:+.2f}R")
+                lines.append(f"  • {templates.esc(symbol)}: {s['trades']} сд, "
+                             f"exp {s['expectancy_r']:+.2f}R, итог {s['total_r']:+.2f}R")
         if by_setup:
-            lines.append("\nПо сетапам:")
+            lines.append("\n<b>По сетапам:</b>")
             for setup, s in sorted(by_setup.items()):
-                lines.append(f"  • {setup}: {s['trades']} сд, exp {s['expectancy_r']:+.2f}R, "
-                             f"итог {s['total_r']:+.2f}R")
+                lines.append(f"  • {templates.esc(setup)}: {s['trades']} сд, "
+                             f"exp {s['expectancy_r']:+.2f}R, итог {s['total_r']:+.2f}R")
     if cohort is not None:
         c, r = cohort["confirmed"], cohort["rejected"]
         lines.append("\n🧪 Подтверждённые оператором vs отклонённые (форвард-эксперимент):")
@@ -687,6 +687,24 @@ def main_menu_layout(is_admin: bool = False) -> list:
         ["📖 Глоссарий", "🎟 Промокод"],
         ["❓ Помощь"],
     ]
+
+
+BOT_DESCRIPTION = (
+    "Сигналы по крипто-фьючерсам (SMC) с честной статистикой: публикуем 100% исходов, "
+    "включая убыточные. Проверяемый CSV-трек-рекорд: sha256 + офлайн-верификатор "
+    "(/trackrecord). Исходы пишутся автоматически по ценам биржи — без ручных правок. "
+    "Триал при старте. Не финансовый совет: бэктест устойчивого края не показал — "
+    "это инструмент и прозрачная история, не обещание прибыли."
+)
+
+
+async def register_bot_profile(bot) -> None:
+    """Описание в профиле бота («Что умеет этот бот?») — было пустым. Идемпотентно,
+    ставится на старте. Короткое описание задано владельцем вручную и НЕ трогается."""
+    try:
+        await bot.set_my_description(description=BOT_DESCRIPTION)
+    except Exception:                                  # noqa: BLE001 — профиль не роняет старт
+        pass
 
 
 async def register_bot_commands(bot, admin_ids) -> None:
@@ -994,14 +1012,19 @@ def main() -> None:
         trial_days = runtime.trial_days()
         applied = await asyncio.to_thread(payments.grant_trial, m.from_user.id, trial_days)
         text = (
-            "👋 RSI Range Signals — инструмент и честная статистика (не «прибыль 400%»).\n"
-            "Пользуйтесь меню внизу — команды тоже по-прежнему работают.\n"
+            "👋 <b>RSI Range Signals</b> — инструмент и честная статистика "
+            "(не «прибыль 400%»).\n\n"
+            "• 100% исходов публикуются — включая убыточные\n"
+            "• Исход пишется автоматически по ценам биржи, без ручных правок\n"
+            "• Трек-рекорд проверяем: CSV + sha256 + офлайн-верификатор (/trackrecord)\n\n"
+            "Меню внизу экрана — всё в один тап; команды тоже работают (/help).\n"
             f"{ANTISCAM_LINE}\n"
-            "⚠️ Не финансовый совет. Риск на сделку 1–2%.")
+            "⚠️ Не финансовый совет. Риск на сделку 1–2%.\n\n"
+            "📣 Понравится — поделитесь: t.me/rsirange_bot?start=src_share")
         if applied:
-            text = (f"🎁 Открыт полный доступ на {trial_days} дн. — "
+            text = (f"🎁 <b>Открыт полный доступ на {trial_days} дн.</b> — "
                     f"все сигналы без ограничений.\n\n" + text)
-        await m.answer(text, reply_markup=_main_menu_kb(_is_admin(m)))
+        await m.answer(text, reply_markup=_main_menu_kb(_is_admin(m)), parse_mode="HTML")
 
     @dp.message(Command("about"))
     @dp.message(F.text == "ℹ️ О боте")
@@ -1024,12 +1047,12 @@ def main() -> None:
         await asyncio.to_thread(payments.register_user, m.from_user.id, m.from_user.username)
         text = await asyncio.to_thread(payments.subscription_status_text, m.from_user.id)
         if runtime.usdt_invoice_url() and not payments.cryptobot_enabled():
-            uname = m.from_user.username or m.from_user.id
+            uname = templates.esc(m.from_user.username or m.from_user.id)
             text += (f"\n\n💵 USDT: оплати по кнопке, в КОММЕНТАРИИ к платежу укажи «{uname}», "
                      "затем нажми «Я оплатил» — активируем в течение дня.")
-        text += ("\n\n💯 Money-back: не подошло — в течение 7 дней после оплаты вернём "
-                 "Stars по запросу (напишите админу канала @rsi_range).")
-        await m.answer(text, reply_markup=_subscribe_kb())
+        text += ("\n\n💯 <b>Money-back 7 дней</b>: не подошло — вернём Stars по запросу "
+                 "(напишите админу канала @rsi_range).")
+        await m.answer(text, reply_markup=_subscribe_kb(), parse_mode="HTML")
 
     async def _apply_promo(m, code: str):
         res = await asyncio.to_thread(payments.redeem_promo, m.from_user.id, code)
@@ -1320,7 +1343,8 @@ def main() -> None:
     @dp.message(Command("stats"))
     @dp.message(F.text == "📊 Статистика")
     async def _stats(m):
-        await m.answer(await asyncio.to_thread(lambda: format_stats(journal.stats())))
+        await m.answer(await asyncio.to_thread(lambda: format_stats(journal.stats())),
+                       parse_mode="HTML")
 
     @dp.message(Command("trackrecord"))
     @dp.message(F.text == "📄 Трек-рекорд")
@@ -2147,7 +2171,8 @@ def main() -> None:
                     msg_id = runtime.live_board_message_id()
                     if msg_id:
                         try:
-                            await bot.edit_message_text(text, chat_id=channel, message_id=msg_id)
+                            await bot.edit_message_text(text, chat_id=channel,
+                                                        message_id=msg_id, parse_mode="HTML")
                         except Exception as e:          # noqa: BLE001
                             if "message is not modified" in str(e).lower():
                                 pass                     # текст не изменился — не сбой, id валиден
@@ -2158,7 +2183,7 @@ def main() -> None:
                                 await asyncio.to_thread(runtime.set_live_board_message_id, None)
                     else:
                         try:
-                            sent = await bot.send_message(channel, text)
+                            sent = await bot.send_message(channel, text, parse_mode="HTML")
                         except Exception as e:          # noqa: BLE001
                             log.warning("send live board: %s", e)
                         else:
@@ -2320,6 +2345,7 @@ def main() -> None:
     async def _main():
         try:
             await register_bot_commands(bot, cfg.admin_ids)
+            await register_bot_profile(bot)
         except Exception as e:                         # noqa: BLE001 — меню не критично для работы
             log.warning("register_bot_commands: %s", e)
         poller = asyncio.create_task(_poller())

@@ -119,7 +119,7 @@ def test_format_stats_and_calc():
     assert "пустая" in empty
     filled = bot.format_stats({"trades": 10, "open": 2, "wins": 6, "winrate": 0.6,
                                "expectancy_r": 0.4, "total_r": 4.0, "losses": 4})
-    assert "Winrate: 60%" in filled
+    assert "Winrate: <b>60%</b>" in filled     # /stats теперь HTML
     calc = bot.format_calc(1000, 2.0, 100.0, 98.0)
     assert "Объём" in calc and "Плечо" in calc
 
@@ -661,3 +661,11 @@ def test_verifier_html_self_contained():
     for marker in ("http://", "https://", "src=", "@import", "fetch(", "XMLHttpRequest"):
         assert marker not in html, f"внешняя зависимость: {marker}"
     assert "Не финансовый совет" in html          # честный дисклеймер и здесь
+
+
+def test_bot_description_within_telegram_limit():
+    """Описание профиля: лимит Telegram 512 символов, честные формулировки на месте."""
+    assert len(bot.BOT_DESCRIPTION) <= 512, len(bot.BOT_DESCRIPTION)
+    assert "100% исходов" in bot.BOT_DESCRIPTION
+    assert "Не финансовый совет" in bot.BOT_DESCRIPTION
+    assert "не обещание прибыли" in bot.BOT_DESCRIPTION

@@ -459,13 +459,14 @@ def subscription_status_text(tg_id: int) -> str:
     from app import runtime
 
     head = (
-        "💳 Подписка RSI Range Signals\n"
+        "💳 <b>Подписка RSI Range Signals</b>\n"
         "────────────────────\n"
         "Все сигналы + автоведение журнала.\n"
-        f"Цена: {runtime.price_stars()}⭐ Telegram Stars за {_fmt_days(runtime.sub_days())}.\n"
+        f"Цена: <b>{runtime.price_stars()}⭐</b> за {_fmt_days(runtime.sub_days())} "
+        "(тарифы длиннее — кнопками ниже).\n"
     )
     u = get_user(tg_id)
     if u and is_paid(tg_id):
-        return head + (f"\n✅ Подписка активна до {u['paid_until'][:10]}. "
+        return head + (f"\n✅ <b>Подписка активна до {u['paid_until'][:10]}</b>. "
                        "Можно продлить кнопкой ниже.")
     return head + "\nНажми кнопку ниже, чтобы оплатить через Telegram Stars 👇"
