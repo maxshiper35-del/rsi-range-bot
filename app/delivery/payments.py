@@ -70,6 +70,52 @@ def grant_subscription(tg_id: int, method: str, amount: float, currency: str,
     return True
 
 
+def due_for_trial_drip(trial_days: float) -> list:
+    """Кому и какую стадию онбординг-дрипа слать: -> [(tg_id, stage)].
+
+    Пороги от trial_granted_at: стадия 1 — через 1 день (как читать сигнал),
+    стадия 2 — через 3 дня (проверь трек-рекорд сам), стадия 3 — за сутки до конца
+    триала (trial_days-1, но не раньше стадии 2). Оплатившие исключаются НАВСЕГДА
+    (реальный платёж в payments) — им продавать нечего; заблокировавшие бота тоже.
+    Одна стадия за вызов на юзера (следующая — следующим тактом)."""
+    thresholds = [(1, 1.0), (2, 3.0), (3, max(trial_days - 1.0, 3.5))]
+    now = _now_dt()
+    out = []
+    rows = db.query(
+        "SELECT u.tg_id, u.trial_granted_at, u.trial_drip_stage FROM users u "
+        "WHERE u.trial_granted_at IS NOT NULL AND u.trial_drip_stage < 3 AND u.is_active=1 "
+        "AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.tg_id=u.tg_id AND p.status='paid')")
+    for r in rows:
+        granted = datetime.fromisoformat(r["trial_granted_at"])
+        age_days = (now - granted).total_seconds() / 86400
+        if age_days > trial_days + 1.0:
+            continue                                    # поезд ушёл — см. expire_stale_trial_drips
+        for stage, after in thresholds:
+            if r["trial_drip_stage"] < stage and age_days >= after:
+                out.append((r["tg_id"], stage))
+                break                                   # одна стадия за такт
+    return out
+
+
+def expire_stale_trial_drips(trial_days: float) -> int:
+    """Молча закрыть дрип тем, чей триал истёк до включения фичи (или письмо опоздало) —
+    иначе первый же такт после деплоя разослал бы онбординг задним числом. -> сколько."""
+    cutoff = (_now_dt() - timedelta(days=trial_days + 1.0)).isoformat()
+    with db.transaction() as conn:
+        cur = conn.execute(
+            "UPDATE users SET trial_drip_stage=3, updated_at=? "
+            "WHERE trial_granted_at IS NOT NULL AND trial_drip_stage < 3 "
+            "AND trial_granted_at < ?",
+            (clock.utcnow_iso(), cutoff))
+        return cur.rowcount
+
+
+def mark_trial_drip(tg_id: int, stage: int) -> None:
+    db.execute("UPDATE users SET trial_drip_stage=?, updated_at=? "
+               "WHERE tg_id=? AND trial_drip_stage < ?",
+               (stage, clock.utcnow_iso(), tg_id, stage))
+
+
 def find_refundable_stars_payment(tg_id: int) -> dict | None:
     """Последний оплаченный Stars-платёж юзера с charge_id — кандидат на money-back.
 

@@ -433,3 +433,46 @@ def test_find_refundable_ignores_non_stars_and_unpaid(fresh_db):
     assert payments.find_refundable_stars_payment(503) is None
     payments.grant_subscription(503, "cryptobot", 20, "USDT", 30, "inv_1")
     assert payments.find_refundable_stars_payment(503) is None   # USDT не рефандится этим путём
+
+
+def _age_trial(db_, tg_id, days_ago):
+    from datetime import datetime, timedelta, timezone
+    granted = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    db_.execute("UPDATE users SET trial_granted_at=? WHERE tg_id=?", (granted, tg_id))
+
+
+def test_trial_drip_stages(fresh_db):
+    """Дрип: стадии по возрасту триала, одна за такт, метки не откатываются."""
+    from app.delivery import payments
+    assert payments.grant_trial(601, 5) is True
+    assert payments.due_for_trial_drip(5.0) == []           # день 0 — рано
+    _age_trial(fresh_db, 601, 1.2)
+    assert payments.due_for_trial_drip(5.0) == [(601, 1)]   # день 1
+    payments.mark_trial_drip(601, 1)
+    assert payments.due_for_trial_drip(5.0) == []           # стадия 1 уже была
+    _age_trial(fresh_db, 601, 3.1)
+    assert payments.due_for_trial_drip(5.0) == [(601, 2)]   # день 3
+    payments.mark_trial_drip(601, 2)
+    _age_trial(fresh_db, 601, 4.2)
+    assert payments.due_for_trial_drip(5.0) == [(601, 3)]   # за сутки до конца (5-1)
+    payments.mark_trial_drip(601, 3)
+    assert payments.due_for_trial_drip(5.0) == []
+    payments.mark_trial_drip(601, 1)                        # метка вниз не откатывается
+    u = payments.get_user(601)
+    assert u["trial_drip_stage"] == 3
+
+
+def test_trial_drip_excludes_paid_and_stale(fresh_db):
+    from app.delivery import payments
+    # оплативший — исключён навсегда (продавать нечего)
+    payments.grant_trial(602, 5)
+    _age_trial(fresh_db, 602, 1.5)
+    payments.grant_subscription(602, "stars", 1000, "XTR", 30, "chg_drip")
+    assert payments.due_for_trial_drip(5.0) == []
+    # протухший (триал кончился до включения фичи) — закрывается молча, не спамится
+    payments.grant_trial(603, 5)
+    _age_trial(fresh_db, 603, 9.0)
+    assert payments.due_for_trial_drip(5.0) == []           # не в рассылке
+    assert payments.expire_stale_trial_drips(5.0) == 1      # помечен задним числом
+    assert payments.get_user(603)["trial_drip_stage"] == 3
+    assert payments.expire_stale_trial_drips(5.0) == 0      # идемпотентно

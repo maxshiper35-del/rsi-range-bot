@@ -100,3 +100,11 @@ def test_render_milestone():
     txt = templates.render_milestone(25, st)
     assert "Веха: 25 закрытых сделок" in txt and "56%" in txt and "+0.08R" in txt
     assert "/trackrecord" in txt and "Не финансовый совет" in txt
+
+
+def test_trial_drip_texts():
+    assert set(templates.TRIAL_DRIP) == {1, 2, 3}
+    assert "стоп" in templates.TRIAL_DRIP[1].lower()         # день 1: риск-дисциплина
+    assert "/trackrecord" in templates.TRIAL_DRIP[2]          # день 3: проверь сам
+    assert "/subscribe" in templates.TRIAL_DRIP[3]            # финал: тарифы
+    assert "не за обещание прибыли" in templates.TRIAL_DRIP[3]  # честность и в продаже

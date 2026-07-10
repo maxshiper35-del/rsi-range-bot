@@ -2103,6 +2103,24 @@ def main() -> None:
                 await asyncio.to_thread(payments.mark_claim_escalated, claim["id"])
             except Exception as e:                     # noqa: BLE001
                 log.warning("mark_claim_escalated #%s: %s", claim["id"], e)
+        # онбординг-дрип триала (мега-план MAX): день 1 / день 3 / за сутки до конца.
+        # Оплатившие исключены в самом запросе; одна стадия на юзера за такт.
+        # Протухшие (триал истёк до включения фичи) закрываются молча — без спама задним числом.
+        stale = await asyncio.to_thread(payments.expire_stale_trial_drips,
+                                        float(runtime.trial_days()))
+        if stale:
+            log.info("дрип: закрыто задним числом %d протухших триалов", stale)
+        for uid, stage in await asyncio.to_thread(payments.due_for_trial_drip,
+                                                  float(runtime.trial_days())):
+            try:
+                await bot.send_message(uid, templates.TRIAL_DRIP[stage], parse_mode="HTML")
+                await asyncio.to_thread(payments.mark_trial_drip, uid, stage)
+                log.info("дрип стадия %d -> %s", stage, uid)
+            except Exception as e:                     # noqa: BLE001 — заблокировал бота и т.п.
+                log.warning("дрип %d -> %s: %s", stage, uid, e)
+                # стадию всё равно отмечаем: юзер с закрытой личкой не должен
+                # получать ретраи каждый час до конца триала
+                await asyncio.to_thread(payments.mark_trial_drip, uid, stage)
         # win-back: одно напоминание в первые 2 дня после истечения подписки
         for row in await asyncio.to_thread(payments.due_for_winback, 2):
             try:
