@@ -1732,14 +1732,17 @@ def main() -> None:
                     log.warning("график сигнала #%s: %s", sid, e)
             try:
                 if photo is not None and caption_fits(ch_text):
-                    await bot.send_photo(
+                    msg = await bot.send_photo(
                         channel, BufferedInputFile(photo, filename=f"signal_{sid}.png"),
                         caption=ch_text, parse_mode="HTML")
+                    log.info("сигнал #%s: пост в канал OK (фото, msg_id=%s)", sid, msg.message_id)
                 else:
                     if photo is not None:               # подпись не влезла — фото отдельно
                         await bot.send_photo(
                             channel, BufferedInputFile(photo, filename=f"signal_{sid}.png"))
-                    await bot.send_message(channel, ch_text, parse_mode="HTML")
+                    msg = await bot.send_message(channel, ch_text, parse_mode="HTML")
+                    log.info("сигнал #%s: пост в канал OK (msg_id=%s%s)", sid, msg.message_id,
+                             ", фото отдельно" if photo is not None else "")
             except Exception as e:                     # noqa: BLE001 — канал не роняет рассылку
                 log.warning("пост в канал %s: %s", channel, e)
         # воронка: админы/платные -> полный; free -> полный до лимита/нед, дальше тизер
@@ -1961,15 +1964,19 @@ def main() -> None:
                     # если сделка не закрылась этим же тиком — результат сам скажет, что вход был
                     if c["id"] in resolved_ids or not fill_is_fresh(c, now_dt):
                         continue
-                    await bot.send_message(channel, templates.render_fill(c, show_price),
-                                           parse_mode="HTML")
+                    msg = await bot.send_message(channel, templates.render_fill(c, show_price),
+                                                 parse_mode="HTML")
+                    log.info("сигнал #%s: пост filled OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] == "expired":
-                    await bot.send_message(channel, templates.render_expired(c),
-                                           parse_mode="HTML")
+                    msg = await bot.send_message(channel, templates.render_expired(c),
+                                                 parse_mode="HTML")
+                    log.info("сигнал #%s: пост expired OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] in ("tp1", "tp2", "tp3", "stopped"):
-                    await bot.send_message(
+                    msg = await bot.send_message(
                         channel, templates.render_result(c, runtime.display_leverage()),
                         parse_mode="HTML")
+                    log.info("сигнал #%s: пост result(%s) OK (msg_id=%s)",
+                             c["id"], c["status"], msg.message_id)
             except Exception as e:                     # noqa: BLE001
                 log.warning("пост цикла сделки в канал #%s: %s", c["id"], e)
 
