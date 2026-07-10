@@ -430,6 +430,30 @@ def test_format_health_fresh_vs_stale():
     assert "⚠️ Последний бэкап: нет данных" in txt_missing
 
 
+def test_poller_tick_slack_seconds_scales_with_cycle():
+    # найдено при аудите: захардкоженный порог 3700с был размерен под 15m-цикл (900с,
+    # запас x4); после перехода на 1h,4h (гейт F) 1h-цикл (3600с) почти не имел запаса —
+    # порог обязан расти вместе с youngest ТФ скана, иначе ложные тревоги на обычный ретрай
+    assert bot.poller_tick_slack_seconds(["15m", "1h"]) == max(900 * 1.15, 900 + 300)
+    assert bot.poller_tick_slack_seconds(["1h", "4h"]) == max(3600 * 1.15, 3600 + 300)
+    assert bot.poller_tick_slack_seconds(["4h"]) == 14400 * 1.15
+    assert bot.poller_tick_slack_seconds([]) == max(3600 * 1.15, 3600 + 300)  # дефолт 1h
+    assert bot.poller_tick_slack_seconds(["unknown_tf"]) == max(3600 * 1.15, 3600 + 300)
+
+
+def test_format_health_uses_dynamic_slack():
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    age_65min = (now - timedelta(minutes=65)).isoformat()
+    # старый жёсткий порог (3700с=61.7м) считал бы 65 минут просроченными; новый порог
+    # для цикла 1h,4h (~69.5м) — ещё в норме, ложной тревоги быть не должно
+    slack = bot.poller_tick_slack_seconds(["1h", "4h"])
+    txt = bot.format_health(3600.0, age_65min, age_65min, 1024, "wal", slack)
+    assert "✅ Последний тик poller" in txt
+    txt_default = bot.format_health(3600.0, age_65min, age_65min, 1024, "wal")
+    assert "⚠️ Последний тик poller" in txt_default   # старый дефолт (3700с) — без изменений
+
+
 def test_format_crash_alert_contains_type_and_truncates():
     try:
         raise ValueError("boom")

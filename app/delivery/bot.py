@@ -680,9 +680,23 @@ def _fmt_age(iso: str | None, now: datetime) -> str:
     return f"{secs / 86400:.1f}д назад"
 
 
+def poller_tick_slack_seconds(timeframes: list) -> float:
+    """Порог 'тик poller устарел' для /health — ЗАВИСИТ от цикла скана: poller спит до
+    закрытия младшего ТФ (market_data.run_poller), значит нормальный промежуток между
+    тиками растёт вместе с ним. Захардкоженный порог под 15m (900с) после перехода на
+    1h,4h (гейт F, docs/UPGRADE_BRIEF_2026_07.md) давал бы ложные тревоги при обычном
+    ретрае биржи — считаем от факта: youngest_tf * 1.15 + 300с запаса на скан/ретраи."""
+    secs = [_TF_SECONDS_VIEW[tf] for tf in timeframes if tf in _TF_SECONDS_VIEW]
+    youngest = min(secs) if secs else 3600
+    return max(youngest * 1.15, youngest + 300)
+
+
 def format_health(uptime_seconds: float, last_tick_at: str | None,
-                  last_backup_at: str | None, db_size_bytes: int, wal_mode: str) -> str:
-    """/health — быстрый живой чек: аптайм, последний тик поллера, бэкап, БД, WAL."""
+                  last_backup_at: str | None, db_size_bytes: int, wal_mode: str,
+                  tick_slack_seconds: float = 3700.0) -> str:
+    """/health — быстрый живой чек: аптайм, последний тик поллера, бэкап, БД, WAL.
+    tick_slack_seconds — см. poller_tick_slack_seconds (дефолт — старое поведение
+    под 15m, для обратной совместимости вызовов без явного расчёта)."""
     from datetime import datetime
 
     now = datetime.now(timezone.utc)
@@ -690,7 +704,7 @@ def format_health(uptime_seconds: float, last_tick_at: str | None,
     tick_age = _fmt_age(last_tick_at, now)
     backup_age = _fmt_age(last_backup_at, now)
     tick_warn = "⚠️ " if (not last_tick_at or (now - datetime.fromisoformat(last_tick_at))
-                          .total_seconds() > 3700) else "✅ "
+                          .total_seconds() > tick_slack_seconds) else "✅ "
     backup_warn = "⚠️ " if (not last_backup_at or (now - datetime.fromisoformat(last_backup_at))
                             .total_seconds() > 26 * 3600) else "✅ "
     return (
@@ -1297,8 +1311,9 @@ def main() -> None:
             size = cfg.db_path.stat().st_size if cfg.db_path.exists() else 0
             return uptime, wal, size
         uptime, wal, size = await asyncio.to_thread(_collect)
+        slack = poller_tick_slack_seconds(runtime.timeframes())
         await m.answer(format_health(uptime, runtime.last_poller_tick_at(),
-                                     runtime.last_backup_at(), size, wal))
+                                     runtime.last_backup_at(), size, wal, slack))
 
     @dp.message(Command("pause"))
     async def _pause(m):
