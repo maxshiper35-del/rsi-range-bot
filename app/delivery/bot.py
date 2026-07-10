@@ -253,6 +253,9 @@ _ADMIN_NUMERIC_FIELDS = {
     "intro_price_stars": ("Цена пробного тарифа в Stars (0 — выключить пробный)", "int"),
     "intro_hours": ("Длительность пробного тарифа в часах", "float"),
     "paid_signal_stars": ("Цена разовой покупки сигнала в Stars (0 — выключить кнопку)", "int"),
+    "quarter_price_stars": ("Цена квартала (90 дней) в Stars (0 — скрыть тариф)", "int"),
+    "year_price_stars": ("Цена года (365 дней) в Stars (0 — скрыть тариф)", "int"),
+    "lifetime_price_stars": ("Цена lifetime в Stars (0 — скрыть тариф)", "int"),
 }
 
 
@@ -410,6 +413,45 @@ _UNLOCK_DENIALS = {
     "closed": "Сигнал уже закрыт — результат опубликован в канале.",
     "disabled": "Разовая покупка сейчас недоступна.",
 }
+
+
+MILESTONES = (10, 25, 50, 100, 250, 500, 1000)
+
+
+def milestone_reached(prev: int, trades: int, levels: tuple = MILESTONES) -> int | None:
+    """Наибольшая ТОЛЬКО ЧТО достигнутая веха закрытых сделок (prev < m <= trades).
+
+    «Вехи как контент» (мега-план): факт накопления проверяемой истории — сам по себе
+    органический пост, нулевая стоимость. Возвращает одну (старшую) веху за раз."""
+    hit = [m for m in levels if prev < m <= trades]
+    return max(hit) if hit else None
+
+
+def watchlist_gate_decision(expectancy_r: float, trades: int,
+                            min_trades: int = 5, min_expectancy: float = -0.05) -> bool:
+    """Допуск нового символа в авто-watchlist по бэктесту (мега-план MAX, ставка 3).
+
+    Порог сознательно мягкий: «не хуже нейтрали» (−0.05R с учётом издержек), а не
+    «доказанный плюс» — гейт отсекает откровенно враждебные символы, статистику копит
+    живой журнал. Мало сделок (< min_trades) = сетапы почти не встречаются = смысла
+    добавлять нет."""
+    return trades >= min_trades and expectancy_r >= min_expectancy
+
+
+def plan_watchlist_rotation(current: list, top: list, gate_results: dict) -> tuple:
+    """Новый состав watchlist из текущего, топа по ликвидности и результатов гейта.
+
+    Правила: символы текущего списка, выпавшие из топа, УДАЛЯЮТСЯ (ликвидность ушла);
+    новые кандидаты добавляются только с gate_results[sym] == True. Порядок — как в top
+    (по объёму). Если итог пуст — оставляем текущий (не даём боту остаться без рынка).
+    -> (new_list, added, removed). Чистая функция."""
+    current_set = set(current)
+    new_list = [s for s in top if s in current_set or gate_results.get(s)]
+    if not new_list:
+        return current, [], []
+    added = [s for s in new_list if s not in current_set]
+    removed = [s for s in current if s not in new_list]
+    return new_list, added, removed
 
 
 def unlock_verdict(row, price: int) -> str:
@@ -899,6 +941,26 @@ def main() -> None:
         rows.append([InlineKeyboardButton(
             text=f"⭐ {runtime.price_stars()} Stars / {_fmt_days(runtime.sub_days())}",
             callback_data="pay_stars")])
+        # длинные тиры (разовые инвойсы: нативные Stars-подписки >30 дней невозможны);
+        # скидка считается от актуальной месячной цены — не соврёт при смене цен
+        def _disc(price: int, months: float) -> str:
+            base = runtime.price_stars() * months
+            return (f" (−{round((1 - price / base) * 100)}%)"
+                    if 0 < price < base else "")
+
+        q, y, lf = (runtime.quarter_price_stars(), runtime.year_price_stars(),
+                    runtime.lifetime_price_stars())
+        if q > 0:
+            rows.append([InlineKeyboardButton(
+                text=f"⭐ {q} Stars / 90 дней{_disc(q, 3)}",
+                callback_data="pay_stars_quarter")])
+        if y > 0:
+            rows.append([InlineKeyboardButton(
+                text=f"⭐ {y} Stars / год{_disc(y, 12)}",
+                callback_data="pay_stars_year")])
+        if lf > 0:
+            rows.append([InlineKeyboardButton(
+                text=f"⭐ {lf} Stars / навсегда", callback_data="pay_stars_life")])
         if payments.cryptobot_enabled():                # авто через Crypto Pay API
             rows.append([InlineKeyboardButton(
                 text=f"💵 {runtime.price_usdt():g} USDT / {runtime.sub_days()} дн",
@@ -991,15 +1053,17 @@ def main() -> None:
         await state.clear()
         await _apply_promo(m, (m.text or "").strip())
 
-    async def _send_stars_invoice(chat_id: int, days: float, stars: int):
+    async def _send_stars_invoice(chat_id: int, days: float, stars: int,
+                                  label: str | None = None):
+        human = label or _fmt_days(days)
         await bot.send_invoice(
             chat_id=chat_id,
             title="Подписка RSI Range Signals",
-            description=f"Доступ ко всем сигналам на {_fmt_days(days)}.",
+            description=f"Доступ ко всем сигналам на {human}.",
             payload=f"sub:{days}",                      # _paid парсит float — дробные дни ок
             provider_token="",                          # Stars: провайдер не нужен
             currency="XTR",
-            prices=[LabeledPrice(label=f"{_fmt_days(days)} доступа", amount=stars)],
+            prices=[LabeledPrice(label=f"{human} доступа", amount=stars)],
         )
 
     @dp.callback_query(F.data == "pay_stars")
@@ -1011,6 +1075,24 @@ def main() -> None:
     async def _pay_stars_intro(cq):
         await _send_stars_invoice(cq.from_user.id, round(runtime.intro_hours() / 24, 6),
                                   runtime.intro_price_stars())
+        await cq.answer()
+
+    @dp.callback_query(F.data == "pay_stars_quarter")
+    async def _pay_stars_quarter(cq):
+        await _send_stars_invoice(cq.from_user.id, 90, runtime.quarter_price_stars())
+        await cq.answer()
+
+    @dp.callback_query(F.data == "pay_stars_year")
+    async def _pay_stars_year(cq):
+        await _send_stars_invoice(cq.from_user.id, 365, runtime.year_price_stars(),
+                                  label="1 год")
+        await cq.answer()
+
+    @dp.callback_query(F.data == "pay_stars_life")
+    async def _pay_stars_life(cq):
+        # lifetime = 36500 дней (100 лет): без спец-статуса в БД — просто далёкий paid_until
+        await _send_stars_invoice(cq.from_user.id, 36500, runtime.lifetime_price_stars(),
+                                  label="навсегда (lifetime)")
         await cq.answer()
 
     @dp.callback_query(F.data.startswith("unlock:"))
@@ -1339,6 +1421,12 @@ def main() -> None:
             [b(text=(f"🔓 Разовый сигнал: {eff['paid_signal_stars']}⭐"
                      if eff['paid_signal_stars'] else "🔓 Разовый сигнал: выкл"),
                callback_data="adm_prompt_paid_signal_stars")],
+            [b(text=f"📅 Квартал: {eff['quarter_price_stars']}⭐",
+               callback_data="adm_prompt_quarter_price_stars"),
+             b(text=f"📅 Год: {eff['year_price_stars']}⭐",
+               callback_data="adm_prompt_year_price_stars")],
+            [b(text=f"♾ Lifetime: {eff['lifetime_price_stars']}⭐",
+               callback_data="adm_prompt_lifetime_price_stars")],
             [b(text=f"📢 Плечо в постах: ×{eff['display_leverage']:g}"
                     if eff['display_leverage'] else "📢 Плечо в постах: выкл",
                callback_data="adm_prompt_display_leverage")],
@@ -1828,6 +1916,21 @@ def main() -> None:
             sig, sid, df, datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC"))
         return graphics.render_signal_chart(data)
 
+    def _watchlist_gate(symbol: str) -> tuple:
+        # бэктест-гейт кандидата в авто-watchlist: 3 мес 1h на включённых сетапах
+        # (порог — watchlist_gate_decision). Синхронно — только через asyncio.to_thread.
+        from app.brain.smc_setups import SMCConfig
+        from app.data.market_data import _TF_SECONDS, fetch_history
+        from app.sim.backtest import run_backtest
+
+        bars = int(3 * 30.44 * 86400 / _TF_SECONDS["1h"])
+        df = fetch_history(symbol, "1h", target_bars=bars)
+        rep = run_backtest(df, symbol, "1h",
+                           cfg=SMCConfig(use_time_filter=False,
+                                         enabled_setups=tuple(runtime.enabled_setups())))
+        return (watchlist_gate_decision(rep.expectancy_r, rep.trades),
+                rep.expectancy_r, rep.trades)
+
     async def _broadcast(sig, sid):
         try:
             # runtime, не cfg: иначе смена режима из админки без рестарта не меняла
@@ -1971,6 +2074,42 @@ def main() -> None:
                 await asyncio.to_thread(payments.mark_winback_reminded, row["tg_id"])
             except Exception as e:                     # noqa: BLE001
                 log.warning("winback %s: %s", row["tg_id"], e)
+        # авто-watchlist (мега-план MAX, ставка 3): раз в сутки пересобрать список по
+        # ликвидности; новые символы — только через бэктест-гейт. Дефолт ВЫКЛ (флаг).
+        now_iso = clock.utcnow_iso()
+        if (runtime.watchlist_auto_enabled()
+                and should_refresh_board(runtime.last_watchlist_refresh_at(), now_iso)):
+            try:
+                from app.data.market_data import top_liquid_symbols
+                current = await asyncio.to_thread(runtime.symbols)
+                top = await asyncio.to_thread(
+                    top_liquid_symbols, runtime.watchlist_size(),
+                    runtime.watchlist_blacklist())
+                gate: dict = {}
+                for sym in top:
+                    if sym in current:
+                        continue
+                    ok, exp, trades = await asyncio.to_thread(_watchlist_gate, sym)
+                    gate[sym] = ok
+                    log.info("watchlist-гейт %s: exp=%+.3fR, сделок=%d -> %s",
+                             sym, exp, trades, "допущен" if ok else "мимо")
+                new_list, added, removed = plan_watchlist_rotation(current, top, gate)
+                if added or removed:
+                    await asyncio.to_thread(runtime.set_value, "symbols",
+                                            ",".join(new_list))
+                    text = ("🔄 Авто-watchlist обновлён: " + ", ".join(new_list)
+                            + (f"\n➕ добавлены: {', '.join(added)}" if added else "")
+                            + (f"\n➖ убраны: {', '.join(removed)}" if removed else ""))
+                    for admin_id in cfg.admin_ids:
+                        try:
+                            await bot.send_message(admin_id, text)
+                        except Exception as e:          # noqa: BLE001
+                            log.warning("watchlist notify %s: %s", admin_id, e)
+            except Exception as e:                     # noqa: BLE001 — ротация не роняет такт
+                log.warning("авто-watchlist: %s", e)
+            finally:
+                # метка ставится и при сбое: не молотить биржу каждый час, повтор завтра
+                await asyncio.to_thread(runtime.set_last_watchlist_refresh_at, now_iso)
         # живое табло: авто-обновляемый закреплённый пост статистики в канале (раз в 24ч).
         # Состояние (live_board_message_id) намеренно синхронизировано с ФАКТИЧЕСКИМ успехом
         # каждого Telegram-вызова по отдельности — иначе частичный сбой (нет прав на pin,
@@ -2118,6 +2257,21 @@ def main() -> None:
                              c["id"], c["status"], msg.message_id)
             except Exception as e:                     # noqa: BLE001
                 log.warning("пост цикла сделки в канал #%s: %s", c["id"], e)
+
+        # «вехи как контент» (мега-план MAX): рубеж закрытых сделок -> органический пост
+        if any(not c.get("shadow") and c["status"] in ("tp1", "tp2", "tp3", "stopped")
+               for c in closed):
+            st = await asyncio.to_thread(journal.stats)
+            m = milestone_reached(runtime.last_milestone(), st.get("trades", 0))
+            if m:
+                try:
+                    msg = await bot.send_message(
+                        channel, templates.render_milestone(m, st), parse_mode="HTML")
+                    log.info("веха %d сделок: пост OK (msg_id=%s)", m, msg.message_id)
+                    # метка — только после успешного поста (иначе повтор на след. закрытии)
+                    await asyncio.to_thread(runtime.set_value, "last_milestone", str(m))
+                except Exception as e:                 # noqa: BLE001
+                    log.warning("пост вехи %d: %s", m, e)
 
     @dp.error()
     async def _on_handler_error(event) -> bool:

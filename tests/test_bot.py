@@ -618,3 +618,36 @@ def test_unlock_verdict():
         assert bot.unlock_verdict({"status": st, "result_r": r}, 50) == "closed"
     for verdict in ("not_found", "closed", "disabled"):
         assert verdict in bot._UNLOCK_DENIALS
+
+
+def test_milestone_reached():
+    """Вехи: одна (старшая) за раз, только что пересечённая."""
+    assert bot.milestone_reached(0, 5) is None
+    assert bot.milestone_reached(0, 10) == 10
+    assert bot.milestone_reached(9, 12) == 10
+    assert bot.milestone_reached(10, 12) is None                 # уже опубликована
+    assert bot.milestone_reached(20, 60) == 50                   # скачок через 25 -> старшая
+    assert bot.milestone_reached(999, 1000) == 1000
+    assert bot.milestone_reached(1000, 5000) is None             # выше вех нет
+
+
+def test_watchlist_gate_decision():
+    """Гейт кандидата: «не хуже нейтрали» и минимум сделок."""
+    assert bot.watchlist_gate_decision(0.10, 12) is True
+    assert bot.watchlist_gate_decision(-0.05, 5) is True         # ровно на порогах
+    assert bot.watchlist_gate_decision(-0.06, 20) is False       # хуже нейтрали
+    assert bot.watchlist_gate_decision(0.50, 4) is False         # мало сделок
+    assert bot.watchlist_gate_decision(0.0, 0) is False
+
+
+def test_plan_watchlist_rotation():
+    cur = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+    top = ["BTC/USDT:USDT", "XRP/USDT:USDT", "ETH/USDT:USDT", "DOGE/USDT:USDT"]
+    gate = {"XRP/USDT:USDT": True, "DOGE/USDT:USDT": False}
+    new, added, removed = bot.plan_watchlist_rotation(cur, top, gate)
+    assert new == ["BTC/USDT:USDT", "XRP/USDT:USDT", "ETH/USDT:USDT"]  # порядок топа
+    assert added == ["XRP/USDT:USDT"]                # DOGE не прошёл гейт
+    assert removed == ["SOL/USDT:USDT"]              # выпал из топа по ликвидности
+    # защита: пустой итог не оставляет бот без рынка
+    new2, a2, r2 = bot.plan_watchlist_rotation(cur, [], {})
+    assert new2 == cur and a2 == [] and r2 == []

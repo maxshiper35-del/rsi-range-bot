@@ -141,3 +141,22 @@ def test_paid_signal_stars(fresh_db):
     runtime.set_value("paid_signal_stars", 50)
     assert runtime.paid_signal_stars() == 50
     assert runtime.effective()["paid_signal_stars"] == 50
+
+
+def test_long_tiers_and_watchlist_settings(fresh_db):
+    from app import runtime
+    # длинные тарифы: дефолты и скрытие нулём
+    assert runtime.quarter_price_stars() == 2500
+    assert runtime.year_price_stars() == 8000
+    assert runtime.lifetime_price_stars() == 15000
+    runtime.set_value("year_price_stars", 0)
+    assert runtime.year_price_stars() == 0
+    # авто-watchlist: дефолт ВЫКЛ, blacklist парсится
+    assert runtime.watchlist_auto_enabled() is False
+    assert runtime.watchlist_size() == 15
+    runtime.set_value("watchlist_blacklist", "DOGE/USDT:USDT, PEPE/USDT:USDT")
+    assert runtime.watchlist_blacklist() == ("DOGE/USDT:USDT", "PEPE/USDT:USDT")
+    # вехи
+    assert runtime.last_milestone() == 0
+    runtime.set_value("last_milestone", "25")
+    assert runtime.last_milestone() == 25

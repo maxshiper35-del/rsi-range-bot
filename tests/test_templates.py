@@ -93,3 +93,10 @@ def test_render_result_without_price_move():
     del c["price_move_pct"]
     txt = templates.render_result(c, display_leverage=10.0)
     assert "+2.26R" in txt and "плече" not in txt
+
+
+def test_render_milestone():
+    st = {"trades": 25, "winrate": 0.56, "expectancy_r": 0.08, "total_r": 2.1}
+    txt = templates.render_milestone(25, st)
+    assert "Веха: 25 закрытых сделок" in txt and "56%" in txt and "+0.08R" in txt
+    assert "/trackrecord" in txt and "Не финансовый совет" in txt

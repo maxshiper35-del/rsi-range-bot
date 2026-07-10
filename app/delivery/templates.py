@@ -118,6 +118,22 @@ def render_expired(c: dict) -> str:
     )
 
 
+def render_milestone(milestone: int, st: dict) -> str:
+    """Пост-веха: N закрытых сделок (честные цифры, вся история проверяема).
+
+    st — journal.stats(): trades/winrate/expectancy_r/total_r. Никаких обещаний —
+    только факт накопления проверяемой истории."""
+    return (
+        f"🏁 <b>Веха: {milestone} закрытых сделок</b>\n{LINE}\n"
+        f"Winrate: <b>{st.get('winrate', 0) * 100:.0f}%</b> · "
+        f"матожидание <b>{st.get('expectancy_r', 0):+.2f}R</b> · "
+        f"итог <b>{st.get('total_r', 0):+.1f}R</b>\n"
+        "Каждый исход записан автоматически по ценам биржи — без ручных правок.\n"
+        "Полный CSV с sha256: /trackrecord у @rsirange_bot\n"
+        f"{LINE}\n⚠️ Не финансовый совет. Прошлые результаты не определяют будущие."
+    )
+
+
 def render_result(c: dict, display_leverage: float = 0.0) -> str:
     """Результат закрытой сделки (публичный трек-рекорд).
 

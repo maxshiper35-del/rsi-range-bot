@@ -144,3 +144,23 @@ def test_fetch_history_unknown_tf():
     from app.data.market_data import fetch_history
     with pytest.raises(ValueError):
         fetch_history("BTC/USDT:USDT", "3m", target_bars=10, exchange=object())
+
+
+def test_top_liquid_symbols_filters_and_sorts():
+    from app.data.market_data import top_liquid_symbols
+
+    class _StubEx:
+        def fetch_tickers(self):
+            return {
+                "BTC/USDT:USDT": {"quoteVolume": 900e6},
+                "ETH/USDT:USDT": {"quoteVolume": 500e6},
+                "DOGE/USDT:USDT": {"quoteVolume": 60e6},
+                "PEPE/USDT:USDT": {"quoteVolume": 5e6},      # ниже порога объёма
+                "BTC/USD:BTC": {"quoteVolume": 800e6},       # inverse — не наш рынок
+                "BTC/USDT": {"quoteVolume": 700e6},          # спот — не наш рынок
+                "XRP/USDT:USDT": {"quoteVolume": None},      # битый тикер
+            }
+
+    top = top_liquid_symbols(10, blacklist=("DOGE/USDT:USDT",), exchange=_StubEx())
+    assert top == ["BTC/USDT:USDT", "ETH/USDT:USDT"]         # фильтры + сортировка по объёму
+    assert top_liquid_symbols(1, exchange=_StubEx()) == ["BTC/USDT:USDT"]

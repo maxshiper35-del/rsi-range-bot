@@ -205,6 +205,60 @@ def intro_hours() -> float:
     return float(v) if v is not None else 5.0
 
 
+def watchlist_auto_enabled() -> bool:
+    """Авто-ротация watchlist по ликвидности (мега-план MAX, ставка 3). Дефолт ВЫКЛ —
+    включает владелец; кандидаты проходят бэктест-гейт перед добавлением."""
+    return (_raw("watchlist_auto_enabled") or "0").lower() in _TRUE
+
+
+def watchlist_size() -> int:
+    v = _raw("watchlist_size")
+    return int(v) if v is not None else 15
+
+
+def watchlist_blacklist() -> tuple:
+    """Символы, которые авто-ротация никогда не добавит (CSV, задаёт владелец)."""
+    raw = _raw("watchlist_blacklist") or ""
+    return tuple(s.strip() for s in raw.split(",") if s.strip())
+
+
+def last_milestone() -> int:
+    """Последняя опубликованная веха закрытых сделок (см. bot.MILESTONES)."""
+    v = _raw("last_milestone")
+    return int(v) if v is not None else 0
+
+
+def last_watchlist_refresh_at() -> str | None:
+    return _raw("last_watchlist_refresh_at")
+
+
+def set_last_watchlist_refresh_at(iso: str) -> None:
+    set_value("last_watchlist_refresh_at", iso)
+
+
+def _stars_tier(key: str, default: int) -> int:
+    v = _raw(key)
+    return int(v) if v is not None else default
+
+
+def quarter_price_stars() -> int:
+    """Квартал (90 дней) разовым Stars-инвойсом. 0 = кнопка скрыта.
+    Нативные Stars-подписки длиннее 30 дней невозможны (проверено в доках) —
+    длинные тиры только разовыми платежами."""
+    return _stars_tier("quarter_price_stars", 2500)
+
+
+def year_price_stars() -> int:
+    """Год (365 дней) разовым Stars-инвойсом. 0 = кнопка скрыта."""
+    return _stars_tier("year_price_stars", 8000)
+
+
+def lifetime_price_stars() -> int:
+    """Lifetime (навсегда: 36500 дней) разовым Stars-инвойсом. 0 = кнопка скрыта.
+    Бенчмарк рынка: $729 lifetime у CoinCodeCap (~15000⭐)."""
+    return _stars_tier("lifetime_price_stars", 15000)
+
+
 def paid_signal_stars() -> int:
     """Цена разовой покупки одного сигнала в Stars (paid media, мега-план волна 1).
     0 = кнопка «Открыть сигнал» не показывается (дефолт — фича за флагом: включает
@@ -265,4 +319,9 @@ def effective() -> dict:
         "intro_price_stars": intro_price_stars(),
         "intro_hours": intro_hours(),
         "paid_signal_stars": paid_signal_stars(),
+        "quarter_price_stars": quarter_price_stars(),
+        "year_price_stars": year_price_stars(),
+        "lifetime_price_stars": lifetime_price_stars(),
+        "watchlist_auto_enabled": watchlist_auto_enabled(),
+        "watchlist_size": watchlist_size(),
     }

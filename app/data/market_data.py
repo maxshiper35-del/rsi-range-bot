@@ -247,6 +247,31 @@ def fetch_history(symbol: str, timeframe: str, target_bars: int,
     return df.iloc[:-1].tail(target_bars).reset_index(drop=True)  # закрытые, не больше цели
 
 
+def top_liquid_symbols(n: int, blacklist: tuple = (), exchange_id: str | None = None,
+                       min_quote_volume: float = 10_000_000.0,
+                       exchange=None) -> list[str]:
+    """Топ-N ликвидных USDT-перпетуалов по суточному объёму (авто-watchlist, мега-план MAX).
+
+    Фильтры: только linear-свопы "*/USDT:USDT", объём 24ч не ниже min_quote_volume USD,
+    не из blacklist. exchange= — инъекция для тестов. Сортировка по quoteVolume убыв."""
+    if exchange is None:
+        if exchange_id is None:
+            from app.config import get_settings
+            exchange_id = get_settings().exchange_id
+        exchange = _exchange(exchange_id)
+    tickers = exchange.fetch_tickers()
+    ranked = []
+    for sym, t in tickers.items():
+        if not sym.endswith("/USDT:USDT") or sym in blacklist:
+            continue
+        vol = t.get("quoteVolume")
+        if vol is None or vol < min_quote_volume:
+            continue
+        ranked.append((vol, sym))
+    ranked.sort(reverse=True)
+    return [sym for _, sym in ranked[:n]]
+
+
 def load_frames(symbol: str, timeframes: list[str], limit: int = 200,
                 exchange_id: str | None = None) -> dict[str, pd.DataFrame]:
     """Загрузить закрытые OHLCV по нескольким ТФ -> {tf: df} для SMCEngine.analyze.
