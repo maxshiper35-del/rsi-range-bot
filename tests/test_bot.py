@@ -603,3 +603,18 @@ def test_format_help_admin_includes_admin_commands():
     for cmd, _ in bot.ADMIN_COMMANDS:
         if cmd not in ("start", "help"):                # исключены из тела намеренно
             assert f"/{cmd} —" in txt, cmd
+
+
+def test_unlock_verdict():
+    """Разовая покупка сигнала: продаём только ОТКРЫТЫЕ опубликованные сигналы."""
+    open_row = {"status": "open", "result_r": None}
+    assert bot.unlock_verdict(open_row, 50) == "ok"
+    assert bot.unlock_verdict(open_row, 0) == "disabled"         # цена 0 = фича выключена
+    assert bot.unlock_verdict(None, 50) == "not_found"
+    assert bot.unlock_verdict({"status": "candidate", "result_r": None}, 50) == "not_found"
+    assert bot.unlock_verdict({"status": "rejected", "result_r": None}, 50) == "not_found"
+    # закрытые не продаём — исход уже бесплатно в канале (честность)
+    for st, r in (("tp1", 2.26), ("stopped", -1.0), ("expired", None)):
+        assert bot.unlock_verdict({"status": st, "result_r": r}, 50) == "closed"
+    for verdict in ("not_found", "closed", "disabled"):
+        assert verdict in bot._UNLOCK_DENIALS

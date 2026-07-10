@@ -387,3 +387,49 @@ def test_cryptobot_invoice_and_poll(fresh_db, monkeypatch):
     assert payments.is_paid(600) is True
     assert payments.poll_cryptobot() == []                         # идемпотентно
     get_settings.cache_clear()
+
+
+def test_refund_flow(fresh_db):
+    """Money-back: найти платёж -> (API-возврат снаружи) -> пометить refunded, срезать дни."""
+    from datetime import datetime, timezone
+
+    from app.delivery import payments
+    # оплата 30 дней Stars с charge_id
+    assert payments.grant_subscription(501, "stars", 1000, "XTR", 30, "chg_abc") is True
+    pay = payments.find_refundable_stars_payment(501)
+    assert pay is not None and pay["charge_id"] == "chg_abc" and pay["days"] == 30
+    assert payments.is_paid(501) is True
+
+    payments.mark_refunded(pay["id"], 501, pay["days"])
+    # платёж помечен, подписка погасла (paid_until срезан до "не ниже сейчас")
+    assert payments.find_refundable_stars_payment(501) is None   # повторно вернуть нечего
+    assert payments.is_paid(501) is False
+    u = payments.get_user(501)
+    now = datetime.now(timezone.utc)
+    until = datetime.fromisoformat(u["paid_until"])
+    assert abs((until - now).total_seconds()) < 120              # ровно "сейчас", не в минус
+
+
+def test_refund_keeps_promo_tail(fresh_db):
+    """Вычитаются только КУПЛЕННЫЕ дни: промо-хвост поверх платежа не сгорает."""
+    from datetime import datetime, timezone
+
+    from app.delivery import payments
+    payments.grant_subscription(502, "stars", 10, "XTR", 5, "chg_x")   # 5 дней куплено
+    payments.create_promo("TAIL", 10)
+    assert payments.redeem_promo(502, "TAIL")["ok"] is True            # +10 дней промо
+    pay = payments.find_refundable_stars_payment(502)
+    payments.mark_refunded(pay["id"], 502, pay["days"])
+    assert payments.is_paid(502) is True                               # промо-хвост жив
+    u = payments.get_user(502)
+    left = (datetime.fromisoformat(u["paid_until"])
+            - datetime.now(timezone.utc)).total_seconds() / 86400
+    assert 9.5 < left < 10.5                                           # ~10 промо-дней
+
+
+def test_find_refundable_ignores_non_stars_and_unpaid(fresh_db):
+    from app.delivery import payments
+    payments.register_user(503)
+    assert payments.find_refundable_stars_payment(503) is None
+    payments.grant_subscription(503, "cryptobot", 20, "USDT", 30, "inv_1")
+    assert payments.find_refundable_stars_payment(503) is None   # USDT не рефандится этим путём

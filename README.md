@@ -14,7 +14,7 @@ Telegram-бот торговых сигналов по крипто-фьючер
 ## Статус: работает вживую
 
 Бот запущен, ведёт канал, принимает подписки (Stars + USDT), полностью управляется из Telegram —
-кнопками или командами, без правки `.env` и рестартов. 194 теста, все зелёные.
+кнопками или командами, без правки `.env` и рестартов. 199 тестов, все зелёные.
 
 ## Архитектура
 
@@ -53,7 +53,7 @@ pip install -r requirements.txt
 make install-playwright     # headless Chromium для карточки недели (разово)
 cp .env.example .env        # заполни TELEGRAM_BOT_TOKEN и TELEGRAM_ADMIN_IDS
 make init-db
-make test                    # 194 теста, секреты не нужны (conftest подставляет dummy)
+make test                    # 199 тестов, секреты не нужны (conftest подставляет dummy)
 make install-hooks           # git pre-commit: lint+typecheck+test перед каждым коммитом
 make run                     # запуск (или через launchd — см. ниже)
 ```
@@ -116,6 +116,11 @@ launchctl kickstart -k "gui/$(id -u)/com.rsirange.bot"
   и сроком годности; `/addpromo` создаёт код (admin).
 - **Два тарифа Stars**: пробный (дефолт 10⭐/5 часов, выключается нулём в админке) и
   основной (1000⭐/30 дней) — оба редактируются из /admin без рестарта.
+- **Разовая покупка сигнала** (paid media): кнопка «🔓 Открыть за N⭐» на тизере — PNG-карта
+  + полный разбор за Stars; закрытые сигналы не продаются (исход и так в канале).
+  Цена — в /admin → Цены, 0 = выкл (дефолт).
+- **Money-back 7 дней**: /refund <tg_id> (admin) — возврат Stars через refundStarPayment,
+  вычитаются только купленные дни (промо/триал-хвост не сгорает).
 - **Telegram Stars** — работает "из коробки" (нативный Bot API, `currency=XTR`, провайдер не нужен).
 - **USDT**: авто (токен Crypto Pay API в `CRYPTOBOT_TOKEN`) либо полу-ручной (ссылка на счёт +
   заявка админу).
@@ -133,7 +138,7 @@ launchctl kickstart -k "gui/$(id -u)/com.rsirange.bot"
 ## Тестирование
 
 ```bash
-make test        # 194 теста: детекторы, сетапы, бэктест, журнал, платежи, runtime, бот, графика
+make test        # 199 тестов: детекторы, сетапы, бэктест, журнал, платежи, runtime, бот, графика
 make lint         # ruff (весь репозиторий)
 make typecheck    # mypy app
 make backtest     # walk-forward прогон на живых/синтетических данных

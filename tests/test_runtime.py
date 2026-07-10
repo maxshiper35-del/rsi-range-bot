@@ -133,3 +133,11 @@ def test_intro_tier(fresh_db):
     assert runtime.intro_hours() == 12.0
     eff = runtime.effective()
     assert eff["intro_price_stars"] == 0 and eff["intro_hours"] == 12.0
+
+
+def test_paid_signal_stars(fresh_db):
+    from app import runtime
+    assert runtime.paid_signal_stars() == 0                 # дефолт: выключено (за флагом)
+    runtime.set_value("paid_signal_stars", 50)
+    assert runtime.paid_signal_stars() == 50
+    assert runtime.effective()["paid_signal_stars"] == 50

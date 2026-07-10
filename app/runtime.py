@@ -205,6 +205,14 @@ def intro_hours() -> float:
     return float(v) if v is not None else 5.0
 
 
+def paid_signal_stars() -> int:
+    """Цена разовой покупки одного сигнала в Stars (paid media, мега-план волна 1).
+    0 = кнопка «Открыть сигнал» не показывается (дефолт — фича за флагом: включает
+    владелец из админки после живой проверки)."""
+    v = _raw("paid_signal_stars")
+    return int(v) if v is not None else 0
+
+
 def trial_days() -> int:
     """Длительность триала (задача 20) — короткий полный доступ для новых юзеров.
     Нет .env-фолбэка (не настройка через Settings, как остальные) — дефолт 5 дней
@@ -256,4 +264,5 @@ def effective() -> dict:
         "signal_chart_enabled": signal_chart_enabled(),
         "intro_price_stars": intro_price_stars(),
         "intro_hours": intro_hours(),
+        "paid_signal_stars": paid_signal_stars(),
     }

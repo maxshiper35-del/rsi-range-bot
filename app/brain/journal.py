@@ -16,6 +16,11 @@ from app.core.signal_engine import Side, Signal
 _TP_COLS = ("tp1", "tp2", "tp3")
 
 
+def signal_row(signal_id: int):
+    """Строка signals по id (или None) — для разовой покупки/переформатирования."""
+    return db.query_one("SELECT * FROM signals WHERE id=?", (signal_id,))
+
+
 def row_to_signal(row) -> Signal:
     """Восстановить Signal из строки signals (для алертов/переформатирования)."""
     return Signal(

@@ -252,6 +252,7 @@ _ADMIN_NUMERIC_FIELDS = {
                          "float"),
     "intro_price_stars": ("Цена пробного тарифа в Stars (0 — выключить пробный)", "int"),
     "intro_hours": ("Длительность пробного тарифа в часах", "float"),
+    "paid_signal_stars": ("Цена разовой покупки сигнала в Stars (0 — выключить кнопку)", "int"),
 }
 
 
@@ -402,6 +403,28 @@ def fill_is_fresh(c: dict, now: datetime, factor: float = 2.0, slack: float = 90
 def caption_fits(html_text: str, limit: int = 1024) -> bool:
     """Лимит Telegram на подпись к фото — 1024 символа ВИДИМОГО текста (теги не считаются)."""
     return len(re.sub(r"<[^>]+>", "", html_text)) <= limit
+
+
+_UNLOCK_DENIALS = {
+    "not_found": "Сигнал не найден.",
+    "closed": "Сигнал уже закрыт — результат опубликован в канале.",
+    "disabled": "Разовая покупка сейчас недоступна.",
+}
+
+
+def unlock_verdict(row, price: int) -> str:
+    """Можно ли продать разовый доступ к сигналу (paid media). Чистая функция.
+
+    'closed' — продавать закрытый сигнал бессмысленно и нечестно: исход уже
+    опубликован в канале бесплатно."""
+    if price <= 0:
+        return "disabled"
+    if row is None or row["status"] in ("candidate", "rejected"):
+        return "not_found"
+    if row["result_r"] is not None or row["status"] in ("tp1", "tp2", "tp3",
+                                                        "stopped", "expired"):
+        return "closed"
+    return "ok"
 
 
 def build_signal_chart_data(sig: Signal, sid: int, df: pd.DataFrame,
@@ -575,6 +598,7 @@ ADMIN_COMMANDS = USER_COMMANDS + [
     ("cryptobottoken", "API-токен Crypto Pay — вкл. авто-USDT"),
     ("usdtbonus", "бонус-дней за оплату в USDT"),
     ("grant", "выдать подписку: /grant <tg_id> [дней]"),
+    ("refund", "вернуть последний Stars-платёж (money-back): /refund <tg_id>"),
     ("revoke", "снять подписку: /revoke <tg_id>"),
     ("users", "счётчики юзеров"),
     ("announce", "объявление в канал + подписчикам"),
@@ -824,6 +848,7 @@ def main() -> None:
         BufferedInputFile,
         InlineKeyboardButton,
         InlineKeyboardMarkup,
+        InputPaidMediaPhoto,
         KeyboardButton,
         LabeledPrice,
         ReplyKeyboardMarkup,
@@ -930,6 +955,8 @@ def main() -> None:
             uname = m.from_user.username or m.from_user.id
             text += (f"\n\n💵 USDT: оплати по кнопке, в КОММЕНТАРИИ к платежу укажи «{uname}», "
                      "затем нажми «Я оплатил» — активируем в течение дня.")
+        text += ("\n\n💯 Money-back: не подошло — в течение 7 дней после оплаты вернём "
+                 "Stars по запросу (напишите админу канала @rsi_range).")
         await m.answer(text, reply_markup=_subscribe_kb())
 
     async def _apply_promo(m, code: str):
@@ -985,6 +1012,57 @@ def main() -> None:
         await _send_stars_invoice(cq.from_user.id, round(runtime.intro_hours() / 24, 6),
                                   runtime.intro_price_stars())
         await cq.answer()
+
+    @dp.callback_query(F.data.startswith("unlock:"))
+    async def _unlock(cq):
+        # разовая покупка сигнала: PNG-карта + полный разбор как paid media (Stars).
+        # Telegram сам открывает контент после оплаты — своего платёжного цикла нет.
+        sid_s = cq.data.split(":", 1)[1]
+        price = runtime.paid_signal_stars()
+        if not sid_s.isdigit():
+            await cq.answer("Сигнал не найден.", show_alert=True)
+            return
+        sid = int(sid_s)
+        row = await asyncio.to_thread(journal.signal_row, sid)
+        verdict = unlock_verdict(row, price)
+        if verdict != "ok":
+            await cq.answer(_UNLOCK_DENIALS[verdict], show_alert=True)
+            return
+        uid = cq.from_user.id
+        sig = journal.row_to_signal(row)
+        # платным/админам продавать нечестно — у них и так полный доступ
+        if uid in cfg.admin_ids or await asyncio.to_thread(payments.is_paid, uid):
+            await bot.send_message(uid, templates.render_signal_dm(sig, sid),
+                                   parse_mode="HTML")
+            await cq.answer("У вас полный доступ — сигнал отправлен бесплатно.")
+            return
+        try:
+            png = await asyncio.to_thread(_signal_chart_png, sig, sid)
+        except Exception as e:                          # noqa: BLE001 — биржа/рендер
+            log.warning("unlock #%s: график не собрался: %s", sid, e)
+            await cq.answer("Не удалось подготовить сигнал — попробуйте чуть позже.",
+                            show_alert=True)
+            return
+        caption = templates.render_signal_dm(sig, sid)
+        try:
+            await bot.send_paid_media(
+                chat_id=uid, star_count=price,
+                media=[InputPaidMediaPhoto(media=BufferedInputFile(
+                    png, filename=f"signal_{sid}.png"))],
+                payload=f"unlock:{sid}:{price}",
+                caption=caption if caption_fits(caption) else None, parse_mode="HTML")
+            log.info("unlock #%s: paid media (%d⭐) отправлен юзеру %s", sid, price, uid)
+            await cq.answer("Сигнал отправлен в личку — откройте его за ⭐.")
+        except Exception as e:                          # noqa: BLE001 — закрытая личка и т.п.
+            log.warning("unlock #%s -> %s: %s", sid, uid, e)
+            await cq.answer("Откройте личку с ботом (/start) и нажмите кнопку ещё раз.",
+                            show_alert=True)
+
+    @dp.purchased_paid_media()
+    async def _paid_media_bought(p):
+        # учёт: Stars зачисляются на баланс бота платформой; здесь — только след в логе
+        log.info("unlock куплен: юзер %s, payload=%s",
+                 p.from_user.id, p.paid_media_payload)
 
     @dp.callback_query(F.data == "pay_usdt")
     async def _pay_usdt(cq):
@@ -1258,6 +1336,9 @@ def main() -> None:
                callback_data="adm_prompt_intro_price_stars"),
              b(text=f"🧪 Часы: {eff['intro_hours']:g}",
                callback_data="adm_prompt_intro_hours")],
+            [b(text=(f"🔓 Разовый сигнал: {eff['paid_signal_stars']}⭐"
+                     if eff['paid_signal_stars'] else "🔓 Разовый сигнал: выкл"),
+               callback_data="adm_prompt_paid_signal_stars")],
             [b(text=f"📢 Плечо в постах: ×{eff['display_leverage']:g}"
                     if eff['display_leverage'] else "📢 Плечо в постах: выкл",
                callback_data="adm_prompt_display_leverage")],
@@ -1567,6 +1648,38 @@ def main() -> None:
         await asyncio.to_thread(payments.admin_revoke, int(parts[1]))
         await m.answer(f"🚫 Подписка {parts[1]} снята.")
 
+    @dp.message(Command("refund"))
+    async def _refund(m):
+        # money-back (мега-план волна 1): вернуть последний Stars-платёж юзера.
+        # Порядок: API-возврат ПЕРВЫМ, пометка в БД — после успеха (см. payments)
+        if not _is_admin(m):
+            return
+        parts = (m.text or "").split()
+        if len(parts) < 2 or not parts[1].isdecimal():
+            await m.answer("Формат: /refund <tg_id> — вернуть последний Stars-платёж "
+                           "(money-back 7 дней)")
+            return
+        uid = int(parts[1])
+        pay = await asyncio.to_thread(payments.find_refundable_stars_payment, uid)
+        if not pay:
+            await m.answer("Оплаченных Stars-платежей у юзера не найдено "
+                           "(или уже возвращены).")
+            return
+        try:
+            await bot.refund_star_payment(
+                user_id=uid, telegram_payment_charge_id=pay["charge_id"])
+        except Exception as e:                          # noqa: BLE001 — отказ Telegram
+            await m.answer(f"Telegram отказал в возврате: {e}")
+            return
+        await asyncio.to_thread(payments.mark_refunded, pay["id"], uid, pay["days"])
+        await m.answer(f"↩️ Возвращено {pay['amount']:g}⭐ юзеру {uid}; "
+                       f"подписка скорректирована (−{_fmt_days(pay['days'])}).")
+        try:
+            await bot.send_message(uid, "↩️ Ваш платёж возвращён — Stars вернутся на "
+                                        "баланс Telegram. Спасибо, что попробовали нас.")
+        except Exception as e:                          # noqa: BLE001
+            log.warning("refund notify %s: %s", uid, e)
+
     @dp.message(Command("users"))
     @dp.message(F.text == "👥 Юзеры")
     async def _users(m):
@@ -1728,10 +1841,18 @@ def main() -> None:
             log.exception("формат алерта #%s", sid)
             full = f"🔔 Сигнал #{sid} (ошибка форматирования — детали в журнале)"
         teaser = templates.render_teaser(sig, sid)
+        # разовая покупка сигнала (paid media): кнопка на тизере, если включена цена
+        unlock_price = runtime.paid_signal_stars()
+        unlock_kb = None
+        if unlock_price > 0:
+            unlock_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text=f"🔓 Открыть этот сигнал — {unlock_price}⭐",
+                callback_data=f"unlock:{sid}")]])
         # пост в канал (если включён) — полный или тизер, по режиму канала
         channel = runtime.signals_channel()
         if channel and runtime.channel_enabled():
-            if runtime.channel_mode() == "full":
+            ch_is_teaser = runtime.channel_mode() != "full"
+            if not ch_is_teaser:
                 ch_text = templates.render_signal_channel(sig, sid)
                 if runtime.cornix_block_enabled():      # машиночитаемый блок для Cornix-юзеров
                     ch_text += templates.esc(format_cornix_block(sig))
@@ -1755,7 +1876,9 @@ def main() -> None:
                     if photo is not None:               # подпись не влезла — фото отдельно
                         await bot.send_photo(
                             channel, BufferedInputFile(photo, filename=f"signal_{sid}.png"))
-                    msg = await bot.send_message(channel, ch_text, parse_mode="HTML")
+                    msg = await bot.send_message(
+                        channel, ch_text, parse_mode="HTML",
+                        reply_markup=unlock_kb if ch_is_teaser else None)
                     log.info("сигнал #%s: пост в канал OK (msg_id=%s%s)", sid, msg.message_id,
                              ", фото отдельно" if photo is not None else "")
             except Exception as e:                     # noqa: BLE001 — канал не роняет рассылку
@@ -1767,7 +1890,8 @@ def main() -> None:
         for uid, kind in plan:
             try:
                 await bot.send_message(uid, full if kind == "full" else teaser,
-                                       parse_mode="HTML")
+                                       parse_mode="HTML",
+                                       reply_markup=unlock_kb if kind == "teaser" else None)
                 await asyncio.to_thread(payments.record_delivery, uid, sid, kind)
                 sent += 1
             except Exception as e:                     # noqa: BLE001 — один получатель не роняет рассылку

@@ -70,6 +70,36 @@ def grant_subscription(tg_id: int, method: str, amount: float, currency: str,
     return True
 
 
+def find_refundable_stars_payment(tg_id: int) -> dict | None:
+    """Последний оплаченный Stars-платёж юзера с charge_id — кандидат на money-back.
+
+    Только читает: сам возврат делает caller через Bot API refundStarPayment,
+    затем фиксирует mark_refunded. Порядок сознательный (API -> БД): если API
+    откажет, в БД ничего менять не нужно; обратный порядок требовал бы отката."""
+    row = db.query_one(
+        "SELECT id, telegram_payment_charge_id AS charge_id, amount, days "
+        "FROM payments WHERE tg_id=? AND method='stars' AND status='paid' "
+        "AND telegram_payment_charge_id IS NOT NULL AND telegram_payment_charge_id != '' "
+        "ORDER BY paid_at DESC LIMIT 1", (tg_id,))
+    return dict(row) if row else None
+
+
+def mark_refunded(payment_id: int, tg_id: int, days: float) -> None:
+    """После успешного refundStarPayment: пометить платёж refunded и вычесть купленные
+    дни из paid_until (не ниже текущего момента — промо/триал-хвосты не сгорают в минус,
+    а сама подписка от возвращённого платежа гаснет)."""
+    u = get_user(tg_id)
+    new_until = None
+    if u and u["paid_until"]:
+        cur = datetime.fromisoformat(u["paid_until"])
+        new_until = max(_now_dt(), cur - timedelta(days=days)).isoformat()
+    with db.transaction() as conn:
+        conn.execute("UPDATE payments SET status='refunded' WHERE id=?", (payment_id,))
+        if new_until is not None:
+            conn.execute("UPDATE users SET paid_until=?, updated_at=? WHERE tg_id=?",
+                         (new_until, clock.utcnow_iso(), tg_id))
+
+
 def grant_trial(tg_id: int, days: float) -> bool:
     """Триал: короткий полный доступ для СОВСЕМ новых юзеров, один раз. НЕ платёж — не пишет
     в payments, не награждает реферала (задача 22) просто тем, что не вызывает эту логику.
