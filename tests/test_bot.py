@@ -540,3 +540,16 @@ def test_build_signal_chart_data():
     import pytest
     with pytest.raises(ValueError):
         bot.build_signal_chart_data(sig, 7, df.iloc[0:0], "10.07.2026")
+
+
+def test_main_menu_layout():
+    user = bot.main_menu_layout(is_admin=False)
+    flat = [t for row in user for t in row]
+    for label in ("📊 Статистика", "📄 Трек-рекорд", "🧮 Калькулятор", "💳 Подписка",
+                  "ℹ️ О боте", "🧪 Бэктест", "📖 Глоссарий", "🎟 Промокод", "❓ Помощь"):
+        assert label in flat, label
+    assert "🛠 Админ-панель" not in flat                # админ-кнопки не текут юзерам
+    admin = [t for row in bot.main_menu_layout(is_admin=True) for t in row]
+    for label in ("🛠 Админ-панель", "📟 Статус", "🩺 Health", "❓ Помощь"):
+        assert label in admin, label
+    assert all(len(row) <= 2 for row in user)           # компактные ряды по 1-2 кнопки

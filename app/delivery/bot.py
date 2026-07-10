@@ -585,6 +585,22 @@ ADMIN_COMMANDS = USER_COMMANDS + [
 ]
 
 
+def main_menu_layout(is_admin: bool = False) -> list:
+    """Раскладка постоянного меню (текст кнопок) — чистая функция для тестов.
+    Каждой кнопке соответствует F.text-хэндлер в main()."""
+    rows = [
+        ["📊 Статистика", "📄 Трек-рекорд"],
+        ["🧮 Калькулятор", "💳 Подписка"],
+        ["ℹ️ О боте", "🧪 Бэктест"],
+        ["📖 Глоссарий", "🎟 Промокод"],
+        ["❓ Помощь"],
+    ]
+    if is_admin:
+        rows[-1] = ["❓ Помощь", "🛠 Админ-панель"]
+        rows.append(["📟 Статус", "🩺 Health"])
+    return rows
+
+
 async def register_bot_commands(bot, admin_ids) -> None:
     """Зарегистрировать меню команд в Telegram (кнопка '/'): общее для всех + расширенное
     для админов (BotCommandScopeChat). Без этого вызова getMyCommands пуст и меню не
@@ -803,14 +819,12 @@ def main() -> None:
     class PromoState(StatesGroup):
         code = State()
 
-    def _main_menu_kb() -> ReplyKeyboardMarkup:
-        """Постоянное меню внизу чата — юзеру не нужно помнить команды."""
-        return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📄 Трек-рекорд")],
-            [KeyboardButton(text="🧮 Калькулятор"), KeyboardButton(text="💳 Подписка")],
-            [KeyboardButton(text="ℹ️ О боте"), KeyboardButton(text="🧪 Бэктест")],
-            [KeyboardButton(text="📖 Глоссарий"), KeyboardButton(text="🎟 Промокод")],
-        ])
+    def _main_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
+        """Постоянное меню внизу чата — юзеру не нужно помнить команды.
+        is_persistent: Telegram держит клавиатуру на экране всегда (Bot API 6.7),
+        даже если юзер её сворачивал; у админа — дополнительные кнопки."""
+        return ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True, keyboard=[
+            [KeyboardButton(text=t) for t in row] for row in main_menu_layout(is_admin)])
 
     def _subscribe_kb() -> InlineKeyboardMarkup:
         rows = []
@@ -852,7 +866,7 @@ def main() -> None:
         if applied:
             text = (f"🎁 Открыт полный доступ на {trial_days} дн. — "
                     f"все сигналы без ограничений.\n\n" + text)
-        await m.answer(text, reply_markup=_main_menu_kb())
+        await m.answer(text, reply_markup=_main_menu_kb(_is_admin(m)))
 
     @dp.message(Command("about"))
     @dp.message(F.text == "ℹ️ О боте")
@@ -1050,6 +1064,7 @@ def main() -> None:
             format_calc, data["deposit"], data["risk"], data["entry"], stop, cfg.max_leverage))
 
     @dp.message(Command("help"))
+    @dp.message(F.text == "❓ Помощь")
     async def _help(m):
         base = ("Команды:\n"
                 "/stats — публичная статистика\n"
@@ -1064,7 +1079,8 @@ def main() -> None:
         if _is_admin(m):
             base += ("\n\n🛠 Админ: /admin — панель управления "
                     "(пауза, символы, цены, канал, подписчики)")
-        await m.answer(base)
+        # меню прикрепляется и здесь: старые юзеры без /start тоже получают клавиатуру
+        await m.answer(base, reply_markup=_main_menu_kb(_is_admin(m)))
 
     @dp.my_chat_member()
     async def _added_to_chat(event):
@@ -1243,11 +1259,13 @@ def main() -> None:
         await m.answer(reply)
 
     @dp.message(Command("admin"))
+    @dp.message(F.text == "🛠 Админ-панель")
     async def _admin(m):
         if _is_admin(m):
             await _panel(m.chat.id)
 
     @dp.message(Command("status"))
+    @dp.message(F.text == "📟 Статус")
     async def _statuscmd(m):
         if not _is_admin(m):
             return
@@ -1256,6 +1274,7 @@ def main() -> None:
         await m.answer(format_admin_status(eff, users))
 
     @dp.message(Command("health"))
+    @dp.message(F.text == "🩺 Health")
     async def _health(m):
         if not _is_admin(m):
             return
