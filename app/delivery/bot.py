@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 
@@ -532,6 +533,15 @@ def build_trackrecord_csv(rows: list) -> bytes:
     for r in rows:
         writer.writerow([r[c] for c in _TRACKRECORD_COLS])
     return buf.getvalue().encode("utf-8")
+
+
+_VERIFIER_PATH = Path(__file__).parent / "assets" / "verifier.html"
+
+
+def load_verifier_html() -> bytes:
+    """Самодостаточная страница проверки sha256 (офлайн, WebCrypto, без внешних запросов) —
+    приложение к /trackrecord: юзер проверяет неизменность CSV без доверия к нам."""
+    return _VERIFIER_PATH.read_bytes()
 
 
 def trackrecord_checksum(csv_bytes: bytes) -> str:
@@ -1324,6 +1334,10 @@ def main() -> None:
             BufferedInputFile(csv_bytes, filename="rsirange_trackrecord.csv"),
             caption=f"📄 Полный публичный журнал ({len(rows)} сигналов). "
                    f"SHA-256: {checksum[:16]}…")
+        await m.answer_document(
+            BufferedInputFile(load_verifier_html(), filename="verifier.html"),
+            caption="🔍 Проверка в 1 клик: откройте файл в браузере, перетащите CSV — "
+                    "sha256 посчитается локально (офлайн, без отправки куда-либо).")
 
     def _is_admin(m) -> bool:
         return bool(m.from_user) and m.from_user.id in cfg.admin_ids
@@ -2199,7 +2213,9 @@ def main() -> None:
                         channel,
                         BufferedInputFile(csv_bytes, filename="rsirange_trackrecord.csv"),
                         caption=f"📄 Еженедельный публичный журнал ({len(rows)} сигналов). "
-                               f"SHA-256: {checksum[:16]}…")
+                               f"SHA-256: {checksum[:16]}…\n"
+                               "🔍 Проверить неизменность: /trackrecord у @rsirange_bot "
+                               "(приложит verifier.html — офлайн-проверка в браузере).")
                     await asyncio.to_thread(journal.record_ledger_hash, len(rows), checksum)
                     await asyncio.to_thread(runtime.set_trackrecord_last_week, week_key)
                 except Exception as e:                      # noqa: BLE001

@@ -14,7 +14,7 @@ Telegram-бот торговых сигналов по крипто-фьючер
 ## Статус: работает вживую
 
 Бот запущен, ведёт канал, принимает подписки (Stars + USDT), полностью управляется из Telegram —
-кнопками или командами, без правки `.env` и рестартов. 205 тестов, все зелёные.
+кнопками или командами, без правки `.env` и рестартов. 206 тестов, все зелёные.
 
 ## Архитектура
 
@@ -53,7 +53,7 @@ pip install -r requirements.txt
 make install-playwright     # headless Chromium для карточки недели (разово)
 cp .env.example .env        # заполни TELEGRAM_BOT_TOKEN и TELEGRAM_ADMIN_IDS
 make init-db
-make test                    # 205 тестов, секреты не нужны (conftest подставляет dummy)
+make test                    # 206 тестов, секреты не нужны (conftest подставляет dummy)
 make install-hooks           # git pre-commit: lint+typecheck+test перед каждым коммитом
 make run                     # запуск (или через launchd — см. ниже)
 ```
@@ -139,12 +139,14 @@ launchctl kickstart -k "gui/$(id -u)/com.rsirange.bot"
 (`data/backups/`, ротация 14); ежедневный авто-бэкап через `deploy/com.rsirange.backup.plist`
 (04:00, независим от процесса бота, SQLite Backup API — онлайн-копирование). Пропуск бэкапа >26ч
 алертит админу. Каждая публикация трек-рекорда пишет sha256 в `ledger_hashes` — история проверяема
-даже если канал позже удалят.
+даже если канал позже удалят. `/trackrecord` прикладывает `verifier.html` —
+самодостаточную офлайн-страницу (WebCrypto, ни одного внешнего запроса): юзер
+перетаскивает CSV и сверяет sha256 сам, без доверия к нам.
 
 ## Тестирование
 
 ```bash
-make test        # 205 тестов: детекторы, сетапы, бэктест, журнал, платежи, runtime, бот, графика
+make test        # 206 тестов: детекторы, сетапы, бэктест, журнал, платежи, runtime, бот, графика
 make lint         # ruff (весь репозиторий)
 make typecheck    # mypy app
 make backtest     # walk-forward прогон на живых/синтетических данных

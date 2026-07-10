@@ -651,3 +651,13 @@ def test_plan_watchlist_rotation():
     # защита: пустой итог не оставляет бот без рынка
     new2, a2, r2 = bot.plan_watchlist_rotation(cur, [], {})
     assert new2 == cur and a2 == [] and r2 == []
+
+
+def test_verifier_html_self_contained():
+    """verifier.html: существует, WebCrypto на месте, НИКАКИХ внешних запросов
+    (self-contained — иначе «офлайн-проверка» была бы враньём)."""
+    html = bot.load_verifier_html().decode("utf-8")
+    assert "crypto.subtle.digest" in html and "SHA-256" in html
+    for marker in ("http://", "https://", "src=", "@import", "fetch(", "XMLHttpRequest"):
+        assert marker not in html, f"внешняя зависимость: {marker}"
+    assert "Не финансовый совет" in html          # честный дисклеймер и здесь

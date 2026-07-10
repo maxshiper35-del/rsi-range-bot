@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RSI Range Signals — проверка трек-рекорда</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    min-height: 100vh; padding: 32px 16px;
+    background: linear-gradient(180deg, #0D0F14 0%, #0B0D11 55%, #0A0C10 100%);
+    color: #EDEFF3;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    display: flex; justify-content: center;
+  }
+  .wrap { width: 100%; max-width: 720px; display: flex; flex-direction: column; gap: 18px; }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .mark {
+    width: 44px; height: 44px; border-radius: 12px; flex: 0 0 auto;
+    background: linear-gradient(155deg, #4C6EF5, #7C5CFC);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 20px; color: #F5F6FA;
+  }
+  .brand .name { font-size: 20px; font-weight: 700; }
+  .brand .sub { font-size: 13px; color: #6B7280; margin-top: 2px; }
+  .card {
+    background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.012));
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 22px 24px;
+  }
+  h2 { font-size: 15px; margin-bottom: 12px; color: #D6D9E0; }
+  ol { padding-left: 20px; display: flex; flex-direction: column; gap: 8px;
+       font-size: 14.5px; line-height: 1.5; color: #C7CBD4; }
+  code { background: rgba(255,255,255,0.07); border-radius: 5px; padding: 1px 6px;
+         font-size: 13px; }
+  .drop {
+    border: 2px dashed rgba(124,140,248,0.45); border-radius: 14px;
+    padding: 36px 20px; text-align: center; cursor: pointer; transition: background .15s;
+    color: #9BA8FA; font-weight: 600; font-size: 15px;
+  }
+  .drop.hover { background: rgba(124,140,248,0.08); }
+  .drop input { display: none; }
+  .row { margin-top: 14px; }
+  label { display: block; font-size: 12px; font-weight: 700; letter-spacing: .08em;
+          text-transform: uppercase; color: #767C88; margin-bottom: 6px; }
+  input[type=text] {
+    width: 100%; padding: 10px 12px; border-radius: 10px; font-size: 13px;
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);
+    color: #EDEFF3; font-family: ui-monospace, Menlo, monospace;
+  }
+  .hash { margin-top: 14px; padding: 12px; border-radius: 10px; word-break: break-all;
+          font-family: ui-monospace, Menlo, monospace; font-size: 13px;
+          background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);
+          min-height: 44px; color: #C7CBD4; }
+  .verdict { margin-top: 14px; padding: 14px; border-radius: 12px; font-weight: 700;
+             font-size: 15px; display: none; }
+  .verdict.ok { display: block; background: rgba(74,222,156,0.13);
+                border: 1px solid rgba(74,222,156,0.45); color: #6FE3AC; }
+  .verdict.bad { display: block; background: rgba(241,101,101,0.12);
+                 border: 1px solid rgba(241,101,101,0.45); color: #F58787; }
+  .note { font-size: 13px; line-height: 1.55; color: #868C97; }
+  .note b { color: #C7CBD4; }
+  .foot { font-size: 12px; color: #565C68; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">
+    <div class="mark">R</div>
+    <div>
+      <div class="name">Проверка трек-рекорда</div>
+      <div class="sub">RSI Range Signals · @rsi_range · работает офлайн, ничего никуда не отправляет</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Как проверить за 30 секунд</h2>
+    <ol>
+      <li>Скачайте <code>rsirange_trackrecord.csv</code> из бота (<code>/trackrecord</code>)
+          или из еженедельного поста канала.</li>
+      <li>Перетащите файл в поле ниже — браузер сам посчитает SHA-256
+          (WebCrypto, локально, без интернета).</li>
+      <li>Сравните с хэшем из подписи к тому же посту — при совпадении файл
+          байт-в-байт тот, чей хэш был опубликован.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <div class="drop" id="drop">
+      Перетащите CSV сюда или нажмите, чтобы выбрать файл
+      <input type="file" id="file">
+    </div>
+    <div class="hash" id="hash">SHA-256 появится здесь…</div>
+    <div class="row">
+      <label>Опубликованный хэш (из подписи к посту — целиком или первые 16 символов)</label>
+      <input type="text" id="expected" placeholder="например: 3f6a9c…" autocomplete="off">
+    </div>
+    <div class="verdict" id="verdict"></div>
+  </div>
+
+  <div class="card note">
+    <b>Что это доказывает:</b> файл не редактировался после публикации хэша — ни одной
+    сделки не убрано, не переписано и не добавлено задним числом. Хэши публикуются в момент
+    выгрузки и дублируются во внутреннем журнале (<code>ledger_hashes</code>).<br><br>
+    <b>Чего это не доказывает:</b> прибыльности. Мы публикуем 100% исходов, включая
+    убыточные, и честно говорим: бэктест устойчивого края не показал.
+    Не финансовый совет.
+  </div>
+
+  <div class="foot">Файл самодостаточен: без внешних скриптов, шрифтов и запросов.</div>
+</div>
+
+<script>
+"use strict";
+const drop = document.getElementById("drop");
+const fileInput = document.getElementById("file");
+const hashEl = document.getElementById("hash");
+const expectedEl = document.getElementById("expected");
+const verdictEl = document.getElementById("verdict");
+let currentHash = "";
+
+async function sha256hex(buf) {
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function handle(file) {
+  if (!file) return;
+  hashEl.textContent = "Считаю SHA-256 для «" + file.name + "»…";
+  try {
+    currentHash = await sha256hex(await file.arrayBuffer());
+    hashEl.textContent = currentHash;
+  } catch (e) {
+    hashEl.textContent = "Не удалось посчитать: " + e;
+    currentHash = "";
+  }
+  compare();
+}
+
+function compare() {
+  const expected = expectedEl.value.trim().toLowerCase().replace(/[^0-9a-f]/g, "");
+  verdictEl.className = "verdict";
+  if (!currentHash || expected.length < 8) return;   // минимум 8 hex-символов для сравнения
+  if (currentHash.startsWith(expected) || expected === currentHash) {
+    verdictEl.className = "verdict ok";
+    verdictEl.textContent = "✅ Совпадает — файл идентичен опубликованному.";
+  } else {
+    verdictEl.className = "verdict bad";
+    verdictEl.textContent = "❌ НЕ совпадает — файл отличается от опубликованного. " +
+                            "Проверьте, что скачали именно тот CSV, чей хэш вводите.";
+  }
+}
+
+drop.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => handle(fileInput.files[0]));
+expectedEl.addEventListener("input", compare);
+["dragover", "dragenter"].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
+["dragleave", "drop"].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); }));
+drop.addEventListener("drop", e => handle(e.dataTransfer.files[0]));
+</script>
+</body>
+</html>
