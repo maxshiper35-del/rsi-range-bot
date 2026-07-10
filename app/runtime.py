@@ -191,6 +191,20 @@ def free_per_week() -> int:
     return int(v) if v is not None else get_settings().free_signals_per_week
 
 
+def intro_price_stars() -> int:
+    """Цена пробного тарифа в Stars (0 — пробный тариф выключен, остаётся только основной).
+    Решение владельца 2026-07-10: тестовая цена 10⭐/5ч показала реальные платежи —
+    оставлена постоянным вторым тарифом рядом с основным 1000⭐/30д."""
+    v = _raw("intro_price_stars")
+    return int(v) if v is not None else 10
+
+
+def intro_hours() -> float:
+    """Длительность пробного тарифа в часах."""
+    v = _raw("intro_hours")
+    return float(v) if v is not None else 5.0
+
+
 def trial_days() -> int:
     """Длительность триала (задача 20) — короткий полный доступ для новых юзеров.
     Нет .env-фолбэка (не настройка через Settings, как остальные) — дефолт 5 дней
@@ -240,4 +254,6 @@ def effective() -> dict:
         "trial_days": trial_days(),
         "display_leverage": display_leverage(),
         "signal_chart_enabled": signal_chart_enabled(),
+        "intro_price_stars": intro_price_stars(),
+        "intro_hours": intro_hours(),
     }

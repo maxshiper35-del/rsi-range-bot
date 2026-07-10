@@ -121,3 +121,15 @@ def test_signal_chart_enabled_flag(fresh_db):
     runtime.set_value("signal_chart_enabled", "1")
     assert runtime.signal_chart_enabled() is True
     assert runtime.effective()["signal_chart_enabled"] is True
+
+
+def test_intro_tier(fresh_db):
+    from app import runtime
+    assert runtime.intro_price_stars() == 10            # дефолт: пробный 10⭐/5ч
+    assert runtime.intro_hours() == 5.0
+    runtime.set_value("intro_price_stars", 0)           # 0 = пробный тариф выключен
+    assert runtime.intro_price_stars() == 0
+    runtime.set_value("intro_hours", 12)
+    assert runtime.intro_hours() == 12.0
+    eff = runtime.effective()
+    assert eff["intro_price_stars"] == 0 and eff["intro_hours"] == 12.0

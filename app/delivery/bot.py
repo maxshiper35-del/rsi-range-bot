@@ -250,6 +250,8 @@ _ADMIN_NUMERIC_FIELDS = {
     "min_impulse_atr": ("Мин. размер импульса в ATR", "float"),
     "display_leverage": ("Плечо для показа результата в постах, ×N (0 — выключить строку)",
                          "float"),
+    "intro_price_stars": ("Цена пробного тарифа в Stars (0 — выключить пробный)", "int"),
+    "intro_hours": ("Длительность пробного тарифа в часах", "float"),
 }
 
 
@@ -811,9 +813,15 @@ def main() -> None:
         ])
 
     def _subscribe_kb() -> InlineKeyboardMarkup:
-        rows = [[InlineKeyboardButton(
-            text=f"⭐ {runtime.price_stars()} Stars / {runtime.sub_days()} дн",
-            callback_data="pay_stars")]]
+        rows = []
+        if runtime.intro_price_stars() > 0 and runtime.intro_hours() > 0:
+            rows.append([InlineKeyboardButton(
+                text=f"⭐ {runtime.intro_price_stars()} Stars / "
+                     f"{runtime.intro_hours():g} ч — попробовать",
+                callback_data="pay_stars_intro")])
+        rows.append([InlineKeyboardButton(
+            text=f"⭐ {runtime.price_stars()} Stars / {_fmt_days(runtime.sub_days())}",
+            callback_data="pay_stars")])
         if payments.cryptobot_enabled():                # авто через Crypto Pay API
             rows.append([InlineKeyboardButton(
                 text=f"💵 {runtime.price_usdt():g} USDT / {runtime.sub_days()} дн",
@@ -904,18 +912,26 @@ def main() -> None:
         await state.clear()
         await _apply_promo(m, (m.text or "").strip())
 
-    @dp.callback_query(F.data == "pay_stars")
-    async def _pay_stars(cq):
-        days, stars = runtime.sub_days(), runtime.price_stars()
+    async def _send_stars_invoice(chat_id: int, days: float, stars: int):
         await bot.send_invoice(
-            chat_id=cq.from_user.id,
+            chat_id=chat_id,
             title="Подписка RSI Range Signals",
             description=f"Доступ ко всем сигналам на {_fmt_days(days)}.",
-            payload=f"sub:{days}",
+            payload=f"sub:{days}",                      # _paid парсит float — дробные дни ок
             provider_token="",                          # Stars: провайдер не нужен
             currency="XTR",
             prices=[LabeledPrice(label=f"{_fmt_days(days)} доступа", amount=stars)],
         )
+
+    @dp.callback_query(F.data == "pay_stars")
+    async def _pay_stars(cq):
+        await _send_stars_invoice(cq.from_user.id, runtime.sub_days(), runtime.price_stars())
+        await cq.answer()
+
+    @dp.callback_query(F.data == "pay_stars_intro")
+    async def _pay_stars_intro(cq):
+        await _send_stars_invoice(cq.from_user.id, round(runtime.intro_hours() / 24, 6),
+                                  runtime.intro_price_stars())
         await cq.answer()
 
     @dp.callback_query(F.data == "pay_usdt")
@@ -1195,6 +1211,11 @@ def main() -> None:
             [b(text=f"🆓 Free/нед: {eff['free_per_week']}",
                callback_data="adm_prompt_free_signals_per_week")],
             [b(text=f"🎁 Триал: {eff['trial_days']} дн", callback_data="adm_prompt_trial_days")],
+            [b(text=(f"🧪 Пробный: {eff['intro_price_stars']}⭐/{eff['intro_hours']:g}ч"
+                     if eff['intro_price_stars'] else "🧪 Пробный тариф: выкл"),
+               callback_data="adm_prompt_intro_price_stars"),
+             b(text=f"🧪 Часы: {eff['intro_hours']:g}",
+               callback_data="adm_prompt_intro_hours")],
             [b(text=f"📢 Плечо в постах: ×{eff['display_leverage']:g}"
                     if eff['display_leverage'] else "📢 Плечо в постах: выкл",
                callback_data="adm_prompt_display_leverage")],
