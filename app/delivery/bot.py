@@ -587,36 +587,60 @@ ADMIN_COMMANDS = USER_COMMANDS + [
 
 def main_menu_layout(is_admin: bool = False) -> list:
     """Раскладка постоянного меню (текст кнопок) — чистая функция для тестов.
-    Каждой кнопке соответствует F.text-хэндлер в main()."""
-    rows = [
+    Каждой кнопке соответствует F.text-хэндлер в main().
+
+    Раскладки НЕ общие: у админа нет смысла держать на экране кнопки для
+    подписчика (О боте/Бэктест/Глоссарий/Промокод — статический контент для
+    доверия, Калькулятор/Подписка — самообслуживание подписчика: админ и так
+    получает все сигналы вне подписки, /admin_ids). Вместо них — операционные
+    отчёты без аргументов (Юзеры/Growth/По сетапам), которые иначе набирались
+    бы вручную; конфигурация (пауза/цены/сетапы и т.п.) остаётся ТОЛЬКО в
+    инлайн-экранах /admin — не дублируем инструмент выбора в постоянную клавиатуру."""
+    if is_admin:
+        return [
+            ["📊 Статистика", "📄 Трек-рекорд"],
+            ["🛠 Админ-панель", "📟 Статус"],
+            ["🩺 Health", "👥 Юзеры"],
+            ["📈 Growth", "🎯 По сетапам"],
+            ["❓ Помощь"],
+        ]
+    return [
         ["📊 Статистика", "📄 Трек-рекорд"],
         ["🧮 Калькулятор", "💳 Подписка"],
         ["ℹ️ О боте", "🧪 Бэктест"],
         ["📖 Глоссарий", "🎟 Промокод"],
         ["❓ Помощь"],
     ]
-    if is_admin:
-        rows[-1] = ["❓ Помощь", "🛠 Админ-панель"]
-        rows.append(["📟 Статус", "🩺 Health"])
-    return rows
 
 
 async def register_bot_commands(bot, admin_ids) -> None:
-    """Зарегистрировать меню команд в Telegram (кнопка '/'): общее для всех + расширенное
-    для админов (BotCommandScopeChat). Без этого вызова getMyCommands пуст и меню не
-    показывает ничего, хотя сами хэндлеры работают по прямому вводу текста."""
-    from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
+    """Очистить Telegram-меню команд (кнопка '/') — сознательно ОТКЛЮЧЕНО: дублирует
+    постоянную клавиатуру (main_menu_layout) вторым, расходящимся списком. Единственный
+    источник документации команд теперь /help (format_help, строится из тех же
+    USER_COMMANDS/ADMIN_COMMANDS). Команды текстом по-прежнему работают — Telegram лишь
+    не подсказывает их в автокомплите. Explicit clear обязателен: Telegram кэширует
+    прошлую регистрацию на своей стороне, простое неисполнение set_my_commands её не уберёт."""
+    from aiogram.types import BotCommandScopeChat, BotCommandScopeDefault
 
-    await bot.set_my_commands(
-        [BotCommand(command=c, description=d) for c, d in USER_COMMANDS],
-        scope=BotCommandScopeDefault())
+    await bot.set_my_commands([], scope=BotCommandScopeDefault())
     for admin_id in admin_ids:
         try:
-            await bot.set_my_commands(
-                [BotCommand(command=c, description=d) for c, d in ADMIN_COMMANDS],
-                scope=BotCommandScopeChat(chat_id=admin_id))
+            await bot.set_my_commands([], scope=BotCommandScopeChat(chat_id=admin_id))
         except Exception:                              # noqa: BLE001 — админ не открывал чат с ботом
             pass
+
+
+def format_help(is_admin: bool) -> str:
+    """/help — единственный источник списка команд (замена отключённому Telegram-меню
+    '/'); строится из USER_COMMANDS/ADMIN_COMMANDS, чтобы не расходиться с фактическим
+    списком хэндлеров (старый ручной текст пропускал /promo)."""
+    body = "\n".join(f"/{c} — {d}" for c, d in USER_COMMANDS if c not in ("start", "help"))
+    text = f"Команды:\n{body}\n{ANTISCAM_LINE}\n⚠️ Не финансовый совет. Риск на сделку 1–2%."
+    if is_admin:
+        admin_only = ADMIN_COMMANDS[len(USER_COMMANDS):]
+        admin_body = "\n".join(f"/{c} — {d}" for c, d in admin_only)
+        text += f"\n\n🛠 Админ-команды:\n{admin_body}"
+    return text
 
 
 def format_admin_status(eff: dict, users: dict) -> str:
@@ -1066,21 +1090,9 @@ def main() -> None:
     @dp.message(Command("help"))
     @dp.message(F.text == "❓ Помощь")
     async def _help(m):
-        base = ("Команды:\n"
-                "/stats — публичная статистика\n"
-                "/trackrecord — полный CSV-журнал + sha256 (проверяемый трек-рекорд)\n"
-                "/calc <деп> <риск%> <вход> <стоп> — калькулятор позиции\n"
-                "/subscribe — подписка (все сигналы)\n"
-                "/about — как устроен сервис и честный дисклеймер\n"
-                "/backtest — честный итог бэктеста стратегии\n"
-                "/glossary — словарь терминов SMC\n"
-                f"{ANTISCAM_LINE}\n"
-                "⚠️ Не финансовый совет. Риск на сделку 1–2%.")
-        if _is_admin(m):
-            base += ("\n\n🛠 Админ: /admin — панель управления "
-                    "(пауза, символы, цены, канал, подписчики)")
+        is_adm = _is_admin(m)
         # меню прикрепляется и здесь: старые юзеры без /start тоже получают клавиатуру
-        await m.answer(base, reply_markup=_main_menu_kb(_is_admin(m)))
+        await m.answer(format_help(is_adm), reply_markup=_main_menu_kb(is_adm))
 
     @dp.my_chat_member()
     async def _added_to_chat(event):
@@ -1458,6 +1470,7 @@ def main() -> None:
         await _set(m, "enabled_setups", value, f"Включённые сетапы: {value}")
 
     @dp.message(Command("bysetup"))
+    @dp.message(F.text == "🎯 По сетапам")
     async def _bysetup(m):
         if not _is_admin(m):
             return
@@ -1465,6 +1478,7 @@ def main() -> None:
         await m.answer(format_by_setup(by_setup))
 
     @dp.message(Command("growth"))
+    @dp.message(F.text == "📈 Growth")
     async def _growth(m):
         if not _is_admin(m):
             return
@@ -1539,6 +1553,7 @@ def main() -> None:
         await m.answer(f"🚫 Подписка {parts[1]} снята.")
 
     @dp.message(Command("users"))
+    @dp.message(F.text == "👥 Юзеры")
     async def _users(m):
         if not _is_admin(m):
             return

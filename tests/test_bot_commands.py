@@ -1,4 +1,6 @@
-"""Тесты меню команд Telegram: register_bot_commands вызывает set_my_commands корректно."""
+"""Тесты меню команд Telegram: register_bot_commands ОЧИЩАЕТ меню '/' (дублирует
+постоянную клавиатуру — единственный источник документации теперь /help,
+см. format_help и tests/test_bot.py)."""
 from __future__ import annotations
 
 import asyncio
@@ -16,20 +18,26 @@ class _FakeBot:
         self.calls.append((chat_id, [c.command for c in commands]))
 
 
-def test_register_bot_commands_default_and_admin_scopes():
-    from app.delivery.bot import ADMIN_COMMANDS, USER_COMMANDS, register_bot_commands
+def test_register_bot_commands_clears_default_and_admin_scopes():
+    from app.delivery.bot import register_bot_commands
 
     bot = _FakeBot()
     asyncio.run(register_bot_commands(bot, (111, 222)))
 
     default_calls = [c for c in bot.calls if c[0] is None]
     assert len(default_calls) == 1
-    assert default_calls[0][1] == [c for c, _ in USER_COMMANDS]
+    assert default_calls[0][1] == []                      # меню очищено, не заполнено
 
     admin_calls = {chat_id: cmds for chat_id, cmds in bot.calls if chat_id is not None}
     assert set(admin_calls) == {111, 222}
-    assert admin_calls[111] == [c for c, _ in ADMIN_COMMANDS]
-    # админский список — надмножество пользовательского (включает всё то же самое)
+    assert admin_calls[111] == [] and admin_calls[222] == []
+
+
+def test_command_lists_still_source_help_text():
+    # USER_COMMANDS/ADMIN_COMMANDS больше не идут в Telegram-меню, но остаются
+    # источником /help (format_help) — надмножество и отсутствие дублей всё ещё важны
+    from app.delivery.bot import ADMIN_COMMANDS, USER_COMMANDS
+
     assert set(c for c, _ in USER_COMMANDS) <= set(c for c, _ in ADMIN_COMMANDS)
     assert "setups" in dict(ADMIN_COMMANDS)
 

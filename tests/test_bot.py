@@ -542,14 +542,40 @@ def test_build_signal_chart_data():
         bot.build_signal_chart_data(sig, 7, df.iloc[0:0], "10.07.2026")
 
 
-def test_main_menu_layout():
+def test_main_menu_layout_user():
     user = bot.main_menu_layout(is_admin=False)
     flat = [t for row in user for t in row]
     for label in ("📊 Статистика", "📄 Трек-рекорд", "🧮 Калькулятор", "💳 Подписка",
                   "ℹ️ О боте", "🧪 Бэктест", "📖 Глоссарий", "🎟 Промокод", "❓ Помощь"):
         assert label in flat, label
     assert "🛠 Админ-панель" not in flat                # админ-кнопки не текут юзерам
-    admin = [t for row in bot.main_menu_layout(is_admin=True) for t in row]
-    for label in ("🛠 Админ-панель", "📟 Статус", "🩺 Health", "❓ Помощь"):
-        assert label in admin, label
     assert all(len(row) <= 2 for row in user)           # компактные ряды по 1-2 кнопки
+
+
+def test_main_menu_layout_admin():
+    # админу — операционные отчёты, БЕЗ подписческого контента (он и так получает всё)
+    admin = [t for row in bot.main_menu_layout(is_admin=True) for t in row]
+    for label in ("📊 Статистика", "📄 Трек-рекорд", "🛠 Админ-панель", "📟 Статус",
+                  "🩺 Health", "👥 Юзеры", "📈 Growth", "🎯 По сетапам", "❓ Помощь"):
+        assert label in admin, label
+    for label in ("ℹ️ О боте", "🧪 Бэктест", "📖 Глоссарий", "🎟 Промокод",
+                  "🧮 Калькулятор", "💳 Подписка"):
+        assert label not in admin, label
+
+
+def test_format_help_user_has_all_user_commands_no_admin_leak():
+    txt = bot.format_help(is_admin=False)
+    for cmd, _ in bot.USER_COMMANDS:
+        if cmd not in ("start", "help"):
+            assert f"/{cmd} —" in txt, cmd
+    assert "Админ-команды" not in txt
+    admin_only = bot.ADMIN_COMMANDS[len(bot.USER_COMMANDS):]
+    assert f"/{admin_only[0][0]}" not in txt            # напр. /admin не течёт юзеру
+
+
+def test_format_help_admin_includes_admin_commands():
+    txt = bot.format_help(is_admin=True)
+    assert "Админ-команды" in txt
+    for cmd, _ in bot.ADMIN_COMMANDS:
+        if cmd not in ("start", "help"):                # исключены из тела намеренно
+            assert f"/{cmd} —" in txt, cmd
