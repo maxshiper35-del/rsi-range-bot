@@ -14,7 +14,7 @@ Telegram-бот торговых сигналов по крипто-фьючер
 ## Статус: работает вживую
 
 Бот запущен, ведёт канал, принимает подписки (Stars + USDT), полностью управляется из Telegram —
-кнопками или командами, без правки `.env` и рестартов. 181 тест, все зелёные.
+кнопками или командами, без правки `.env` и рестартов. 188 тестов, все зелёные.
 
 ## Архитектура
 
@@ -53,7 +53,7 @@ pip install -r requirements.txt
 make install-playwright     # headless Chromium для карточки недели (разово)
 cp .env.example .env        # заполни TELEGRAM_BOT_TOKEN и TELEGRAM_ADMIN_IDS
 make init-db
-make test                    # 181 тест, секреты не нужны (conftest подставляет dummy)
+make test                    # 188 тестов, секреты не нужны (conftest подставляет dummy)
 make install-hooks           # git pre-commit: lint+typecheck+test перед каждым коммитом
 make run                     # запуск (или через launchd — см. ниже)
 ```
@@ -129,7 +129,7 @@ launchctl kickstart -k "gui/$(id -u)/com.rsirange.bot"
 ## Тестирование
 
 ```bash
-make test        # 181 тест: детекторы, сетапы, бэктест, журнал, платежи, runtime, бот, графика
+make test        # 188 тестов: детекторы, сетапы, бэктест, журнал, платежи, runtime, бот, графика
 make lint         # ruff (весь репозиторий)
 make typecheck    # mypy app
 make backtest     # walk-forward прогон на живых/синтетических данных
