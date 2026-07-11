@@ -205,6 +205,18 @@ def intro_hours() -> float:
     return float(v) if v is not None else 5.0
 
 
+def vip_channel_id() -> str:
+    """Chat_id/@username приватного VIP-канала (мега-план MAX: платная подписка вместо DM,
+    которую часть юзеров мьютит/блокирует). Пусто — фича не настроена владельцем."""
+    return _raw("vip_channel_id") or ""
+
+
+def vip_invite_link() -> str:
+    """Последняя сгенерированная subscription-invite-ссылка (для повторного показа
+    в /vipchannel без пересоздания — revoke делает старую нерабочей)."""
+    return _raw("vip_invite_link") or ""
+
+
 def webapp_url() -> str:
     """Публичный HTTPS-URL страницы Mini App (Cloudflare Tunnel / статик-хост). Пусто —
     кнопка «Дашборд» отдаёт самодостаточный HTML-файл; при заданном URL становится
@@ -338,4 +350,6 @@ def effective() -> dict:
         "watchlist_auto_enabled": watchlist_auto_enabled(),
         "watchlist_size": watchlist_size(),
         "stream_enabled": stream_enabled(),
+        "vip_channel_id": vip_channel_id(),
+        "vip_invite_link": vip_invite_link(),
     }

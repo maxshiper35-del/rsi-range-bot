@@ -685,3 +685,18 @@ def test_next_milestone_and_dashboard_data():
     d = bot.dashboard_data(st, [1.0, -1.0], {"BTC": {}}, {"1:1": {}}, "now")
     assert d["milestone"] == {"current": 24, "next": 25}
     assert d["stats"] is st and d["equity"] == [1.0, -1.0]
+
+
+def test_parse_vipchannel_args():
+    """Формат: /vipchannel <@канал|id> <цена 1-10000>."""
+    assert bot.parse_vipchannel_args("/vipchannel @rsi_vip 300") == ("@rsi_vip", 300)
+    assert bot.parse_vipchannel_args("/vipchannel -1001234567890 50") == \
+        ("-1001234567890", 50)
+    assert bot.parse_vipchannel_args("/vipchannel @rsi_vip 1") == ("@rsi_vip", 1)
+    assert bot.parse_vipchannel_args("/vipchannel @rsi_vip 10000") == ("@rsi_vip", 10000)
+    assert bot.parse_vipchannel_args("/vipchannel @rsi_vip 0") is None       # ниже диапазона
+    assert bot.parse_vipchannel_args("/vipchannel @rsi_vip 10001") is None   # выше диапазона
+    assert bot.parse_vipchannel_args("/vipchannel @rsi_vip") is None        # нет цены
+    assert bot.parse_vipchannel_args("/vipchannel") is None
+    assert bot.parse_vipchannel_args("/vipchannel @rsi_vip abc") is None    # не число
+    assert bot.parse_vipchannel_args("") is None

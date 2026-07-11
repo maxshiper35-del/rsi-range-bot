@@ -419,6 +419,18 @@ _UNLOCK_DENIALS = {
 MILESTONES = (10, 25, 50, 100, 250, 500, 1000)
 
 
+def parse_vipchannel_args(text: str) -> tuple | None:
+    """'/vipchannel @rsi_range_vip 300' -> ('@rsi_range_vip', 300); None если формат неверный
+    или цена вне диапазона Telegram (1-10000 Stars — createChatSubscriptionInviteLink)."""
+    parts = (text or "").split()
+    if len(parts) != 3 or not parts[2].isdecimal():
+        return None
+    price = int(parts[2])
+    if not (1 <= price <= 10000):
+        return None
+    return parts[1], price
+
+
 def next_milestone(trades: int, levels: tuple = MILESTONES) -> int | None:
     """Ближайшая непройденная веха (для прогресс-бара дашборда). None — все взяты."""
     for m in levels:
@@ -675,6 +687,7 @@ ADMIN_COMMANDS = USER_COMMANDS + [
     ("usdtbonus", "бонус-дней за оплату в USDT"),
     ("grant", "выдать подписку: /grant <tg_id> [дней]"),
     ("refund", "вернуть последний Stars-платёж (money-back): /refund <tg_id>"),
+    ("vipchannel", "VIP-канал на нативной Stars-подписке: /vipchannel <@канал> <цена> | status"),
     ("revoke", "снять подписку: /revoke <tg_id>"),
     ("users", "счётчики юзеров"),
     ("announce", "объявление в канал + подписчикам"),
@@ -1638,6 +1651,53 @@ def main() -> None:
             await _set(m, "signals_channel", parts[1], f"Канал задан: {parts[1]}")
         else:
             await m.answer("Формат: /channel on|off  или  /channel <@username|id>")
+
+    @dp.message(Command("vipchannel"))
+    async def _vipchannel(m):
+        # VIP-канал на нативной Stars-подписке (мега-план MAX): Telegram сам гейтит
+        # членство — платящий добавляется автоматически, при истечении удаляется, без
+        # зависимости от того, замьютил ли юзер бота (DM теряет ~треть аудитории — видно
+        # по логам send: Forbidden). Требует ОДНОРАЗОВОГО действия владельца: создать
+        # приватный канал в приложении Telegram (Bot API каналы не создаёт) и добавить
+        # бота админом с правом приглашать пользователей — дальше всё этой командой.
+        if not _is_admin(m):
+            return
+        parts = (m.text or "").split()
+        if len(parts) == 2 and parts[1] == "status":
+            chan = runtime.vip_channel_id()
+            link = runtime.vip_invite_link()
+            if not chan:
+                await m.answer("VIP-канал не настроен. Формат: /vipchannel <@username|id> "
+                               "<цена в Stars>")
+                return
+            await m.answer(f"Канал: {chan}\nСсылка: {link or '—'}")
+            return
+        args = parse_vipchannel_args(m.text or "")
+        if args is None:
+            await m.answer(
+                "Формат: /vipchannel <@username|id> <цена в Stars, 1-10000>\n"
+                "или: /vipchannel status\n\n"
+                "Перед этим: создайте приватный канал в Telegram и добавьте "
+                f"@{(await bot.me()).username} админом с правом «Приглашать пользователей».\n"
+                "Период подписки фиксирован Telegram — ровно 30 дней.")
+            return
+        chat_id, price = args
+        try:
+            link = await bot.create_chat_subscription_invite_link(
+                chat_id=chat_id, subscription_period=2592000, subscription_price=price,
+                name="RSI Range VIP")
+        except Exception as e:                          # noqa: BLE001 — нет прав/канал не найден
+            await m.answer(f"Не удалось создать ссылку: {e}\n"
+                           "Проверьте: бот — админ канала, есть право «Приглашать "
+                           "пользователей», @username/id верны.")
+            return
+        await asyncio.to_thread(runtime.set_value, "vip_channel_id", chat_id)
+        await asyncio.to_thread(runtime.set_value, "vip_invite_link", link.invite_link)
+        await m.answer(
+            f"✅ VIP-канал настроен: {chat_id}, {price}⭐/30 дней.\n\n"
+            f"Ссылка для подписки:\n{link.invite_link}\n\n"
+            "Опубликуйте её в /subscribe или основном канале — оплативший добавится "
+            "автоматически, при неоплате следующего периода Telegram удалит сам.")
 
     @dp.message(Command("cryptobottoken"))
     async def _cryptobottoken(m):

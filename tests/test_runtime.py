@@ -167,3 +167,15 @@ def test_webapp_url(fresh_db):
     assert runtime.webapp_url() == ""                       # пусто -> кнопка отдаёт файл
     runtime.set_value("webapp_url", "https://example.com/app")
     assert runtime.webapp_url() == "https://example.com/app"
+
+
+def test_vip_channel_settings(fresh_db):
+    from app import runtime
+    assert runtime.vip_channel_id() == "" and runtime.vip_invite_link() == ""
+    runtime.set_value("vip_channel_id", "@rsi_range_vip")
+    runtime.set_value("vip_invite_link", "https://t.me/+abc123")
+    assert runtime.vip_channel_id() == "@rsi_range_vip"
+    assert runtime.vip_invite_link() == "https://t.me/+abc123"
+    eff = runtime.effective()
+    assert eff["vip_channel_id"] == "@rsi_range_vip"
+    assert eff["vip_invite_link"] == "https://t.me/+abc123"
