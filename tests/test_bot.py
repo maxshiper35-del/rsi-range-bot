@@ -634,10 +634,13 @@ def test_milestone_reached():
 
 
 def test_watchlist_gate_decision():
-    """Гейт кандидата: «не хуже нейтрали» и минимум сделок."""
-    assert bot.watchlist_gate_decision(0.10, 12) is True
-    assert bot.watchlist_gate_decision(-0.05, 5) is True         # ровно на порогах
-    assert bot.watchlist_gate_decision(-0.06, 20) is False       # хуже нейтрали
+    """Гейт кандидата: порог ужесточён 2026-07-11 до +0.10R («меньше, но сильнее»),
+    было −0.05R «не хуже нейтрали» — владелец предпочёл качество скорости набора статистики."""
+    assert bot.watchlist_gate_decision(0.53, 17) is True         # ARB — явное преимущество
+    assert bot.watchlist_gate_decision(0.10, 12) is True         # ровно на пороге
+    assert bot.watchlist_gate_decision(0.09, 22) is False        # XAU — чуть ниже, мимо
+    assert bot.watchlist_gate_decision(0.02, 28) is False        # около нуля — уже не «сильный»
+    assert bot.watchlist_gate_decision(-0.06, 20) is False       # хуже нейтрали — тем более мимо
     assert bot.watchlist_gate_decision(0.50, 4) is False         # мало сделок
     assert bot.watchlist_gate_decision(0.0, 0) is False
 
