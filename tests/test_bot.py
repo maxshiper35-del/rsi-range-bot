@@ -700,3 +700,14 @@ def test_parse_vipchannel_args():
     assert bot.parse_vipchannel_args("/vipchannel") is None
     assert bot.parse_vipchannel_args("/vipchannel @rsi_vip abc") is None    # не число
     assert bot.parse_vipchannel_args("") is None
+
+
+def test_format_terms_covers_key_sections():
+    txt = bot.format_terms()
+    assert "Условия использования" in txt
+    assert "не инвестиционный совет" in txt.lower()
+    assert "Money-back 7 дней" in txt
+    assert "18+" in txt
+    assert "никогда не пишем первыми в личку" in txt
+    assert "храним минимум" in txt.lower()
+    assert "не юридическая" in txt.lower()          # честная оговорка про черновик
