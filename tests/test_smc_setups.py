@@ -11,6 +11,7 @@ from app.brain.smc_setups import (
     SMCEngine,
     _bar_minute_utc,
     _confidence,
+    _find_impulse,
     build_6226,
     build_ltf_poi,
     build_opening_model,
@@ -87,7 +88,8 @@ def test_setup_1_1_short():
 def test_6226_time_gate_blocks_outside_window():
     # окно входа UTC 11:00-18:00; последний бар (06:00 + 15*15м = 09:45) вне окна -> None
     early = datetime(2026, 1, 5, 6, 0, tzinfo=timezone.utc)
-    assert build_6226(_df(_BARS_SHORT, dt_start=early), "T", SMCConfig(use_time_filter=True)) is None
+    cfg = SMCConfig(use_time_filter=True)
+    assert build_6226(_df(_BARS_SHORT, dt_start=early), "T", cfg) is None
 
 
 def test_6226_time_gate_allows_inside_window():
@@ -116,6 +118,64 @@ def test_min_impulse_filter():
     df = _df(_BARS_SHORT)
     assert build_6226(df, "T", SMCConfig(use_time_filter=False, min_impulse_atr=1.0)) is not None
     assert build_6226(df, "T", SMCConfig(use_time_filter=False, min_impulse_atr=100.0)) is None
+
+
+# Живой инцидент 2026-07-11: LAB рухнул на ~97% за 5 дней, но 200-барное окно (~8 дней
+# для 1h) ещё видело до-обвальный хай. _find_impulse брал МАКСИМАЛЬНУЮ цену свинга за
+# всё окно как якорь импульса -> вход получался в 12-15 раз дальше рынка, недостижим.
+# Фикс: якорь — БЛИЖАЙШИЙ к слому свинг (cand[-1]), не глобальный экстремум окна.
+_BARS_STALE_HIGH = [
+    (95, 96, 94, 95),
+    (95, 97, 94, 96),
+    (96, 500, 96, 150),    # древний экстремальный хай — вне относимости к текущей структуре
+    (150, 151, 120, 130),
+    (130, 131, 110, 115),
+    (115, 116, 105, 108),
+    (108, 109, 100, 100),
+] + _BARS_SHORT
+
+_BARS_STALE_LOW = [
+    (112, 114, 111, 113),
+    (113, 115, 112, 114),
+    (114, 114.5, -300, 50),  # древний экстремальный лой — вне относимости к текущей структуре
+    (50, 70, 49, 65),
+    (65, 85, 64, 80),
+    (80, 100, 79, 95),
+    (95, 107, 94, 107),
+] + [
+    (107.0, 107.5, 106.5, 107.0),
+    (107.0, 107.2, 104.5, 105.0),
+    (105.0, 105.5, 102.2, 103.0),
+    (103.0, 105.2, 104.0, 105.0),
+    (105.0, 106.5, 104.8, 106.0),
+    (106.0, 106.2, 103.5, 104.0),
+    (104.0, 104.2, 99.5, 100.0),
+    (100.0, 100.5, 96.2, 97.0),
+    (97.0, 100.2, 98.5, 100.0),
+    (100.0, 102.5, 101.0, 102.0),
+    (102.0, 102.2, 97.5, 98.0),
+    (98.0, 98.5, 93.5, 99.0),
+    (99.0, 103.5, 98.8, 103.0),
+    (103.0, 107.5, 102.8, 107.0),
+    (107.0, 111.5, 106.8, 111.0),
+    (111.0, 113.5, 110.8, 113.0),
+]
+
+
+def test_find_impulse_anchors_on_recent_swing_not_stale_extreme_short():
+    df = _df(_BARS_STALE_HIGH)
+    imp = _find_impulse(df, SMCConfig(use_time_filter=False, min_impulse_atr=0.0))
+    assert imp is not None and imp.side == Side.SHORT
+    assert imp.S == 113.5              # ближайший к слому реальный свинг
+    assert imp.S != 500.0              # НЕ древний экстремум
+
+
+def test_find_impulse_anchors_on_recent_swing_not_stale_extreme_long():
+    df = _df(_BARS_STALE_LOW)
+    imp = _find_impulse(df, SMCConfig(use_time_filter=False, min_impulse_atr=0.0))
+    assert imp is not None and imp.side == Side.LONG
+    assert imp.S == 93.5               # ближайший к слому реальный свинг
+    assert imp.S != -300.0             # НЕ древний экстремум
 
 
 def test_engine_enabled_setups_filter():

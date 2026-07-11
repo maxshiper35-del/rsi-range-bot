@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
 
 import pandas as pd
 
@@ -70,7 +69,7 @@ class SMCConfig(StrategyConfig):
 # ---------------------------------------------------------------------------
 # Время бара
 # ---------------------------------------------------------------------------
-def _bar_minute_utc(df: pd.DataFrame, i: int) -> Optional[int]:
+def _bar_minute_utc(df: pd.DataFrame, i: int) -> int | None:
     """Минута дня в UTC для бара i, если в df есть колонка dt; иначе None."""
     if "dt" not in df.columns:
         return None
@@ -81,7 +80,7 @@ def _bar_minute_utc(df: pd.DataFrame, i: int) -> Optional[int]:
 # ---------------------------------------------------------------------------
 # Bias: тренд HTF + премиум/дискаунт (§2.4, компонент 0.30)
 # ---------------------------------------------------------------------------
-def dealing_range(swings: list[det.Swing]) -> Optional[tuple[float, float]]:
+def dealing_range(swings: list[det.Swing]) -> tuple[float, float] | None:
     highs = [s.price for s in swings if s.kind == Kind.HIGH]
     lows = [s.price for s in swings if s.kind == Kind.LOW]
     if not highs or not lows:
@@ -89,7 +88,7 @@ def dealing_range(swings: list[det.Swing]) -> Optional[tuple[float, float]]:
     return min(lows), max(highs)
 
 
-def _bias_score(df: pd.DataFrame, side: Side, htf_df: Optional[pd.DataFrame],
+def _bias_score(df: pd.DataFrame, side: Side, htf_df: pd.DataFrame | None,
                 cfg: SMCConfig) -> float:
     ref = htf_df if htf_df is not None else df
     ref_sw = det.find_swings(ref, cfg.swing_left, cfg.swing_right)
@@ -114,7 +113,7 @@ def _bias_score(df: pd.DataFrame, side: Side, htf_df: Optional[pd.DataFrame],
 # ---------------------------------------------------------------------------
 def _confluence_score(df: pd.DataFrame, entry: float, side: Side, cfg: SMCConfig,
                       swings: list[det.Swing], clean_impulse: bool,
-                      in_entry_window: Optional[bool]) -> tuple[float, list[str]]:
+                      in_entry_window: bool | None) -> tuple[float, list[str]]:
     atr = det.atr_scalar(df)
     band = cfg.entry_band_atr * atr
     reasons: list[str] = []
@@ -170,7 +169,7 @@ class _Impulse:
     swings: list[det.Swing]
 
 
-def _find_impulse(df: pd.DataFrame, cfg: SMCConfig) -> Optional[_Impulse]:
+def _find_impulse(df: pd.DataFrame, cfg: SMCConfig) -> _Impulse | None:
     swings = det.find_swings(df, cfg.swing_left, cfg.swing_right)
     if len(swings) < 4:
         return None
@@ -186,7 +185,10 @@ def _find_impulse(df: pd.DataFrame, cfg: SMCConfig) -> Optional[_Impulse]:
         cand = [s for s in swings if s.kind == Kind.HIGH and s.index < brk.break_index]
         if not cand:
             return None
-        top = max(cand, key=lambda s: s.price)          # самый явный снятый хай
+        # ближайший к слому хай, а не макс. цена за окно — иначе якорится на давно
+        # неактуальный экстремум (LAB 2026-07-11: 200-барное окно ещё захватывало
+        # до-обвальный хай в 15x текущей цены -> недостижимый вход)
+        top = cand[-1]
         s_index, S = top.index, top.price
         e_index = int(s_index + low[s_index:].argmin())
         E = float(low[e_index])
@@ -195,7 +197,7 @@ def _find_impulse(df: pd.DataFrame, cfg: SMCConfig) -> Optional[_Impulse]:
         cand = [s for s in swings if s.kind == Kind.LOW and s.index < brk.break_index]
         if not cand:
             return None
-        bot = min(cand, key=lambda s: s.price)          # самый явный снятый лой
+        bot = cand[-1]                                   # ближайший к слому лой (см. выше)
         s_index, S = bot.index, bot.price
         e_index = int(s_index + high[s_index:].argmax())
         E = float(high[e_index])
@@ -231,9 +233,10 @@ def _impulse_clean(df: pd.DataFrame, i0: int, i1: int, max_ratio: float) -> bool
 # ---------------------------------------------------------------------------
 # §2.1 Флагман 6226
 # ---------------------------------------------------------------------------
-def build_6226(df: pd.DataFrame, symbol: str, cfg: Optional[SMCConfig] = None,
-               timeframe: str = "m15", htf_df: Optional[pd.DataFrame] = None) -> Optional[Signal]:
-    """свип -> слом(закреп телом) -> фибо 1/0.62/0/-0.26 -> вход 0.62, тейк -0.26, стоп 1, RR 2.26."""
+def build_6226(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = None,
+               timeframe: str = "m15", htf_df: pd.DataFrame | None = None) -> Signal | None:
+    """свип -> слом(закреп телом) -> фибо 1/0.62/0/-0.26 -> вход 0.62, тейк -0.26,
+    стоп 1, RR 2.26."""
     cfg = cfg or SMCConfig()
     imp = _find_impulse(df, cfg)
     if imp is None:
@@ -245,7 +248,7 @@ def build_6226(df: pd.DataFrame, symbol: str, cfg: Optional[SMCConfig] = None,
     stop = imp.S                                   # уровень 1
 
     # --- гейт времени (жёсткий, если есть метки времени) ---
-    in_entry_window: Optional[bool] = None
+    in_entry_window: bool | None = None
     if cfg.use_time_filter:
         m_break = _bar_minute_utc(df, imp.brk.break_index)
         m_now = _bar_minute_utc(df, len(df) - 1)
@@ -277,8 +280,8 @@ def build_6226(df: pd.DataFrame, symbol: str, cfg: Optional[SMCConfig] = None,
 # ---------------------------------------------------------------------------
 # §2.x Setup 1:1 (самодостаточный)
 # ---------------------------------------------------------------------------
-def detect_setup_1_1(df: pd.DataFrame, symbol: str, cfg: Optional[SMCConfig] = None,
-                     timeframe: str = "m5", htf_df: Optional[pd.DataFrame] = None) -> Optional[Signal]:
+def detect_setup_1_1(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = None,
+                     timeframe: str = "m5", htf_df: pd.DataFrame | None = None) -> Signal | None:
     """свип свинга -> импульс -> фибо 0/0.5/1 -> вход 0.5, стоп 1, тейк 0, RR 1:1."""
     cfg = cfg or SMCConfig()
     imp = _find_impulse(df, cfg)
@@ -312,7 +315,7 @@ def detect_setup_1_1(df: pd.DataFrame, symbol: str, cfg: Optional[SMCConfig] = N
 # §2.2 LTF-модель по POI (вход от OB/BB после слома)
 # ---------------------------------------------------------------------------
 def build_ltf_poi(htf_df: pd.DataFrame, ltf_df: pd.DataFrame, symbol: str,
-                  cfg: Optional[SMCConfig] = None, timeframe: str = "m5") -> Optional[Signal]:
+                  cfg: SMCConfig | None = None, timeframe: str = "m5") -> Signal | None:
     """Слом LTF -> откат в OB/BB -> вход от MT(50%), стоп за дальнюю границу блока.
 
     HTF-тренд идёт как усилитель bias (совпадение направления += confidence).
@@ -365,9 +368,9 @@ def build_ltf_poi(htf_df: pd.DataFrame, ltf_df: pd.DataFrame, symbol: str,
 # ---------------------------------------------------------------------------
 # Модели открытия SMR / SMC / OF (вход в имбаланс/0.5 после слома)
 # ---------------------------------------------------------------------------
-def build_opening_model(df: pd.DataFrame, symbol: str, cfg: Optional[SMCConfig] = None,
+def build_opening_model(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = None,
                         timeframe: str = "m5", model: str = "SMC",
-                        htf_df: Optional[pd.DataFrame] = None) -> Optional[Signal]:
+                        htf_df: pd.DataFrame | None = None) -> Signal | None:
     """Откат в имбаланс (или 0.5) после слома; стоп за точку разворота/свип; тейк — уровень 0."""
     cfg = cfg or SMCConfig()
     imp = _find_impulse(df, cfg)
@@ -377,7 +380,8 @@ def build_opening_model(df: pd.DataFrame, symbol: str, cfg: Optional[SMCConfig] 
     mid = imp.E + 0.5 * span
     lo, hi = min(imp.E, imp.S), max(imp.E, imp.S)
     cands = [z for z in det.detect_fvg(df)
-             if lo <= (z.top + z.bottom) / 2.0 <= hi and not det.apply_inversion_rule(df, z).inverted]
+             if lo <= (z.top + z.bottom) / 2.0 <= hi
+             and not det.apply_inversion_rule(df, z).inverted]
     if cands:
         z = min(cands, key=lambda zz: abs((zz.top + zz.bottom) / 2.0 - mid))
         entry, ez = det.mean_threshold(z), "вход в имбаланс"
@@ -467,7 +471,7 @@ class SMCEngine:
                   "1h": 60, "H1": 60, "h1": 60, "4h": 240, "H4": 240, "h4": 240,
                   "1d": 1440, "D1": 1440, "d1": 1440}
 
-    def __init__(self, config: Optional[SMCConfig] = None):
+    def __init__(self, config: SMCConfig | None = None):
         self.cfg = config or SMCConfig()
 
     def _setup_enabled(self, tag: str) -> bool:
@@ -478,8 +482,8 @@ class SMCEngine:
                    for e in self.cfg.enabled_setups)
 
     def analyze_single(self, df: pd.DataFrame, symbol: str, timeframe: str,
-                       htf_df: Optional[pd.DataFrame] = None) -> Optional[Signal]:
-        candidates = []
+                       htf_df: pd.DataFrame | None = None) -> Signal | None:
+        candidates: list[Signal | None] = []
         if self._setup_enabled("6226"):
             candidates.append(build_6226(df, symbol, self.cfg, timeframe, htf_df))
         if self._setup_enabled("1:1"):
@@ -490,13 +494,14 @@ class SMCEngine:
             candidates.append(build_ltf_poi(htf_df if htf_df is not None else df, df,
                                             symbol, self.cfg, timeframe))
         # страховочный фильтр по фактическому тегу из snapshot
-        candidates = [c for c in candidates if c is not None
-                      and self._setup_enabled((c.indicators_snapshot or {}).get("setup", ""))]
-        if not candidates:
+        signals = [c for c in candidates if c is not None]
+        signals = [c for c in signals
+                  if self._setup_enabled((c.indicators_snapshot or {}).get("setup", ""))]
+        if not signals:
             return None
-        return max(candidates, key=lambda s: s.confidence)
+        return max(signals, key=lambda s: s.confidence)
 
-    def analyze(self, frames: dict[str, pd.DataFrame], symbol: str) -> Optional[Signal]:
+    def analyze(self, frames: dict[str, pd.DataFrame], symbol: str) -> Signal | None:
         entry_tf = next((tf for tf in frames if tf in self.ENTRY_TFS), None)
         if entry_tf is None:                       # fallback: САМЫЙ МЛАДШИЙ по длительности
             entry_tf = min(frames, key=lambda t: self.TF_MINUTES.get(t, 10 ** 9))
