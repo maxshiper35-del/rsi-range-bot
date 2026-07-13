@@ -39,6 +39,26 @@ def test_main_records_backup_timestamp(fresh_db, monkeypatch, tmp_path):
     assert runtime.last_backup_at() is not None
 
 
+def test_backup_integrity_rejects_corrupt(fresh_db, tmp_path):
+    import pytest
+
+    from scripts.backup_db import _verify_integrity
+    # валидная копия проходит
+    good = backup_once_helper(fresh_db, tmp_path)
+    _verify_integrity(good)                              # не бросает
+    # битый файл (не SQLite) отклоняется и удаляется
+    bad = tmp_path / "signals-bad.db"
+    bad.write_bytes(b"this is not a sqlite database at all")
+    with pytest.raises(RuntimeError):
+        _verify_integrity(bad)
+    assert not bad.exists()                             # битую копию удалили
+
+
+def backup_once_helper(fresh_db, tmp_path):
+    from scripts.backup_db import backup_once
+    return backup_once(dst_dir=tmp_path / "bk")
+
+
 def test_backup_rotation(fresh_db, tmp_path):
     from scripts.backup_db import backup_once
     dst_dir = tmp_path / "backups"

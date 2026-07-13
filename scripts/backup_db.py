@@ -46,8 +46,27 @@ def backup_once(dst_dir: Path = Path("data/backups"), keep_last: int = 14) -> Pa
         src.close()
 
     tmp_path.replace(dst_path)                  # атомарно: в ротацию попадают только целые
+    _verify_integrity(dst_path)                 # читаема и не побита ДО отметки об успехе
     _rotate(dst_dir, keep_last)
     return dst_path
+
+
+def _verify_integrity(path: Path) -> None:
+    """PRAGMA integrity_check на свежей копии перед тем, как считать бэкап успешным.
+    Онлайн-backup под активной записью теоретически может дать нечитаемый файл — если
+    отметить такой как успешный, watchdog промолчит, а восстанавливать будет нечего.
+    Битую копию удаляем и падаем (main тогда НЕ вызовет set_last_backup_at)."""
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute("PRAGMA integrity_check").fetchone()
+        ok, detail = (bool(row) and row[0] == "ok"), row
+    except sqlite3.DatabaseError as e:                      # файл вообще не SQLite / нечитаем
+        ok, detail = False, e
+    finally:
+        conn.close()
+    if not ok:
+        path.unlink(missing_ok=True)                        # closed до удаления
+        raise RuntimeError(f"бэкап не прошёл integrity_check: {path} -> {detail}")
 
 
 def _rotate(dst_dir: Path, keep_last: int) -> None:

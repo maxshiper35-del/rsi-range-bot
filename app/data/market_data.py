@@ -172,6 +172,10 @@ def _exchange(exchange_id: str):
     if exchange_id not in cache:
         cache[exchange_id] = getattr(ccxt, exchange_id)({
             "enableRateLimit": True,
+            # явный сетевой таймаут: дефолт ccxt (10с) неявен, а зависший запрос без
+            # таймаута мог бы подвесить синхронный fetch в to_thread на минуты и заморозить
+            # такт поллера — watchdog это заметит, но лучше не допускать
+            "timeout": 15000,
             "options": {"defaultType": "swap"},
         })
     return cache[exchange_id]

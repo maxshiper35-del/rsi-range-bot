@@ -590,6 +590,31 @@ def should_alert_backup_stale(last_backup_at: str | None, last_alert_at: str | N
     return (now - datetime.fromisoformat(last_alert_at)).total_seconds() >= rethrottle_hours * 3600
 
 
+def should_alert_poller_stale(last_tick_at: str | None, last_alert_at: str | None,
+                              now_iso: str, stale_seconds: float, uptime_seconds: float,
+                              rethrottle_hours: int = 6) -> bool:
+    """Пора ли алертить админу о зависшем такте поллера. Отдельный контур от краша процесса:
+    launchd KeepAlive перезапускает УПАВШИЙ процесс, а этот watchdog ловит случай, когда процесс
+    ЖИВ (обслуживание тикает), но таск поллера встал — зависший fetch, тихая смерть корутины.
+    Гейты: (1) аптайм < stale_seconds — процесс только поднялся, дать поллеру шанс тикнуть (иначе
+    персистентный last_tick с прошлого запуска дал бы ложную тревогу на старте); (2) тик устарел
+    >= stale_seconds ИЛИ тика не было вовсе после грейса; (3) троттлинг — не спамить каждый такт."""
+    from datetime import datetime
+
+    now = datetime.fromisoformat(now_iso)
+    if uptime_seconds < stale_seconds:
+        return False
+    if last_tick_at is None:
+        stale = True
+    else:
+        stale = (now - datetime.fromisoformat(last_tick_at)).total_seconds() >= stale_seconds
+    if not stale:
+        return False
+    if last_alert_at is None:
+        return True
+    return (now - datetime.fromisoformat(last_alert_at)).total_seconds() >= rethrottle_hours * 3600
+
+
 _TRACKRECORD_COLS = ("id", "symbol", "side", "timeframe", "entry", "stop", "tp1", "tp2", "tp3",
                     "status", "result_r", "created_at", "closed_at")
 
@@ -2274,6 +2299,21 @@ def main() -> None:
                 except Exception as e:                     # noqa: BLE001
                     log.warning("backup stale алерт админу %s: %s", admin_id, e)
             await asyncio.to_thread(runtime.set_last_backup_alert_at, now_)
+        # watchdog такта поллера: процесс жив (обслуживание тикает), но скан-цикл встал —
+        # порог = 2× slack (полный пропущенный цикл + буфер, не единичный медленный тик)
+        tick_stale = poller_tick_slack_seconds(runtime.timeframes()) * 2
+        uptime_s = (datetime.now(timezone.utc) - start_time).total_seconds()
+        if should_alert_poller_stale(runtime.last_poller_tick_at(),
+                                     runtime.last_poller_alert_at(), now_, tick_stale, uptime_s):
+            tick_age = _fmt_age(runtime.last_poller_tick_at(), datetime.now(timezone.utc))
+            text = (f"⚠️ Такт поллера завис ({tick_age}) — скан-цикл не тикал. "
+                    "Проверьте logs/bot.log; при необходимости рестарт. /health для деталей.")
+            for admin_id in cfg.admin_ids:
+                try:
+                    await bot.send_message(admin_id, text)
+                except Exception as e:                     # noqa: BLE001
+                    log.warning("poller stale алерт админу %s: %s", admin_id, e)
+            await asyncio.to_thread(runtime.set_last_poller_alert_at, now_)
         # TTL просроченных semiauto-кандидатов (готовим впрок — сейчас signal_mode=auto)
         try:
             expired_ids = await asyncio.to_thread(journal.expire_stale_candidates)

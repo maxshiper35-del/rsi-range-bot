@@ -345,6 +345,32 @@ def test_should_alert_backup_stale():
     assert bot.should_alert_backup_stale(stale, old_alert, now_iso) is True      # троттлинг истёк
 
 
+def test_should_alert_poller_stale():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    slack = 4140.0                                          # ~69 мин (1h youngest tf)
+    up_long = slack + 100                                   # процесс поднят достаточно давно
+    fresh = (now - timedelta(minutes=10)).isoformat()
+    stale = (now - timedelta(hours=3)).isoformat()
+
+    # процесс только поднялся — грейс, молчим даже при устаревшем персистентном тике
+    assert bot.should_alert_poller_stale(stale, None, now_iso, slack, slack - 10) is False
+    # аптайм есть, тика не было вовсе после грейса -> алерт
+    assert bot.should_alert_poller_stale(None, None, now_iso, slack, up_long) is True
+    # свежий тик -> не пора
+    assert bot.should_alert_poller_stale(fresh, None, now_iso, slack, up_long) is False
+    # устарел, не алертили -> алерт
+    assert bot.should_alert_poller_stale(stale, None, now_iso, slack, up_long) is True
+    # троттлинг: недавно алертили
+    recent = (now - timedelta(hours=1)).isoformat()
+    assert bot.should_alert_poller_stale(stale, recent, now_iso, slack, up_long) is False
+    # троттлинг истёк (>6ч)
+    old = (now - timedelta(hours=7)).isoformat()
+    assert bot.should_alert_poller_stale(stale, old, now_iso, slack, up_long) is True
+
+
 def test_setup_codes_roundtrip():
     # каждый известный сетап имеет код, и код однозначно возвращается обратно в тег
     assert set(bot._KNOWN_SETUPS) == set(bot._SETUP_CODES)

@@ -125,6 +125,15 @@ def set_last_poller_tick_at(iso: str) -> None:
     set_value("last_poller_tick_at", iso)
 
 
+def last_poller_alert_at() -> str | None:
+    """Когда последний раз слали админу алерт о зависшем такте поллера — троттлинг."""
+    return _raw("last_poller_alert_at")
+
+
+def set_last_poller_alert_at(iso: str) -> None:
+    set_value("last_poller_alert_at", iso)
+
+
 def last_backup_at() -> str | None:
     return _raw("last_backup_at")
 
