@@ -239,17 +239,31 @@ def _bars(rows, start="2026-01-01T00:00:00+00:00", step_min=15):
 
 
 def test_bars_outcome_requires_fill(fresh_db):
-    """Лимитка не исполнена -> сделки нет; после max_wait -> expired (не в статистике)."""
+    """Лимитка не исполнена -> сделки нет; после окна ожидания (в ЧАСАХ) -> expired."""
     from app.brain import journal
     # SHORT entry=100 (лимит выше рынка), рынок сразу упал и не вернулся
     journal.record_signal(_sig())                       # created 2026-01-01T00:00
-    below = [(90, 91, 89, 90)] * 60                     # 60 баров без касания 100
-    bars = {"BTC/USDT:USDT": _bars(below, start="2026-01-01T00:15:00+00:00")}
+    # окно ожидания филла = 50ч; 55 часовых баров без касания 100 перекрывают его
+    below = [(90, 91, 89, 90)] * 55
+    bars = {"BTC/USDT:USDT": _bars(below, start="2026-01-01T01:00:00+00:00", step_min=60)}
     res = journal.update_outcomes_from_bars(bars)
     assert len(res) == 1 and res[0]["status"] == "expired"
     row = fresh_db.query_one("SELECT * FROM signals WHERE id=1")
     assert row["status"] == "expired" and row["result_r"] is None
     assert journal.stats()["trades"] == 0               # несостоявшаяся сделка не скорится
+
+
+def test_bars_outcome_no_expiry_before_window(fresh_db):
+    """Тот же несостоявшийся вход, но окно ещё не вышло (30ч < 50ч) -> НЕ expired.
+    Регрессия 2026-07-13: бар-счётчик истекал сигналы раньше времени при 15m-скоринге."""
+    from app.brain import journal
+    journal.record_signal(_sig())                       # created 2026-01-01T00:00
+    below = [(90, 91, 89, 90)] * 120                    # 120 × 15м = 30ч < 50ч
+    bars = {"BTC/USDT:USDT": _bars(below, start="2026-01-01T00:15:00+00:00", step_min=15)}
+    res = journal.update_outcomes_from_bars(bars)
+    assert res == []                                    # ещё ждём — не истекло, не закрыто
+    row = fresh_db.query_one("SELECT status FROM signals WHERE id=1")
+    assert row["status"] == "open"
 
 
 def test_bars_outcome_stop_first_same_bar(fresh_db):

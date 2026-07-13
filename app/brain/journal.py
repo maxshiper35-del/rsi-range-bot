@@ -256,13 +256,17 @@ def _outcome_from_bars(row, df) -> tuple | None:
 
     Фазы: (1) ждём касания entry (лимитный вход, low<=entry<=high) — без fill сделки НЕТ;
     (2) после fill: стоп и тейк проверяются по high/low каждого бара, при касании обоих
-    в одном баре — консервативно СТОП. Если fill не случился за max_wait баров -> 'expired'.
+    в одном баре — консервативно СТОП. Если fill не случился за MAX_WAIT_HOURS -> 'expired'.
     -> (status, event, result_r|None, exit_price|None, fill_dt_iso|None)
        | None (ждём fill, баров мало). status='open' — вход исполнен, развязки ещё нет.
     """
     import pandas as pd
 
-    max_wait = 50                                   # баров на исполнение лимитки
+    # окно ожидания филла — В ЧАСАХ, не в барах: иначе смена ТФ скоринга меняет окно и
+    # ложно истекает уже исполненные/свежие сигналы (инцидент 2026-07-13 при включении
+    # 15m — filled-сигналы с филлом позже 12.5ч помечались expired, противореча посту
+    # «вход исполнен»). 50ч ≈ прежние 50 баров на 1h — для 1h поведение не меняется.
+    max_wait_h = 50.0
     entry, stop, side = row["entry"], row["stop"], row["side"]
     risk = abs(entry - stop)
     if risk <= 0 or "dt" not in df.columns:
@@ -276,16 +280,15 @@ def _outcome_from_bars(row, df) -> tuple | None:
 
     filled = False
     fill_dt = None
-    waited = 0
     for _, b in bars.iterrows():
         hi, lo = float(b["high"]), float(b["low"])
+        bar_dt = pd.to_datetime(b["dt"], utc=True)
         if not filled:
-            waited += 1
             if lo <= entry <= hi:
                 filled = True                        # вход исполнен; стоп/тейк — с этого же бара
-                fill_dt = pd.to_datetime(b["dt"], utc=True).isoformat()
-            elif waited >= max_wait:
-                # лимитка не исполнилась — сделки не было
+                fill_dt = bar_dt.isoformat()
+            elif (bar_dt - created).total_seconds() > max_wait_h * 3600:
+                # лимитка не исполнилась за окно — сделки не было
                 return ("expired", "expired", None, None, None)
             else:
                 continue
