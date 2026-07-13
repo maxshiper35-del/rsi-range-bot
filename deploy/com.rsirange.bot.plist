@@ -8,8 +8,11 @@
   Управление:
     launchctl unload ~/Library/LaunchAgents/com.rsirange.bot.plist  # остановить + отключить
     launchctl list | grep rsirange                                  # статус
-  Логи — logs/bot.log в каталоге проекта.
+  Логи — logs/bot.log (ротация 10МБ×5 средствами процесса, LOG_FILE ниже). launchd
+  редиректит только stdout/stderr в logs/bot.stderr.log (редкие некаугнутые трейсбеки
+  до инициализации логгера) — иначе два писателя в один файл ломали бы ротацию.
 -->
+
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -29,6 +32,9 @@
     <dict>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
+        <!-- процесс сам пишет ротируемый лог сюда (app.logging_conf.setup_logging) -->
+        <key>LOG_FILE</key>
+        <string>/Users/mac/bot ctypto/logs/bot.log</string>
     </dict>
 
     <key>RunAtLoad</key>
@@ -40,9 +46,11 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
 
+    <!-- только некаугнутый stdout/stderr (краши до инициализации логгера); основной
+         лог пишет сам процесс в LOG_FILE с ротацией -->
     <key>StandardOutPath</key>
-    <string>/Users/mac/bot ctypto/logs/bot.log</string>
+    <string>/Users/mac/bot ctypto/logs/bot.stderr.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/mac/bot ctypto/logs/bot.log</string>
+    <string>/Users/mac/bot ctypto/logs/bot.stderr.log</string>
 </dict>
 </plist>
