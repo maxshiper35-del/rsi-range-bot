@@ -140,6 +140,31 @@ def render_winback(promo_code: str, days: int, valid_days: int,
     )
 
 
+def render_referral_reward(days: int) -> str:
+    """Уведомление рефереру: приглашённый оплатил, начислена награда."""
+    return (
+        f"🎉 <b>+{days} дн. подписки за приглашение!</b>\n"
+        "Ваш приглашённый оформил платную подписку — спасибо, что делитесь.\n"
+        "Статус: /subscribe"
+    )
+
+
+def render_referral_invite(link: str, ref: dict, reward_days: int) -> str:
+    """Экран /referral: личная ссылка + статистика приглашений. reward начисляется только за
+    РЕАЛЬНУЮ оплату приглашённого (не триал) — так и пишем, без ложных обещаний."""
+    return (
+        "🤝 <b>Приглашайте — получайте дни подписки</b>\n"
+        f"{LINE}\n"
+        f"Ваша ссылка:\n<code>{esc(link)}</code>\n\n"
+        f"Пригласили: <b>{ref.get('invited', 0)}</b> · "
+        f"оплатили: <b>{ref.get('rewarded', 0)}</b>\n"
+        f"🎁 За каждого, кто оформит платную подписку, — <b>+{reward_days} дн.</b> вам.\n"
+        f"{LINE}\n"
+        "Награда только за реальную оплату приглашённого (не за регистрацию/триал) — "
+        "честно и без накрутки."
+    )
+
+
 def render_weekly_digest(period_label: str, wk: dict, st: dict) -> str:
     """Недельный личный дайджест подписчику: итоги ЭТОЙ недели (stats_for_period) + всё время.
 

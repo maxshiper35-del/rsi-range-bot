@@ -20,6 +20,10 @@ class _PromoExhausted(Exception):
     """Внутренний сигнал: лимит промокода выбран — откатить транзакцию redeem_promo."""
 
 
+class _RefRewarded(Exception):
+    """Внутренний сигнал: реферер уже награждён (гонка) — откатить транзакцию награды."""
+
+
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -491,6 +495,56 @@ def issue_winback_promo(tg_id: int, days: int, valid_days: int) -> str:
             "INSERT INTO promo_codes(code, days, max_uses, used_count, expires_at, created_at) "
             "VALUES(?,?,1,0,?,?)", (code, days, expires, clock.utcnow_iso()))
     return code
+
+
+# ---------------------------------------------------------------------------
+# Реферальная программа (задача 23): /start ref_<tg_id> -> invited_by (first-touch),
+# награда рефереру ТОЛЬКО за реальный первый платёж приглашённого (анти-накрутка).
+# ---------------------------------------------------------------------------
+def set_referrer(tg_id: int, referrer_id: int) -> bool:
+    """First-touch реферер: пишем invited_by ОДИН раз и только НЕ-плативших юзеров
+    (ретро-атрибуция уже вовлечённого = накрутка). Само-реферал и несуществующий реферер
+    отсекаются. -> True если записано."""
+    if referrer_id == tg_id or get_user(referrer_id) is None:
+        return False
+    with db.transaction() as conn:
+        cur = conn.execute(
+            "UPDATE users SET invited_by=?, updated_at=? WHERE tg_id=? AND invited_by IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.tg_id=? AND p.status='paid')",
+            (referrer_id, clock.utcnow_iso(), tg_id, tg_id))
+        return cur.rowcount == 1
+
+
+def reward_referrer_on_payment(tg_id: int, days: int) -> tuple[int, int] | None:
+    """Наградить реферера за приглашённого при его РЕАЛЬНОМ платеже (+days подписки рефереру).
+    Вызывать из путей реального платежа (Stars, USDT). Идемпотентно: referral_rewarded_at
+    даёт ОДНУ награду на приглашённого — на renewal не повторяется (флаг уже стоит), триал/промо
+    сюда не заходят. Само-реферал отсечён в set_referrer. -> (referrer_id, days) для уведомления."""
+    u = get_user(tg_id)
+    if u is None or u["invited_by"] is None or u["referral_rewarded_at"] is not None:
+        return None
+    referrer = u["invited_by"]
+    now = clock.utcnow_iso()
+    try:
+        with db.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE users SET referral_rewarded_at=?, updated_at=? "
+                "WHERE tg_id=? AND referral_rewarded_at IS NULL", (now, now, tg_id))
+            if cur.rowcount != 1:                          # гонка: уже награждён
+                raise _RefRewarded
+            _extend_and_activate(conn, referrer, days)
+    except _RefRewarded:
+        return None
+    return (referrer, days)
+
+
+def referral_stats(tg_id: int) -> dict:
+    """Для /referral: сколько приглашено и за скольких начислена награда (реально оплатили)."""
+    total = db.query_one("SELECT COUNT(*) AS c FROM users WHERE invited_by=?", (tg_id,))
+    paid = db.query_one(
+        "SELECT COUNT(*) AS c FROM users WHERE invited_by=? AND referral_rewarded_at IS NOT NULL",
+        (tg_id,))
+    return {"invited": total["c"] if total else 0, "rewarded": paid["c"] if paid else 0}
 
 
 # ---------------------------------------------------------------------------

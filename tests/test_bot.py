@@ -598,8 +598,8 @@ def test_main_menu_layout_user():
     user = bot.main_menu_layout(is_admin=False)
     flat = [t for row in user for t in row]
     for label in ("📊 Статистика", "📄 Трек-рекорд", "📈 Дашборд", "🧮 Калькулятор",
-                  "💳 Подписка", "ℹ️ О боте", "🧪 Бэктест", "📖 Глоссарий", "🎟 Промокод",
-                  "❓ Помощь"):
+                  "💳 Подписка", "🤝 Пригласить", "ℹ️ О боте", "🧪 Бэктест", "📖 Глоссарий",
+                  "🎟 Промокод", "❓ Помощь"):
         assert label in flat, label
     assert "🛠 Админ-панель" not in flat                # админ-кнопки не текут юзерам
     assert all(len(row) <= 2 for row in user)           # компактные ряды по 1-2 кнопки

@@ -136,3 +136,17 @@ def test_render_weekly_digest():
     assert "Открыто сейчас: 2" in txt
     assert "40 сделок" in txt and "+0.08R" in txt
     assert "/stats" in txt
+
+
+def test_render_referral_reward():
+    txt = templates.render_referral_reward(7)
+    assert "+7 дн" in txt and "приглашени" in txt.lower()
+
+
+def test_render_referral_invite():
+    link = "https://t.me/rsirange_bot?start=ref_123"
+    txt = templates.render_referral_invite(link, {"invited": 4, "rewarded": 2}, 7)
+    assert f"<code>{link}</code>" in txt
+    assert "Пригласили: <b>4</b>" in txt and "оплатили: <b>2</b>" in txt
+    assert "+7 дн" in txt
+    assert "не за регистрацию/триал" in txt          # честность: награда только за оплату

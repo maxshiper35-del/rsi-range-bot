@@ -520,3 +520,67 @@ def test_issue_winback_promo_refreshes_each_cycle(fresh_db):
     assert fresh_db.query_one(
         "SELECT COUNT(*) AS c FROM promo_redemptions WHERE code=?", (code,))["c"] == 0
     assert payments.redeem_promo(702, code2)["ok"] is True  # снова доступен
+
+
+def test_referral_first_touch_and_guards(fresh_db):
+    from app.delivery import payments
+    payments.register_user(800, "referrer")
+    payments.register_user(801, "invitee")
+    # само-реферал и несуществующий реферер отклоняются
+    assert payments.set_referrer(801, 801) is False
+    assert payments.set_referrer(801, 999999) is False
+    # нормальный случай
+    assert payments.set_referrer(801, 800) is True
+    assert payments.get_user(801)["invited_by"] == 800
+    # first-touch: второй реферер не перезаписывает
+    payments.register_user(802, "other")
+    assert payments.set_referrer(801, 802) is False
+    assert payments.get_user(801)["invited_by"] == 800
+
+
+def test_referral_not_attributed_after_payment(fresh_db):
+    from app.delivery import payments
+    payments.register_user(810, "ref")
+    payments.register_user(811, "already_paid")
+    payments.grant_subscription(811, "stars", 1000, "XTR", 30, "chg_pre")
+    # уже плативший не может быть ретро-атрибутирован рефереру (анти-накрутка)
+    assert payments.set_referrer(811, 810) is False
+    assert payments.get_user(811)["invited_by"] is None
+
+
+def test_referral_reward_on_first_payment_only(fresh_db):
+    from app.delivery import payments
+    payments.register_user(820, "ref")
+    payments.register_user(821, "invitee")
+    payments.set_referrer(821, 820)
+    ref_until_before = payments.get_user(820)["paid_until"]
+    # первый реальный платёж приглашённого -> награда рефереру
+    payments.grant_subscription(821, "stars", 1000, "XTR", 30, "chg_1")
+    out = payments.reward_referrer_on_payment(821, 7)
+    assert out == (820, 7)
+    assert payments.is_paid(820) is True
+    assert payments.get_user(820)["paid_until"] != ref_until_before
+    rewarded_until = payments.get_user(820)["paid_until"]
+    # второй платёж (renewal) НЕ повторяет награду (идемпотентно)
+    payments.grant_subscription(821, "stars", 1000, "XTR", 30, "chg_2")
+    assert payments.reward_referrer_on_payment(821, 7) is None
+    assert payments.get_user(820)["paid_until"] == rewarded_until
+
+
+def test_referral_reward_noop_without_referrer(fresh_db):
+    from app.delivery import payments
+    payments.register_user(830, "solo")
+    payments.grant_subscription(830, "stars", 1000, "XTR", 30, "chg_s")
+    assert payments.reward_referrer_on_payment(830, 7) is None
+
+
+def test_referral_stats(fresh_db):
+    from app.delivery import payments
+    payments.register_user(840, "ref")
+    for uid in (841, 842, 843):
+        payments.register_user(uid, f"inv{uid}")
+        payments.set_referrer(uid, 840)
+    payments.grant_subscription(841, "stars", 1000, "XTR", 30, "chg_a")
+    payments.reward_referrer_on_payment(841, 7)
+    st = payments.referral_stats(840)
+    assert st == {"invited": 3, "rewarded": 1}

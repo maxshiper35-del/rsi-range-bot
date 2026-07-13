@@ -706,6 +706,7 @@ USER_COMMANDS = [
     ("calc", "калькулятор позиции: /calc <деп> <риск%> <вход> <стоп>"),
     ("subscribe", "подписка — все сигналы"),
     ("promo", "применить промокод: /promo <код>"),
+    ("referral", "пригласить друга и получить дни подписки"),
     ("about", "как устроен сервис, честный дисклеймер"),
     ("terms", "условия использования: риски, оплата, возврат, данные"),
     ("backtest", "честный итог бэктеста стратегии"),
@@ -772,9 +773,10 @@ def main_menu_layout(is_admin: bool = False) -> list:
     return [
         ["📊 Статистика", "📄 Трек-рекорд"],
         ["📈 Дашборд", "🧮 Калькулятор"],
-        ["💳 Подписка", "ℹ️ О боте"],
-        ["🧪 Бэктест", "📖 Глоссарий"],
-        ["🎟 Промокод", "❓ Помощь"],
+        ["💳 Подписка", "🤝 Пригласить"],
+        ["ℹ️ О боте", "🧪 Бэктест"],
+        ["📖 Глоссарий", "🎟 Промокод"],
+        ["❓ Помощь"],
     ]
 
 
@@ -1026,6 +1028,24 @@ def main() -> None:
     bot = Bot(token=cfg.tg_bot_token)
     dp = Dispatcher()
 
+    async def _reward_referrer(tg_id: int) -> None:
+        """Реф-награда за РЕАЛЬНЫЙ платёж приглашённого + уведомление реферера. Best-effort:
+        идемпотентна (одна награда на приглашённого), вызывается из всех путей платежа."""
+        try:
+            reward = await asyncio.to_thread(
+                payments.reward_referrer_on_payment, tg_id, runtime.referral_reward_days())
+        except Exception as e:                             # noqa: BLE001
+            log.warning("referral reward %s: %s", tg_id, e)
+            return
+        if not reward:
+            return
+        ref_id, rdays = reward
+        try:
+            await bot.send_message(ref_id, templates.render_referral_reward(rdays),
+                                   parse_mode="HTML")
+        except Exception as e:                             # noqa: BLE001 — реферер заблокировал бота
+            log.warning("referral notify %s: %s", ref_id, e)
+
     class CalcStates(StatesGroup):
         """/calc через кнопку — пошаговый ввод вместо '/calc 1000 2 62340 62980' строкой."""
         deposit = State()
@@ -1103,11 +1123,15 @@ def main() -> None:
     @dp.message(Command("start"))
     async def _start(m):
         await asyncio.to_thread(payments.register_user, m.from_user.id, m.from_user.username)
-        # deep-link атрибуция: /start src_<label> (first-touch, ref_ добавится отдельно)
+        # deep-link атрибуция: /start src_<label> — источник; /start ref_<tg_id> — реферал
+        # (first-touch; ref также помечает источник 'referral' для /growth)
         parts = (m.text or "").split()
-        if len(parts) > 1 and parts[1].startswith("src_") and len(parts[1]) > 4:
-            await asyncio.to_thread(payments.set_acquisition_source,
-                                    m.from_user.id, parts[1][4:])
+        arg = parts[1] if len(parts) > 1 else ""
+        if arg.startswith("src_") and len(arg) > 4:
+            await asyncio.to_thread(payments.set_acquisition_source, m.from_user.id, arg[4:])
+        elif arg.startswith("ref_") and arg[4:].isdigit():
+            await asyncio.to_thread(payments.set_referrer, m.from_user.id, int(arg[4:]))
+            await asyncio.to_thread(payments.set_acquisition_source, m.from_user.id, "referral")
         trial_days = runtime.trial_days()
         applied = await asyncio.to_thread(payments.grant_trial, m.from_user.id, trial_days)
         text = (
@@ -1178,6 +1202,16 @@ def main() -> None:
             await m.answer("Формат: /promo <код>")
             return
         await _apply_promo(m, parts[1].strip())
+
+    @dp.message(Command("referral"))
+    @dp.message(F.text == "🤝 Пригласить")
+    async def _referral(m):
+        await asyncio.to_thread(payments.register_user, m.from_user.id, m.from_user.username)
+        link = f"https://t.me/rsirange_bot?start=ref_{m.from_user.id}"
+        ref = await asyncio.to_thread(payments.referral_stats, m.from_user.id)
+        await m.answer(
+            templates.render_referral_invite(link, ref, runtime.referral_reward_days()),
+            parse_mode="HTML")
 
     @dp.message(F.text == "🎟 Промокод")
     async def _promo_btn_start(m, state: FSMContext):
@@ -1440,6 +1474,7 @@ def main() -> None:
         if applied:
             await m.answer(f"✅ Подписка активна на {_fmt_days(days)}! Сигналы теперь приходят "
                            f"автоматически на закрытии свечей. Статус: /subscribe")
+            await _reward_referrer(m.from_user.id)         # реф-награда за реальный платёж
         else:
             await m.answer("Этот платёж уже был учтён. Спасибо! Статус: /subscribe")
 
@@ -1942,6 +1977,7 @@ def main() -> None:
         days = int(parts[2]) if len(parts) > 2 and parts[2].isdecimal() else runtime.sub_days()
         await asyncio.to_thread(payments.admin_grant, tg, days)
         await m.answer(f"✅ Подписка выдана {tg} на {days} дн.")
+        await _reward_referrer(tg)                         # /grant = подтверждение USDT-оплаты
 
     @dp.message(Command("revoke"))
     async def _revoke(m):
@@ -2273,6 +2309,7 @@ def main() -> None:
                     uid, "✅ Оплата USDT получена — подписка активна! /subscribe")
             except Exception as e:                     # noqa: BLE001
                 log.warning("usdt activate notify %s: %s", uid, e)
+            await _reward_referrer(uid)                # реф-награда за реальный USDT-платёж
         # эскалация зависших USDT-заявок (>6ч без /grant): пингуем один раз;
         # метка ставится безусловно — сбой доставки одному админу не даёт вечный повтор
         for claim in await asyncio.to_thread(payments.stale_usdt_claims, 6):
