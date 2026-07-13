@@ -1,6 +1,8 @@
 """Тесты обвязки бота: scan_frames (движок -> журнал) и рендер команд."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pandas as pd
 import pytest
 
@@ -296,6 +298,21 @@ def test_should_post_weekly():
     assert bot.should_post_weekly(None, "2026-W01") is True       # ещё не постили
     assert bot.should_post_weekly("2026-W01", "2026-W01") is False  # та же неделя — не дублировать
     assert bot.should_post_weekly("2026-W01", "2026-W02") is True   # новая неделя
+
+
+def test_weekly_report_period_is_previous_full_week():
+    # живой инцидент 2026-07-13: гейт сработал в 00:06 понедельника, окно "с начала этой
+    # недели до сейчас" дало 6 минут и 0 сделок. Период обязан быть ПРЕДЫДУЩЕЙ неделей.
+    just_after_midnight_monday = datetime(2026, 7, 13, 0, 6, tzinfo=timezone.utc)
+    start, end = bot.weekly_report_period(just_after_midnight_monday)
+    assert start == datetime(2026, 7, 6, tzinfo=timezone.utc)   # прошлый понедельник
+    assert end == datetime(2026, 7, 13, tzinfo=timezone.utc)    # текущий понедельник (искл.)
+    assert (end - start).days == 7
+
+    # тот же вызов в среду той же недели (например, бот был выключен на выходных) даёт
+    # тот же результат — период не "плавает" в течение недели, только по факту смены недели
+    wednesday = datetime(2026, 7, 15, 12, 30, tzinfo=timezone.utc)
+    assert bot.weekly_report_period(wednesday) == (start, end)
 
 
 def test_should_alert_backup_stale():

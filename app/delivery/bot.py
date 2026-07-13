@@ -8,7 +8,7 @@ SMC-интеграция реализована чистыми функциям�
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -630,6 +630,18 @@ def should_post_weekly(last_week_key: str | None, current_week_key: str) -> bool
     """Пора ли постить трек-рекорд в канал: другая ISO-неделя, чем в прошлый раз — не дважды
     за одну календарную неделю."""
     return last_week_key != current_week_key
+
+
+def weekly_report_period(now_dt: datetime) -> tuple[datetime, datetime]:
+    """[начало, конец) ПРЕДЫДУЩЕЙ полной ISO-недели относительно now_dt.
+
+    should_post_weekly срабатывает на первом такте новой недели (обычно — секунды после
+    полуночи понедельника): период «эта неделя с начала до сейчас» на тот момент почти
+    пуст. Репортим неделю, которая только что ЗАКОНЧИЛАСЬ, а не только начавшуюся (живой
+    инцидент 2026-07-13: карточка с окном 00:00–00:06 показала 0 закрытых сделок)."""
+    iso_year, iso_week, _ = now_dt.isocalendar()
+    this_week_start = datetime.fromisocalendar(iso_year, iso_week, 1).replace(tzinfo=timezone.utc)
+    return this_week_start - timedelta(days=7), this_week_start
 
 
 def format_channel_live_board(st: dict, by_symbol: dict, cohort: dict | None = None,
@@ -2383,14 +2395,13 @@ def main() -> None:
                 # карточка недели (PNG) — отдельный try/except: сбой рендера (Chromium)
                 # не должен блокировать CSV ниже — тот честностный артефакт критичнее
                 try:
-                    week_start = datetime.fromisocalendar(iso_year, iso_week, 1).replace(
-                        tzinfo=timezone.utc)
+                    week_start, week_end = weekly_report_period(now_dt)
                     wk = await asyncio.to_thread(
-                        journal.stats_for_period, week_start.isoformat(), now_dt.isoformat())
+                        journal.stats_for_period, week_start.isoformat(), week_end.isoformat())
                     st = await asyncio.to_thread(journal.stats)
                     card_data = {
                         "period_label": f"{week_start.strftime('%d.%m')}"
-                                       f"–{now_dt.strftime('%d.%m.%Y')}",
+                                       f"–{(week_end - timedelta(days=1)).strftime('%d.%m.%Y')}",
                         "total_r": wk["total_r"],
                         "closed": wk["trades"],
                         "open": st["open"],
