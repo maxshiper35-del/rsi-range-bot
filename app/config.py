@@ -10,13 +10,26 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import overload
 
 
-def _env(key: str, default: str | None = None, *, required: bool = False) -> str | None:
-    val = os.getenv(key, default)
-    if required and not val:
+def _req(key: str) -> str:
+    """Обязательная переменная окружения (пустая трактуется как отсутствующая)."""
+    val = os.getenv(key)
+    if not val:
         raise RuntimeError(f"Не задана обязательная переменная окружения: {key}")
     return val
+
+
+@overload
+def _env(key: str, default: str) -> str: ...
+@overload
+def _env(key: str, default: None = ...) -> str | None: ...
+def _env(key: str, default: str | None = None) -> str | None:
+    # пустая-но-заданная переменная (POLL_INTERVAL_SEC= в .env/systemd) трактуется как
+    # ОТСУТСТВУЮЩАЯ -> дефолт, а не int('') -> ValueError на старте (аудит [11])
+    val = os.getenv(key)
+    return val if val not in (None, "") else default
 
 
 def _csv(raw: str | None) -> list[str]:
@@ -57,7 +70,7 @@ def get_settings() -> Settings:
     return Settings(
         env=_env("ENV", "dev"),
         log_level=_env("LOG_LEVEL", "INFO"),
-        tg_bot_token=_env("TELEGRAM_BOT_TOKEN", required=True),
+        tg_bot_token=_req("TELEGRAM_BOT_TOKEN"),
         admin_ids=tuple(int(x) for x in _csv(_env("TELEGRAM_ADMIN_IDS"))),
         cryptobot_token=_env("CRYPTOBOT_TOKEN"),
         sub_price_usdt=float(_env("SUB_PRICE_USDT", "20")),

@@ -17,6 +17,19 @@ def _raw(key: str):
     return row["value"] if row else None
 
 
+def _num(key: str, cast, default):
+    """Числовой override с ЗАЩИТОЙ: битое значение (ручная правка БД, кривой ввод) ->
+    дефолт, а не краш getter'а. Иначе одно плохое число бриксовало бы подписку/админку
+    (аудит [6]). Дефолт может быть значением или вызываемым (ленивый get_settings)."""
+    v = _raw(key)
+    if v is None:
+        return default() if callable(default) else default
+    try:
+        return cast(v)
+    except (TypeError, ValueError):
+        return default() if callable(default) else default
+
+
 def set_value(key: str, value) -> None:
     db.execute(
         "INSERT INTO settings(key, value, updated_at) VALUES(?,?,?) "
@@ -80,8 +93,7 @@ def cryptobot_token() -> str:
 
 def usdt_bonus_days() -> int:
     """Бонус-дни за оплату USDT вместо Stars (Stars дороже мерчанту ~38% эфф. комиссии)."""
-    v = _raw("usdt_bonus_days")
-    return int(v) if v is not None else 2
+    return _num("usdt_bonus_days", int, 2)
 
 
 def cornix_block_enabled() -> bool:
@@ -91,13 +103,11 @@ def cornix_block_enabled() -> bool:
 
 
 def min_confidence() -> float:
-    v = _raw("min_confidence")
-    return float(v) if v is not None else 0.5
+    return _num("min_confidence", float, 0.5)
 
 
 def min_impulse_atr() -> float:
-    v = _raw("min_impulse_atr")
-    return float(v) if v is not None else 1.0
+    return _num("min_impulse_atr", float, 1.0)
 
 
 # Дефолт: только Setup 1:1 включён. Честный walk-forward бэктест (docs/ — вынесены из репо)
@@ -170,39 +180,33 @@ def enabled_setups() -> tuple:
 
 
 def price_stars() -> int:
-    v = _raw("sub_price_stars")
-    return int(v) if v is not None else get_settings().sub_price_stars
+    return _num("sub_price_stars", int, lambda: get_settings().sub_price_stars)
 
 
 def price_usdt() -> float:
-    v = _raw("sub_price_usdt")
-    return float(v) if v is not None else get_settings().sub_price_usdt
+    return _num("sub_price_usdt", float, lambda: get_settings().sub_price_usdt)
 
 
 def sub_days() -> float:
     """Длительность подписки в днях. float (не int) — админ может выставить дробный срок
     (напр. тестовая подписка на несколько часов: /price days 0.2083333333333333)."""
-    v = _raw("sub_days")
-    return float(v) if v is not None else get_settings().sub_days
+    return _num("sub_days", float, lambda: get_settings().sub_days)
 
 
 def free_per_week() -> int:
-    v = _raw("free_signals_per_week")
-    return int(v) if v is not None else get_settings().free_signals_per_week
+    return _num("free_signals_per_week", int, lambda: get_settings().free_signals_per_week)
 
 
 def intro_price_stars() -> int:
     """Цена пробного тарифа в Stars (0 — пробный тариф выключен, остаётся только основной).
     Решение владельца 2026-07-10: тестовая цена 10⭐/5ч показала реальные платежи —
     оставлена постоянным вторым тарифом рядом с основным 1000⭐/30д."""
-    v = _raw("intro_price_stars")
-    return int(v) if v is not None else 10
+    return _num("intro_price_stars", int, 10)
 
 
 def intro_hours() -> float:
     """Длительность пробного тарифа в часах."""
-    v = _raw("intro_hours")
-    return float(v) if v is not None else 5.0
+    return _num("intro_hours", float, 5.0)
 
 
 def vip_channel_id() -> str:
@@ -237,8 +241,7 @@ def watchlist_auto_enabled() -> bool:
 
 
 def watchlist_size() -> int:
-    v = _raw("watchlist_size")
-    return int(v) if v is not None else 15
+    return _num("watchlist_size", int, 15)
 
 
 def watchlist_blacklist() -> tuple:
@@ -262,8 +265,7 @@ def set_last_watchlist_refresh_at(iso: str) -> None:
 
 
 def _stars_tier(key: str, default: int) -> int:
-    v = _raw(key)
-    return int(v) if v is not None else default
+    return _num(key, int, default)
 
 
 def quarter_price_stars() -> int:
@@ -288,8 +290,7 @@ def paid_signal_stars() -> int:
     """Цена разовой покупки одного сигнала в Stars (paid media, мега-план волна 1).
     0 = кнопка «Открыть сигнал» не показывается (дефолт — фича за флагом: включает
     владелец из админки после живой проверки)."""
-    v = _raw("paid_signal_stars")
-    return int(v) if v is not None else 0
+    return _num("paid_signal_stars", int, 0)
 
 
 def trial_days() -> int:
@@ -297,8 +298,7 @@ def trial_days() -> int:
     Нет .env-фолбэка (не настройка через Settings, как остальные) — дефолт 5 дней
     зашит здесь же, по рекомендации бенчмарков конверсии (firstpagesage.com/1capture.io:
     time-limited триал 3-7 дней даёт на порядок выше конверсию, чем бессрочный free-тир)."""
-    v = _raw("trial_days")
-    return int(v) if v is not None else 5
+    return _num("trial_days", int, 5)
 
 
 def signal_chart_enabled() -> bool:

@@ -85,16 +85,17 @@ async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log) -> None:
             symbols = get_symbols()
             interval = bybit_interval(get_tf())
             topics = [f"kline.{interval}.{ws_symbol(s)}" for s in symbols]
+            planned = False                             # False -> сервер закрыл (close/error)
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(WS_URL, heartbeat=None) as ws:
                     await ws.send_json({"op": "subscribe", "args": topics})
                     log.info("стрим подключён: %d топиков (%s)", len(topics), interval)
-                    backoff = 1.0
                     started = asyncio.get_event_loop().time()
                     last_ping = started
                     while True:
                         now = asyncio.get_event_loop().time()
                         if now - started > _RECONNECT_MAX_AGE or not enabled():
+                            planned = True
                             break                       # плановый reconnect / выключили флаг
                         if now - last_ping > _PING_EVERY:
                             await ws.send_json({"op": "ping"})
@@ -104,9 +105,18 @@ async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log) -> None:
                         except asyncio.TimeoutError:
                             continue
                         if frame.type != aiohttp.WSMsgType.TEXT:
-                            break                       # closed/error -> reconnect
+                            break                       # close/error frame -> reconnect с backoff
                         for evt in parse_kline(frame.data):
                             await on_intrabar(evt.symbol_ws, evt.high, evt.low)
+            if planned:
+                backoff = 1.0                           # штатное соединение отжило свой срок
+            else:
+                # сервер закрыл соединение (close/error) — backoff, чтобы не устроить
+                # reconnect-шторм по бирже, пока она шеддит нагрузку (аудит [10]).
+                # Раньше этот путь реконнектил мгновенно, без задержки.
+                log.warning("стрим: соединение закрыто сервером — reconnect через %.0fс", backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
         except asyncio.CancelledError:
             raise
         except Exception as e:                          # noqa: BLE001 — сеть/биржа

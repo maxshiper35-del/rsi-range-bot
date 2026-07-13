@@ -1822,9 +1822,21 @@ def main() -> None:
         if not _is_admin(m):
             return
         parts = (m.text or "").split()
-        keys = {"stars": "sub_price_stars", "usdt": "sub_price_usdt", "days": "sub_days"}
-        if len(parts) == 3 and parts[1] in keys:
-            await _set(m, keys[parts[1]], parts[2], f"{parts[1]} = {parts[2]}")
+        # (settings-ключ, парсер, минимум) — ВАЛИДИРУЕМ до записи: иначе строка '1k' легла
+        # бы в числовую настройку и роняла runtime-getter -> мёртвая подписка/админка (аудит [6])
+        spec = {"stars": ("sub_price_stars", int, 1),
+                "usdt": ("sub_price_usdt", float, 0.0),
+                "days": ("sub_days", float, 0.0)}
+        if len(parts) == 3 and parts[1] in spec:
+            key, parser, lo = spec[parts[1]]
+            try:
+                v = parser(parts[2])
+                assert v >= lo
+            except Exception:                          # noqa: BLE001
+                await m.answer(f"Неверное значение «{parts[2]}». "
+                               f"Формат: /price {parts[1]} <число ≥ {lo:g}>")
+                return
+            await _set(m, key, v, f"{parts[1]} = {v:g}")
         else:
             await m.answer("Формат: /price stars 1000 | /price usdt 20 | /price days 30")
 
@@ -2050,8 +2062,10 @@ def main() -> None:
             screen = "symbols"
         elif data in ("adm_nav_main", "adm_refresh"):
             screen = "main"
-        elif data in _SETUP_CODES_REV:
-            tag = _SETUP_CODES_REV[data]
+        elif data.startswith("adm_") and data[4:] in _SETUP_CODES_REV:
+            # callback = f"adm_{код}" (см. _strategy_kb), в _SETUP_CODES_REV ключ БЕЗ префикса —
+            # раньше сравнивали data целиком и тумблеры сетапов были мертвы (аудит [4])
+            tag = _SETUP_CODES_REV[data[4:]]
             cur = set(await asyncio.to_thread(runtime.enabled_setups))
             cur.discard(tag) if tag in cur else cur.add(tag)
             await asyncio.to_thread(runtime.set_value, "enabled_setups", ",".join(sorted(cur)))
@@ -2393,6 +2407,11 @@ def main() -> None:
             iso_year, iso_week, _ = now_dt.isocalendar()
             week_key = f"{iso_year}-W{iso_week:02d}"
             if should_post_weekly(runtime.trackrecord_last_week(), week_key):
+                # помечаем неделю СРАЗУ при входе: карточка и CSV — два отдельных best-effort
+                # поста, и если карточка ушла, а CSV упал (или наоборот), на следующем такте
+                # НЕ перепостим уже отправленное (аудит [5] — дубли карточек/леджера). Цена —
+                # редкий полный пропуск при сбое обоих; /trackrecord доступен вручную всегда.
+                await asyncio.to_thread(runtime.set_trackrecord_last_week, week_key)
                 # карточка недели (PNG) — отдельный try/except: сбой рендера (Chromium)
                 # не должен блокировать CSV ниже — тот честностный артефакт критичнее
                 try:
@@ -2430,7 +2449,6 @@ def main() -> None:
                                "🔍 Проверить неизменность: /trackrecord у @rsirange_bot "
                                "(приложит verifier.html — офлайн-проверка в браузере).")
                     await asyncio.to_thread(journal.record_ledger_hash, len(rows), checksum)
-                    await asyncio.to_thread(runtime.set_trackrecord_last_week, week_key)
                 except Exception as e:                      # noqa: BLE001
                     log.warning("еженедельный трек-рекорд: %s", e)
 

@@ -28,6 +28,23 @@ def test_set_and_read_override(fresh_db):
     assert runtime.paused() is False
 
 
+def test_bad_numeric_override_falls_back_to_default(fresh_db):
+    """Аудит [6]: битое значение в числовой настройке -> дефолт, а не краш getter'а
+    (иначе одно '/price stars 1k' или ручная правка БД бриксовали бы подписку/админку)."""
+    from app import runtime
+    for key, getter in (("sub_price_stars", runtime.price_stars),
+                         ("sub_price_usdt", runtime.price_usdt),
+                         ("sub_days", runtime.sub_days),
+                         ("min_confidence", runtime.min_confidence),
+                         ("watchlist_size", runtime.watchlist_size),
+                         ("quarter_price_stars", runtime.quarter_price_stars)):
+        runtime.set_value(key, "мусор-1k")
+        val = getter()                                   # не должно бросить
+        assert isinstance(val, (int, float))
+    # и /status-снимок собирается без падения даже с битыми значениями
+    assert isinstance(runtime.effective(), dict)
+
+
 def test_effective_snapshot(fresh_db):
     from app import runtime
     eff = runtime.effective()

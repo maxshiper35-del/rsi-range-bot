@@ -151,7 +151,11 @@ async def run_poller(on_candidate, engine=None, on_tick=None, on_close=None) -> 
         except asyncio.CancelledError:
             raise                                       # штатная остановка
         except Exception:                               # noqa: BLE001
-            log.exception("такт poller упал — продолжаю со следующей свечи")
+            # backoff обязателен: если исключение прилетело ДО планового sleep (напр.
+            # runtime.timeframes() при временно недоступной БД), без паузы цикл крутится
+            # в hot-loop на 100% CPU и заваливает лог трейсбеками (аудит [9])
+            log.exception("такт poller упал — пауза 30с, продолжаю со следующей свечи")
+            await asyncio.sleep(30)
 
 
 # ---------------------------------------------------------------------------

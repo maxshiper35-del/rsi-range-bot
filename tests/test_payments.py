@@ -184,6 +184,21 @@ def test_redeem_promo_already_used(fresh_db):
     n = fresh_db.query_one(
         "SELECT COUNT(*) AS c FROM promo_redemptions WHERE code='ONCE'")["c"]
     assert n == 1
+    # used_count тоже не накрутился повторной попыткой того же юзера (аудит [3]/[8])
+    uc = fresh_db.query_one("SELECT used_count FROM promo_codes WHERE code='ONCE'")["used_count"]
+    assert uc == 1
+
+
+def test_redeem_promo_max_uses_enforced(fresh_db):
+    """Аудит [3]: used_count не превышает max_uses; лишние погашения -> exhausted."""
+    from app.delivery import payments
+    payments.create_promo("LIMIT2", 5, max_uses=2)
+    assert payments.redeem_promo(901, "LIMIT2")["ok"] is True
+    assert payments.redeem_promo(902, "LIMIT2")["ok"] is True
+    r3 = payments.redeem_promo(903, "LIMIT2")
+    assert r3 == {"ok": False, "days": None, "reason": "exhausted"}
+    uc = fresh_db.query_one("SELECT used_count FROM promo_codes WHERE code='LIMIT2'")["used_count"]
+    assert uc == 2                                       # ровно лимит, не 3
 
 
 def test_redeem_promo_exhausted(fresh_db):

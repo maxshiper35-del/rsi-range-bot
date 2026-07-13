@@ -98,17 +98,25 @@ def record_signal(signal: Signal) -> int:
 
 
 def find_duplicate_setup(signal: Signal) -> int | None:
-    """id уже записанного сигнала с тем же сетапом, если есть.
+    """id уже записанного НЕ-истёкшего сигнала того же сетапа, если есть.
 
-    Один и тот же импульс детектится на нескольких последовательных барах, но его
-    якоря фибо фиксированы -> entry/stop идентичны. Дедуп: (symbol, timeframe, side,
-    entry, stop) среди не-expired записей — чтобы не спамить оператора каждые 15 минут.
+    Один импульс детектится на нескольких последовательных барах. Стоп (якорь S —
+    снятый экстремум) при этом СТАБИЛЕН, а вход (фибо от БЕГУЩЕГО экстремума E)
+    ДРЕЙФУЕТ каждый бар. Дедуп по точному (entry,stop) промахивался на тренде и плодил
+    дубли открытых сигналов -> раздувал число сделок и искажал винрейт (аудит [2]).
+    Дедупим по (symbol, timeframe, side, stop, setup) среди не-expired — стоп устойчив
+    к дрейфу входа. Тег сетапа сверяем в Python (не json_extract) ради переносимости.
     """
-    row = db.query_one(
-        "SELECT id FROM signals WHERE symbol=? AND timeframe=? AND side=? "
-        "AND entry=? AND stop=? AND status != 'expired' ORDER BY id DESC LIMIT 1",
-        (signal.symbol, signal.timeframe, signal.side.value, signal.entry, signal.stop))
-    return row["id"] if row else None
+    setup = signal.indicators_snapshot.get("setup", "") \
+        if isinstance(signal.indicators_snapshot, dict) else ""
+    rows = db.query(
+        "SELECT id, snapshot_json FROM signals WHERE symbol=? AND timeframe=? AND side=? "
+        "AND stop=? AND status != 'expired' ORDER BY id DESC",
+        (signal.symbol, signal.timeframe, signal.side.value, signal.stop))
+    for r in rows:
+        if _setup_of(r) == setup:
+            return r["id"]
+    return None
 
 
 def record_candidate(signal: Signal) -> int:
@@ -274,12 +282,26 @@ def _outcome_from_bars(row, df) -> tuple | None:
     tps = [(c, row[c]) for c in _TP_COLS if row[c] is not None]
     dts = pd.to_datetime(df["dt"], utc=True)
     created = pd.to_datetime(row["created_at"], utc=True)
-    bars = df.loc[dts > created]
+
+    # если филл УЖЕ зафиксирован ранее (bar-скоринг или реалтайм-стрим) — НЕ перевыводим
+    # его и НИКОГДА не истекаем: сдвиг окна баров за created_at (долгоживущая позиция,
+    # фиксированная глубина фетча) иначе ложно пометил бы живую исполненную сделку как
+    # expired (аудит 2026-07-13, находка [1]). Официальный исход всё равно bar-based —
+    # доскориваем стоп/тейк с бара, СОДЕРЖАЩЕГО филл (стрим даёт внутрибарный ts).
+    persisted_fill = row["filled_at"] if "filled_at" in row.keys() else None
+    if persisted_fill is not None:
+        filled = True
+        fill_dt = persisted_fill
+        fill_ts = pd.to_datetime(persisted_fill, utc=True)
+        at_or_before = dts[dts <= fill_ts]
+        bars = df.loc[dts >= at_or_before.iloc[-1]] if not at_or_before.empty else df
+    else:
+        filled = False
+        fill_dt = None
+        bars = df.loc[dts > created]
     if bars.empty:
         return None
 
-    filled = False
-    fill_dt = None
     for _, b in bars.iterrows():
         hi, lo = float(b["high"]), float(b["low"])
         bar_dt = pd.to_datetime(b["dt"], utc=True)

@@ -16,6 +16,10 @@ from datetime import datetime, timedelta, timezone
 from app import clock, db
 
 
+class _PromoExhausted(Exception):
+    """Внутренний сигнал: лимит промокода выбран — откатить транзакцию redeem_promo."""
+
+
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -195,16 +199,25 @@ def redeem_promo(tg_id: int, code: str) -> dict:
     if db.query_one("SELECT 1 FROM promo_redemptions WHERE code=? AND tg_id=?", (code, tg_id)):
         return {"ok": False, "days": None, "reason": "already_used"}
     if row["max_uses"] is not None and row["used_count"] >= row["max_uses"]:
-        return {"ok": False, "days": None, "reason": "exhausted"}
+        return {"ok": False, "days": None, "reason": "exhausted"}  # быстрый отказ (не авторитетный)
     register_user(tg_id)
+    # АВТОРИТЕТНЫЙ гейт — в транзакции: чек max_uses выше был чтением ВНЕ _write_lock, две
+    # конкурентные попытки могли обе пройти его до инкремента и выдать код сверх лимита
+    # (аудит [3]). Порядок: сперва INSERT redemption (UNIQUE(code,tg_id) режет дабл-тап того
+    # же юзера ДО инкремента), затем УСЛОВНЫЙ инкремент used_count с гейтом по rowcount.
     try:
         with db.transaction() as conn:
             conn.execute(
                 "INSERT INTO promo_redemptions(code, tg_id, redeemed_at) VALUES(?,?,?)",
                 (code, tg_id, now))
-            conn.execute(
-                "UPDATE promo_codes SET used_count = used_count + 1 WHERE code=?", (code,))
+            cur = conn.execute(
+                "UPDATE promo_codes SET used_count = used_count + 1 "
+                "WHERE code=? AND (max_uses IS NULL OR used_count < max_uses)", (code,))
+            if cur.rowcount != 1:                        # лимит выбран между чеком и транзакцией
+                raise _PromoExhausted
             _extend_and_activate(conn, tg_id, row["days"])
+    except _PromoExhausted:
+        return {"ok": False, "days": None, "reason": "exhausted"}
     except sqlite3.IntegrityError:
         return {"ok": False, "days": None, "reason": "already_used"}
     return {"ok": True, "days": row["days"], "reason": None}
@@ -413,14 +426,18 @@ def record_usdt_claim(tg_id: int) -> int:
     Дедуп: если у юзера уже есть открытая заявка (повторные клики по кнопке),
     возвращаем её id, не создавая дубль и не порождая дубль-пинги админам.
     """
-    existing = db.query_one(
-        "SELECT id FROM usdt_claims WHERE tg_id=? AND resolved_at IS NULL "
-        "ORDER BY id DESC LIMIT 1", (tg_id,))
-    if existing:
-        return existing["id"]
-    return db.execute(
-        "INSERT INTO usdt_claims(tg_id, created_at) VALUES(?,?)",
-        (tg_id, clock.utcnow_iso()))
+    # чек+вставка в ОДНОЙ транзакции (под _write_lock) — иначе дабл-тап кнопки «Я оплатил»
+    # создаёт две открытые заявки и дубль-пинги админам по SLA (аудит [8]).
+    with db.transaction() as conn:
+        existing = conn.execute(
+            "SELECT id FROM usdt_claims WHERE tg_id=? AND resolved_at IS NULL "
+            "ORDER BY id DESC LIMIT 1", (tg_id,)).fetchone()
+        if existing:
+            return existing["id"]
+        cur = conn.execute(
+            "INSERT INTO usdt_claims(tg_id, created_at) VALUES(?,?)",
+            (tg_id, clock.utcnow_iso()))
+        return cur.lastrowid
 
 
 def resolve_usdt_claims(tg_id: int) -> None:

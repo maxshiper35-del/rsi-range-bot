@@ -21,6 +21,24 @@ def test_record_signal(fresh_db):
     assert ev["event"] == "opened"
 
 
+def test_dedup_survives_entry_drift(fresh_db):
+    """Аудит [2]: дрейф входа при стабильном стопе — тот же импульс, дедуп обязан сработать.
+    Разный сетап или разный стоп — НЕ дубль."""
+    from app.brain import journal
+    sid = journal.record_signal(_sig(entry=106.2, stop=110.0, setup="6226"))
+    # вход «уполз» (E обновил экстремум), стоп=S тот же, сетап тот же -> ДУБЛЬ
+    assert journal.find_duplicate_setup(_sig(entry=105.8, stop=110.0, setup="6226")) == sid
+    assert journal.find_duplicate_setup(_sig(entry=106.2, stop=110.0, setup="6226")) == sid
+    # другой сетап при том же стопе -> НЕ дубль
+    assert journal.find_duplicate_setup(_sig(entry=105.8, stop=110.0, setup="1:1")) is None
+    # другой стоп -> НЕ дубль
+    assert journal.find_duplicate_setup(_sig(entry=105.8, stop=111.0, setup="6226")) is None
+    # после истечения дубль снимается (можно завести заново)
+    from app import db
+    db.execute("UPDATE signals SET status='expired' WHERE id=?", (sid,))
+    assert journal.find_duplicate_setup(_sig(entry=105.8, stop=110.0, setup="6226")) is None
+
+
 def test_update_outcomes_tp(fresh_db):
     from app.brain import journal
     journal.record_signal(_sig())                       # SHORT 100, stop 110, tp 80
@@ -264,6 +282,24 @@ def test_bars_outcome_no_expiry_before_window(fresh_db):
     assert res == []                                    # ещё ждём — не истекло, не закрыто
     row = fresh_db.query_one("SELECT status FROM signals WHERE id=1")
     assert row["status"] == "open"
+
+
+def test_filled_signal_never_expires_when_window_slid(fresh_db):
+    """Находка аудита [1]: уже ИСПОЛНЕННЫЙ сигнал (filled_at стоит) НЕ истекает, даже
+    если окно баров сдвинулось за created_at и первый доступный бар >50ч после создания.
+    Иначе живая исполненная сделка ложно закрылась бы как 'отменён'."""
+    from app import db
+    from app.brain import journal
+    journal.record_signal(_sig())                       # SHORT entry=100 stop=110 tp=80
+    db.execute("UPDATE signals SET filled_at=? WHERE id=1", ("2026-01-01T05:00:00+00:00",))
+    # окно баров начинается через ~100ч после создания (created за левым краем), боковик
+    # без касания стопа (110) и тейка (80) — филл уже был, истекать НЕЛЬЗЯ
+    ranging = [(101, 102, 99.5, 101)] * 40
+    bars = {"BTC/USDT:USDT": _bars(ranging, start="2026-01-05T04:00:00+00:00", step_min=60)}
+    res = journal.update_outcomes_from_bars(bars)
+    assert res == []                                    # ни истечения, ни закрытия
+    row = fresh_db.query_one("SELECT status, filled_at FROM signals WHERE id=1")
+    assert row["status"] == "open" and row["filled_at"] == "2026-01-01T05:00:00+00:00"
 
 
 def test_bars_outcome_stop_first_same_bar(fresh_db):
