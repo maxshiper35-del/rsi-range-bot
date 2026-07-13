@@ -22,6 +22,18 @@ def unfilled_open_signals(symbol: str) -> list:
                     "AND result_r IS NULL AND filled_at IS NULL", (symbol,))
 
 
+def symbols_with_open_positions() -> list:
+    """Символы с неразрешёнными сигналами (open без исхода либо rejected-тень).
+
+    Нужно, чтобы доскорить исход даже когда символ выпал из вотчлиста (авто-ротация
+    или ручное удаление): иначе open-сигнал висит вечно, исход теряется навсегда,
+    а публичная статистика недосчитывает закрытых сделок (винрейт/матожидание врут)."""
+    rows = db.query("SELECT DISTINCT symbol FROM signals "
+                    "WHERE (status='open' AND result_r IS NULL) "
+                    "OR (status='rejected' AND result_r IS NULL AND closed_at IS NULL)")
+    return [r["symbol"] for r in rows]
+
+
 def try_mark_filled(signal_id: int, iso_ts: str) -> bool:
     """Атомарно зафиксировать филл (guard filled_at IS NULL) — гонку стрим vs
     bar-скоринг выигрывает ровно один, второй молчит. -> True если выиграли."""

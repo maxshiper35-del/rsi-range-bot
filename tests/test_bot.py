@@ -44,37 +44,48 @@ def test_scan_frames_no_record(fresh_db):
 
 
 def test_scan_auto_records_open_and_dedups(fresh_db):
-    """Авто-режим: сигнал сразу open (в журнале/статистике), повтор — дедуп."""
+    """Авто-режим: сигнал сразу open (в журнале/статистике), повтор — дедуп.
+    scan_auto возвращает СПИСОК (по сигналу на входной ТФ); один ТФ -> один сигнал."""
     from app.brain import journal
     eng = SMCEngine(SMCConfig(use_time_filter=False))
     res = bot.scan_auto("BTC/USDT:USDT", {"m15": _df()}, eng)
-    assert res is not None
-    sig, sid = res
+    assert len(res) == 1
+    sig, sid = res[0]
     assert fresh_db.query_one("SELECT status FROM signals WHERE id=?", (sid,))["status"] == "open"
     assert journal.stats()["open"] == 1                 # сразу в статистике как открытый
-    assert bot.scan_auto("BTC/USDT:USDT", {"m15": _df()}, eng) is None  # дедуп
+    assert bot.scan_auto("BTC/USDT:USDT", {"m15": _df()}, eng) == []  # дедуп -> пусто
 
 
 def test_scan_semiauto_dedups_same_setup(fresh_db):
     """Тот же импульс на повторном скане не создаёт второго кандидата (и алерта)."""
     eng = SMCEngine(SMCConfig(use_time_filter=False))
     first = bot.scan_semiauto("BTC/USDT:USDT", {"m15": _df()}, eng)
-    assert first is not None
+    assert len(first) == 1
     again = bot.scan_semiauto("BTC/USDT:USDT", {"m15": _df()}, eng)
-    assert again is None                                # дедуп по (symbol,tf,side,entry,stop)
+    assert again == []                                  # дедуп по (symbol,tf,side,entry,stop)
     assert fresh_db.query_one("SELECT COUNT(*) AS c FROM signals")["c"] == 1
     # после решения оператора тот же сетап тоже не пере-регистрируется
     from app.brain import journal
-    journal.reject_candidate(first[1])
-    assert bot.scan_semiauto("BTC/USDT:USDT", {"m15": _df()}, eng) is None
+    journal.reject_candidate(first[0][1])
+    assert bot.scan_semiauto("BTC/USDT:USDT", {"m15": _df()}, eng) == []
+
+
+def test_scan_multi_timeframe_one_signal_per_tf(fresh_db):
+    """15m,1h,4h в одном наборе -> движок даёт сигнал на КАЖДОМ входном ТФ (не один)."""
+    eng = SMCEngine(SMCConfig(use_time_filter=False))
+    df = _df()
+    res = bot.scan_auto("BTC/USDT:USDT", {"15m": df, "1h": df, "4h": df}, eng)
+    tfs = {sig.timeframe for sig, _ in res}
+    assert tfs == {"15m", "1h", "4h"}                   # по сигналу на каждый ТФ
+    assert len(res) == 3
 
 
 def test_scan_semiauto_records_candidate(fresh_db):
     from app.brain import journal
     eng = SMCEngine(SMCConfig(use_time_filter=False))
     res = bot.scan_semiauto("BTC/USDT:USDT", {"m15": _df()}, eng)
-    assert res is not None
-    sig, sid = res
+    assert len(res) == 1
+    sig, sid = res[0]
     row = fresh_db.query_one("SELECT status FROM signals WHERE id=?", (sid,))
     assert row["status"] == "candidate"                 # не авто-open, а кандидат
     alert = bot.format_candidate_alert(sig, sid)
@@ -96,7 +107,7 @@ def test_parse_id_arg():
 
 def test_handle_confirm_reject_flow(fresh_db):
     eng = SMCEngine(SMCConfig(use_time_filter=False))
-    _, sid = bot.scan_semiauto("BTC/USDT:USDT", {"m15": _df()}, eng)
+    (_, sid), = bot.scan_semiauto("BTC/USDT:USDT", {"m15": _df()}, eng)
 
     listing = bot.handle_candidates()
     assert f"#{sid}" in listing                        # кандидат виден в списке
@@ -110,7 +121,7 @@ def test_handle_confirm_reject_flow(fresh_db):
 
 def test_handle_reject(fresh_db):
     eng = SMCEngine(SMCConfig(use_time_filter=False))
-    _, sid = bot.scan_semiauto("BTC/USDT:USDT", {"m15": _df()}, eng)
+    (_, sid), = bot.scan_semiauto("BTC/USDT:USDT", {"m15": _df()}, eng)
     assert "отклонён" in bot.handle_reject(sid)
     row = fresh_db.query_one("SELECT status FROM signals WHERE id=?", (sid,))
     assert row["status"] == "rejected"

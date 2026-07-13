@@ -508,3 +508,18 @@ class SMCEngine:
         htf = next((frames[tf] for tf in frames
                     if tf in self.HTF_TFS and tf != entry_tf), None)
         return self.analyze_single(frames[entry_tf], symbol, entry_tf, htf_df=htf)
+
+    def analyze_multi(self, frames: dict[str, pd.DataFrame], symbol: str) -> list[Signal]:
+        """Сигнал на КАЖДОМ входном ТФ, а не один «лучший» — для торговли сразу на
+        15m/1h/4h. Для каждого ТФ контекстом берётся ближайший СТАРШИЙ ТФ из набора
+        (для самого старшего htf=None — bias считается по самому входному фрейму).
+        -> список сигналов (0..len(frames)); дедуп по (symbol,tf,side,entry,stop) —
+        выше по стеку (scan_auto/scan_semiauto)."""
+        tfs = sorted(frames, key=lambda t: self.TF_MINUTES.get(t, 10 ** 9))
+        out: list[Signal] = []
+        for i, tf in enumerate(tfs):
+            htf = next((frames[h] for h in tfs[i + 1:]), None)   # ближайший старший
+            sig = self.analyze_single(frames[tf], symbol, tf, htf_df=htf)
+            if sig is not None:
+                out.append(sig)
+        return out

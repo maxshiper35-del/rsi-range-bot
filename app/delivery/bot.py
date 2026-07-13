@@ -34,34 +34,35 @@ def scan_frames(symbol: str, frames: dict[str, pd.DataFrame], engine: SMCEngine,
 
 
 def scan_auto(symbol: str, frames: dict[str, pd.DataFrame],
-              engine: SMCEngine) -> tuple | None:
-    """Авто-режим: сетап -> сразу АКТИВНЫЙ сигнал (status=open) в журнал + алерт.
+              engine: SMCEngine) -> list[tuple]:
+    """Авто-режим: сетапы на КАЖДОМ входном ТФ -> сразу АКТИВНЫЕ сигналы (status=open).
 
-    Возвращает (Signal, signal_id); None — нет сетапа или дубль (тот же импульс)."""
-    sig = engine.analyze(frames, symbol)
-    if sig is None:
-        return None
-    if journal.find_duplicate_setup(sig) is not None:
-        return None
-    sid = journal.record_signal(sig)
-    return sig, sid
+    Возвращает список (Signal, signal_id) — по одному на входной ТФ (15m/1h/4h), где
+    есть сетап. Пустой список — сетапов нет или все дубли (тот же импульс на баре)."""
+    out = []
+    for sig in engine.analyze_multi(frames, symbol):
+        if journal.find_duplicate_setup(sig) is not None:
+            continue
+        sid = journal.record_signal(sig)
+        out.append((sig, sid))
+    return out
 
 
 def scan_semiauto(symbol: str, frames: dict[str, pd.DataFrame],
-                  engine: SMCEngine) -> tuple | None:
-    """Полуавтомат: движок находит сетап -> записать КАНДИДАТА (не рассылать).
+                  engine: SMCEngine) -> list[tuple]:
+    """Полуавтомат: сетапы на КАЖДОМ входном ТФ -> КАНДИДАТЫ (не рассылать).
 
-    Возвращает (Signal, signal_id) — оператор подтверждает/отклоняет контекст.
-    None — если сетапа нет ЛИБО этот же сетап уже записан (дедуп: не спамим оператора
-    тем же импульсом на каждом баре).
+    Возвращает список (Signal, signal_id) — оператор подтверждает/отклоняет контекст.
+    Пустой список — сетапов нет ЛИБО все уже записаны (дедуп: не спамим оператора тем
+    же импульсом на каждом баре).
     """
-    sig = engine.analyze(frames, symbol)
-    if sig is None:
-        return None
-    if journal.find_duplicate_setup(sig) is not None:
-        return None
-    sid = journal.record_candidate(sig)
-    return sig, sid
+    out = []
+    for sig in engine.analyze_multi(frames, symbol):
+        if journal.find_duplicate_setup(sig) is not None:
+            continue
+        sid = journal.record_candidate(sig)
+        out.append((sig, sid))
+    return out
 
 
 def scan_watchlist(symbols: list[str], engine: SMCEngine | None = None,

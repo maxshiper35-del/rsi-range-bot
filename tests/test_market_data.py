@@ -111,6 +111,44 @@ def test_poll_once_symbol_error_is_skipped(fresh_db):
     assert len(found) == 1                             # BAD пропущен, цикл не упал
 
 
+def test_poll_once_scores_orphan_symbol_not_in_watchlist(fresh_db):
+    # символ выпал из вотчлиста (авто-ротация/ручное удаление), но у него остался
+    # открытый сигнал — poll_once обязан его ДОСКОРИТЬ, иначе исход теряется навсегда
+    # и публичная статистика недосчитывает закрытых сделок.
+    from datetime import datetime, timedelta, timezone
+
+    from app.brain import journal
+    from app.core.signal_engine import Side, Signal
+
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    orphan = Signal(symbol="OLD/USDT:USDT", side=Side.LONG, timeframe="1h",
+                    entry=100.0, stop=95.0, take_profits=[110.0], risk_reward=2.0,
+                    confidence=0.7, reasons=["ctx"], created_at=t0.isoformat(),
+                    indicators_snapshot={"setup": "1:1"})
+    sid = journal.record_signal(orphan)                # status=open
+
+    def loader(symbol, timeframes):
+        # бары для ЛЮБОГО символа: касание входа (100) на баре 1, тейк (110) на баре 2
+        bars = [
+            (t0 + timedelta(hours=1), 102, 105, 99, 101),    # fill: low 99 <= 100 <= high 105
+            (t0 + timedelta(hours=2), 105, 112, 104, 111),   # tp:   high 112 >= 110
+        ]
+        dt, o, h, low, c = zip(*bars)
+        df = pd.DataFrame({"dt": dt, "open": o, "high": h, "low": low, "close": c,
+                           "volume": [1000.0] * len(bars)})
+        return {tf: df for tf in timeframes}
+
+    eng = SMCEngine(SMCConfig(use_time_filter=False))
+    # вотчлист НЕ содержит OLD — только ETH; OLD подхватывается orphan-скорингом
+    _, closed = poll_once(["ETH/USDT:USDT"], ["1h"], engine=eng, frames_loader=loader,
+                          mode="auto")
+
+    row = fresh_db.query_one("SELECT status, result_r FROM signals WHERE id=?", (sid,))
+    assert row["status"] == "tp1", f"осиротевший сигнал завис open вместо разрешения: {row}"
+    assert row["result_r"] == 2.0
+    assert any(c["id"] == sid for c in closed)         # попал в список закрытых (для постинга)
+
+
 def test_seconds_to_next_close_30m():
     # бриф F: "30m" добавлен в _TF_SECONDS (раньше тихо фильтровался из runtime.timeframes)
     assert seconds_to_next_close("30m", 0) == 30 * 60

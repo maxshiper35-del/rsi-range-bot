@@ -58,11 +58,24 @@ def poll_once(symbols: list, timeframes: list, engine=None,
             # бары входного ТФ (самого младшего) — для скоринга исходов
             entry_tf = min(frames, key=lambda t: SMCEngine.TF_MINUTES.get(t, 10 ** 9))
             bars_by_symbol[symbol] = frames[entry_tf]
-            res = scan(symbol, frames, engine)
-            if res is not None:
-                found.append(res)
+            found.extend(scan(symbol, frames, engine))  # (Signal, sid) на каждый входной ТФ
         except Exception as e:                          # noqa: BLE001 — один символ не роняет цикл
             log.warning("poll %s: %s", symbol, e)
+    # осиротевшие позиции: символы с открытыми сигналами, ВЫПАВШИЕ из вотчлиста
+    # (авто-ротация или ручное удаление) — их исход всё равно надо доскорить свежими
+    # барами, иначе сигнал висит open вечно и публичная статистика недосчитывает
+    # закрытых сделок. Только СКОРИНГ (никакого scan) — новые сигналы по ним не ищем.
+    from app.brain.journal import symbols_with_open_positions
+    base_tf = min(timeframes, key=lambda t: SMCEngine.TF_MINUTES.get(t, 10 ** 9))
+    for symbol in symbols_with_open_positions():
+        if symbol in bars_by_symbol:
+            continue
+        if pause_sec:
+            _time.sleep(pause_sec)
+        try:                                            # loader, не fetch — инъектится в тестах
+            bars_by_symbol[symbol] = loader(symbol, [base_tf])[base_tf]
+        except Exception as e:                          # noqa: BLE001 — один сирота не роняет цикл
+            log.warning("orphan-скоринг %s: %s", symbol, e)
     # каждый такт скорим исходы open/rejected по свежим закрытым барам
     closed = []
     try:
