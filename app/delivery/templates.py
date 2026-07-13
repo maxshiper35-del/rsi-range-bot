@@ -140,6 +140,27 @@ def render_winback(promo_code: str, days: int, valid_days: int,
     )
 
 
+def render_notify(prefs: dict) -> str:
+    """Экран /notify: состояние мьюта и тихих часов (UTC). Гейтят только пуш сигналов в личку —
+    статистика, результаты и доступ всегда доступны по командам."""
+    if prefs.get("muted"):
+        state = "🔕 <b>Сигналы выключены</b> — пуш в личку не приходит."
+    else:
+        qs, qe = prefs.get("quiet_start"), prefs.get("quiet_end")
+        if qs is not None and qe is not None and qs != qe:
+            state = f"🌙 Тихие часы: <b>{qs:02d}:00–{qe:02d}:00 UTC</b> (сигналы вне окна)."
+        else:
+            state = "🔔 <b>Сигналы включены</b> — приходят сразу на закрытии свечей."
+    return (
+        "⚙️ <b>Уведомления</b>\n"
+        f"{LINE}\n"
+        f"{state}\n"
+        f"{LINE}\n"
+        "Настройки касаются только пуша сигналов. Статистика (/stats), трек-рекорд "
+        "и результаты доступны всегда."
+    )
+
+
 def render_referral_reward(days: int) -> str:
     """Уведомление рефереру: приглашённый оплатил, начислена награда."""
     return (

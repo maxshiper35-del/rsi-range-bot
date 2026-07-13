@@ -732,6 +732,7 @@ USER_COMMANDS = [
     ("subscribe", "подписка — все сигналы"),
     ("promo", "применить промокод: /promo <код>"),
     ("referral", "пригласить друга и получить дни подписки"),
+    ("notify", "уведомления: мьют и тихие часы"),
     ("about", "как устроен сервис, честный дисклеймер"),
     ("terms", "условия использования: риски, оплата, возврат, данные"),
     ("backtest", "честный итог бэктеста стратегии"),
@@ -1238,6 +1239,51 @@ def main() -> None:
             templates.render_referral_invite(link, ref, runtime.referral_reward_days()),
             parse_mode="HTML")
 
+    _QUIET_PRESET = (22, 6)                                 # тихие часы по умолчанию, UTC
+
+    def _notify_kb(prefs: dict) -> InlineKeyboardMarkup:
+        b = InlineKeyboardButton
+        muted = prefs.get("muted")
+        qs, qe = prefs.get("quiet_start"), prefs.get("quiet_end")
+        quiet_on = qs is not None and qe is not None and qs != qe
+        rows = [[b(text="🔔 Включить сигналы" if muted else "🔕 Выключить все сигналы",
+                   callback_data="notif_mute")]]
+        if not muted:
+            rows.append([b(
+                text="☀️ Убрать тихие часы" if quiet_on
+                else f"🌙 Тихие часы {_QUIET_PRESET[0]:02d}–{_QUIET_PRESET[1]:02d} UTC",
+                callback_data="notif_quiet")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @dp.message(Command("notify"))
+    async def _notify(m):
+        prefs = await asyncio.to_thread(payments.notify_prefs, m.from_user.id)
+        await m.answer(templates.render_notify(prefs), parse_mode="HTML",
+                       reply_markup=_notify_kb(prefs))
+
+    @dp.callback_query(F.data == "notif_mute")
+    async def _notif_mute(cq):
+        prefs = await asyncio.to_thread(payments.notify_prefs, cq.from_user.id)
+        await asyncio.to_thread(payments.set_muted, cq.from_user.id, not prefs["muted"])
+        prefs = await asyncio.to_thread(payments.notify_prefs, cq.from_user.id)
+        await cq.message.edit_text(templates.render_notify(prefs), parse_mode="HTML",
+                                   reply_markup=_notify_kb(prefs))
+        await cq.answer("Готово.")
+
+    @dp.callback_query(F.data == "notif_quiet")
+    async def _notif_quiet(cq):
+        prefs = await asyncio.to_thread(payments.notify_prefs, cq.from_user.id)
+        quiet_on = prefs["quiet_start"] is not None and prefs["quiet_end"] is not None \
+            and prefs["quiet_start"] != prefs["quiet_end"]
+        if quiet_on:
+            await asyncio.to_thread(payments.set_quiet_hours, cq.from_user.id, None, None)
+        else:
+            await asyncio.to_thread(payments.set_quiet_hours, cq.from_user.id, *_QUIET_PRESET)
+        prefs = await asyncio.to_thread(payments.notify_prefs, cq.from_user.id)
+        await cq.message.edit_text(templates.render_notify(prefs), parse_mode="HTML",
+                                   reply_markup=_notify_kb(prefs))
+        await cq.answer("Готово.")
+
     @dp.message(F.text == "🎟 Промокод")
     async def _promo_btn_start(m, state: FSMContext):
         await state.set_state(PromoState.code)
@@ -1340,6 +1386,58 @@ def main() -> None:
         # учёт: Stars зачисляются на баланс бота платформой; здесь — только след в логе
         log.info("unlock куплен: юзер %s, payload=%s",
                  p.from_user.id, p.paid_media_payload)
+
+    def _signal_actions_kb(sid: int) -> InlineKeyboardMarkup:
+        """Инлайн-панель под полным DM-сигналом: быстрый график и расчёт риска без набора команд."""
+        b = InlineKeyboardButton
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            b(text="📈 График", callback_data=f"sigchart:{sid}"),
+            b(text="🧮 Риск", callback_data=f"sigcalc:{sid}"),
+        ]])
+
+    async def _load_signal_for_action(cq):
+        """Общая часть sigchart/sigcalc: распарсить sid и достать сигнал.
+
+        -> (sid, sig), либо (None, None) если не найден (ответ юзеру уже отправлен)."""
+        sid_s = cq.data.split(":", 1)[1]
+        if not sid_s.isdigit():
+            await cq.answer("Сигнал не найден.", show_alert=True)
+            return None, None
+        sid = int(sid_s)
+        row = await asyncio.to_thread(journal.signal_row, sid)
+        if row is None:
+            await cq.answer("Сигнал не найден.", show_alert=True)
+            return None, None
+        return sid, journal.row_to_signal(row)
+
+    @dp.callback_query(F.data.startswith("sigchart:"))
+    async def _sig_chart(cq):
+        sid, sig = await _load_signal_for_action(cq)
+        if sig is None:
+            return
+        try:
+            png = await asyncio.to_thread(_signal_chart_png, sig, sid)
+        except Exception as e:                              # noqa: BLE001 — биржа/рендер
+            log.warning("sigchart #%s: %s", sid, e)
+            await cq.answer("График сейчас недоступен — попробуйте позже.", show_alert=True)
+            return
+        cap = f"📈 Сигнал #{sid}: {templates.esc(sig.symbol)} · {templates.esc(sig.timeframe)}"
+        await cq.message.answer_photo(
+            BufferedInputFile(png, filename=f"signal_{sid}.png"), caption=cap)
+        await cq.answer()
+
+    @dp.callback_query(F.data.startswith("sigcalc:"))
+    async def _sig_calc(cq):
+        sid, sig = await _load_signal_for_action(cq)
+        if sig is None:
+            return
+        entry, stop = templates._price(sig.entry), templates._price(sig.stop)
+        await cq.message.answer(
+            f"🧮 Расчёт позиции для сигнала #{sid}:\n"
+            f"<code>/calc &lt;депозит&gt; &lt;риск%&gt; {entry} {stop}</code>\n"
+            "Подставьте свой депозит и риск% (обычно 1–2) — бот вернёт объём и требуемое плечо.",
+            parse_mode="HTML")
+        await cq.answer()
 
     @dp.callback_query(F.data == "pay_usdt")
     async def _pay_usdt(cq):
@@ -2274,11 +2372,17 @@ def main() -> None:
         plan = await asyncio.to_thread(payments.plan_recipients, sid,
                                        runtime.free_per_week(), tuple(cfg.admin_ids))
         sent = 0
+        hour_utc = datetime.now(timezone.utc).hour
         for uid, kind in plan:
+            # мьют/тихие часы гейтят только DM-пуш сигнала (не квоту): подавлённого free-юзера
+            # не списываем — получит сигналы, когда снимет тишину (в пределах недельного лимита)
+            if await asyncio.to_thread(payments.is_signal_suppressed, uid, hour_utc):
+                continue
+            # под полным сигналом — инлайн-панель (график/риск); под тизером — кнопка разблокировки
+            markup = _signal_actions_kb(sid) if kind == "full" else unlock_kb
             try:
                 await bot.send_message(uid, full if kind == "full" else teaser,
-                                       parse_mode="HTML",
-                                       reply_markup=unlock_kb if kind == "teaser" else None)
+                                       parse_mode="HTML", reply_markup=markup)
                 await asyncio.to_thread(payments.record_delivery, uid, sid, kind)
                 sent += 1
             except Exception as e:                     # noqa: BLE001 — один получатель не роняет рассылку

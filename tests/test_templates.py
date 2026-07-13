@@ -150,3 +150,12 @@ def test_render_referral_invite():
     assert "Пригласили: <b>4</b>" in txt and "оплатили: <b>2</b>" in txt
     assert "+7 дн" in txt
     assert "не за регистрацию/триал" in txt          # честность: награда только за оплату
+
+
+def test_render_notify_states():
+    on = templates.render_notify({"muted": False, "quiet_start": None, "quiet_end": None})
+    assert "включены" in on
+    muted = templates.render_notify({"muted": True, "quiet_start": None, "quiet_end": None})
+    assert "выключены" in muted
+    quiet = templates.render_notify({"muted": False, "quiet_start": 22, "quiet_end": 6})
+    assert "22:00–06:00 UTC" in quiet

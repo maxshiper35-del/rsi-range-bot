@@ -584,3 +584,40 @@ def test_referral_stats(fresh_db):
     payments.reward_referrer_on_payment(841, 7)
     st = payments.referral_stats(840)
     assert st == {"invited": 3, "rewarded": 1}
+
+
+def test_notify_mute_and_prefs(fresh_db):
+    from app.delivery import payments
+    payments.register_user(850, "u")
+    assert payments.notify_prefs(850) == {"muted": False, "quiet_start": None, "quiet_end": None}
+    payments.set_muted(850, True)
+    assert payments.notify_prefs(850)["muted"] is True
+    # мьют подавляет в любой час
+    assert payments.is_signal_suppressed(850, 0) is True
+    assert payments.is_signal_suppressed(850, 13) is True
+    payments.set_muted(850, False)
+    assert payments.is_signal_suppressed(850, 13) is False
+
+
+def test_notify_quiet_hours_windows(fresh_db):
+    from app.delivery import payments
+    payments.register_user(851, "u")
+    # обычное окно [22, 6) НЕ через полночь? тут через полночь: 22>6
+    payments.set_quiet_hours(851, 22, 6)
+    assert payments.is_signal_suppressed(851, 23) is True     # внутри (после 22)
+    assert payments.is_signal_suppressed(851, 3) is True      # внутри (до 6)
+    assert payments.is_signal_suppressed(851, 6) is False     # граница end исключена
+    assert payments.is_signal_suppressed(851, 12) is False    # день — не подавляем
+    # обычное окно без перехода через полночь [9, 12)
+    payments.set_quiet_hours(851, 9, 12)
+    assert payments.is_signal_suppressed(851, 10) is True
+    assert payments.is_signal_suppressed(851, 12) is False
+    assert payments.is_signal_suppressed(851, 8) is False
+    # выключение
+    payments.set_quiet_hours(851, None, None)
+    assert payments.is_signal_suppressed(851, 10) is False
+
+
+def test_is_signal_suppressed_unknown_user(fresh_db):
+    from app.delivery import payments
+    assert payments.is_signal_suppressed(999999, 3) is False   # незнакомый юзер — не подавляем

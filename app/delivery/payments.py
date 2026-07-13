@@ -548,6 +548,44 @@ def referral_stats(tg_id: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Настройки уведомлений: мьют и тихие часы (гейтят только DM-пуш сигналов)
+# ---------------------------------------------------------------------------
+def set_muted(tg_id: int, muted: bool) -> None:
+    register_user(tg_id)
+    db.execute("UPDATE users SET notify_muted=?, updated_at=? WHERE tg_id=?",
+               (1 if muted else 0, clock.utcnow_iso(), tg_id))
+
+
+def set_quiet_hours(tg_id: int, start: int | None, end: int | None) -> None:
+    """Тихие часы в UTC [start, end). start=end=None — выключить."""
+    register_user(tg_id)
+    db.execute("UPDATE users SET quiet_start=?, quiet_end=?, updated_at=? WHERE tg_id=?",
+               (start, end, clock.utcnow_iso(), tg_id))
+
+
+def notify_prefs(tg_id: int) -> dict:
+    u = get_user(tg_id)
+    if u is None:
+        return {"muted": False, "quiet_start": None, "quiet_end": None}
+    return {"muted": bool(u["notify_muted"]),
+            "quiet_start": u["quiet_start"], "quiet_end": u["quiet_end"]}
+
+
+def is_signal_suppressed(tg_id: int, hour_utc: int) -> bool:
+    """Подавлять ли DM-пуш сигнала сейчас: мьют ИЛИ попадание в тихие часы (UTC).
+    Окно [start, end); start>end — окно через полночь; любая граница NULL — тихих часов нет."""
+    u = get_user(tg_id)
+    if u is None:
+        return False
+    if u["notify_muted"]:
+        return True
+    qs, qe = u["quiet_start"], u["quiet_end"]
+    if qs is None or qe is None or qs == qe:
+        return False
+    return qs <= hour_utc < qe if qs < qe else (hour_utc >= qs or hour_utc < qe)
+
+
+# ---------------------------------------------------------------------------
 # Атрибуция роста: источник прихода юзера (deep-link /start src_<label>)
 # ---------------------------------------------------------------------------
 def set_acquisition_source(tg_id: int, source: str) -> None:
