@@ -32,7 +32,9 @@ def test_price_full_precision():
 def test_render_signal_channel_html():
     txt = templates.render_signal_channel(_sig(), 7)
     assert "<b>RSI RANGE — Сигнал #7</b>" in txt and "🔴 SHORT" in txt
-    assert "<code>62340</code>" in txt and "<code>60893</code> / <code>59000</code>" in txt
+    assert "<code>62340</code>" in txt
+    assert "<code>60893</code> (2.3R)" in txt and "<code>59000</code> (5.2R)" in txt
+    assert "(ход 1.0%)" in txt   # дистанция входа до стопа
     assert "<blockquote expandable>" in txt and "свип хая" in txt
     assert "Не финсовет" in txt and "@rsirange_bot" in txt
 

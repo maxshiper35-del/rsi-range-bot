@@ -461,6 +461,17 @@ def stats() -> dict:
     }
 
 
+def recent_streak(n: int = 10) -> dict:
+    """Серия из последних n закрытых сделок с исходом (по closed_at DESC) — для футера
+    соц-пруфа под постами результата. Только реальные R-исходы (expired без R не в счёт).
+    -> {n, sum_r, wins} (n — фактическое число, может быть меньше запрошенного)."""
+    rows = db.query(
+        "SELECT result_r FROM signals WHERE status IN ('tp1','tp2','tp3','stopped') "
+        "AND result_r IS NOT NULL ORDER BY closed_at DESC LIMIT ?", (n,))
+    rs = [r["result_r"] for r in rows]
+    return {"n": len(rs), "sum_r": round(sum(rs), 2), "wins": sum(1 for r in rs if r > 0)}
+
+
 def stats_for_period(start_iso: str, end_iso: str) -> dict:
     """Та же агрегация, что stats(), но СКОУПЛЕННАЯ по closed_at в [start_iso, end_iso) —
     для карточки недели (реальные цифры ЭТОЙ недели, не всё время жизни бота). Дополнительно

@@ -32,6 +32,18 @@ def _arrow(side: str) -> str:
     return "🟢 LONG" if side == "LONG" else "🔴 SHORT"
 
 
+def _tp_r(entry: float, stop: float, tp: float) -> float:
+    """R-мультипликатор тейка: сколько риск-единиц (|вход−стоп|) до цели. Без лукахеда —
+    чистая геометрия уровней сигнала."""
+    risk = abs(entry - stop)
+    return abs(tp - entry) / risk if risk else 0.0
+
+
+def _stop_dist_pct(entry: float, stop: float) -> float:
+    """Ход цены от входа до стопа в %, чтобы юзер сразу видел масштаб риска."""
+    return abs(entry - stop) / entry * 100.0 if entry else 0.0
+
+
 def _sig_head(sig: Signal) -> str:
     return f"{_arrow(sig.side.value)}   {esc(sig.symbol)}   ·   {esc(sig.timeframe)}"
 
@@ -48,14 +60,16 @@ def _market_line(sig: Signal) -> str:
 
 def render_signal_channel(sig: Signal, signal_id: int) -> str:
     """Пост нового сигнала в канал (публичная лента)."""
-    tps = " / ".join(f"<code>{_price(t)}</code>" for t in sig.take_profits)
+    tps = " / ".join(f"<code>{_price(t)}</code> ({_tp_r(sig.entry, sig.stop, t):.1f}R)"
+                     for t in sig.take_profits)
+    stop_dist = _stop_dist_pct(sig.entry, sig.stop)
     reasons = "\n".join(f"• {esc(r)}" for r in sig.reasons)
     return (
         f"📊 <b>RSI RANGE — Сигнал #{signal_id}</b>\n{LINE}\n"
         f"{_sig_head(sig)}\n\n"
         f"{_market_line(sig)}"
         f"📍 Вход:  <code>{_price(sig.entry)}</code>  (лимит)\n"
-        f"🛑 Стоп:  <code>{_price(sig.stop)}</code>\n"
+        f"🛑 Стоп:  <code>{_price(sig.stop)}</code>  (ход {stop_dist:.1f}%)\n"
         f"🎯 Цели:  {tps}\n"
         f"⚖️ R/R 1:{sig.risk_reward:.1f}    🔎 {int(sig.confidence * 100)}%\n"
         f"<blockquote expandable>Почему:\n{reasons}</blockquote>\n{LINE}\n"
@@ -68,15 +82,17 @@ def render_signal_dm(sig: Signal, signal_id: int) -> str:
     """Полный сигнал в личку подписчику (платные/админы/free до лимита)."""
     conf10 = round(sig.confidence * 10)
     conf_bar = "▰" * conf10 + "▱" * (10 - conf10)
-    tps = "\n".join(f"   • TP{i}: <code>{_price(tp)}</code>"
-                    for i, tp in enumerate(sig.take_profits, 1))
+    tps = "\n".join(
+        f"   • TP{i}: <code>{_price(tp)}</code>  ({_tp_r(sig.entry, sig.stop, tp):.1f}R)"
+        for i, tp in enumerate(sig.take_profits, 1))
+    stop_dist = _stop_dist_pct(sig.entry, sig.stop)
     reasons = "\n".join(f"— {esc(r)}" for r in sig.reasons)
     return (
         f"🔔 <b>СИГНАЛ #{signal_id}</b>\n"
         f"{_sig_head(sig)}\n{LINE}\n"
         f"{_market_line(sig)}"
         f"📍 Вход:  <code>{_price(sig.entry)}</code>  (лимит)\n"
-        f"🛑 Стоп:  <code>{_price(sig.stop)}</code>\n"
+        f"🛑 Стоп:  <code>{_price(sig.stop)}</code>  (ход до стопа {stop_dist:.1f}%)\n"
         f"🎯 Тейки:\n{tps}\n"
         f"⚖️ R/R до TP{len(sig.take_profits)}: 1:{sig.risk_reward:.1f}\n"
         f"🔎 Уверенность: {conf_bar} {int(sig.confidence * 100)}%\n"
@@ -85,11 +101,23 @@ def render_signal_dm(sig: Signal, signal_id: int) -> str:
     )
 
 
-def render_teaser(sig: Signal, signal_id: int) -> str:
-    """Превью для free-юзера сверх недельного лимита / канала в режиме teaser."""
+def _proof_line(stats: dict | None) -> str:
+    """Строка соц-пруфа из journal.stats() (проверяемая статистика в точке пейволла)."""
+    if not stats or not stats.get("trades"):
+        return ""
+    return (f"📊 {stats['trades']} закрытых · winrate {stats['winrate'] * 100:.0f}% · "
+            f"матож. {stats['expectancy_r']:+.2f}R/сделку — всё проверяемо (/trackrecord)\n")
+
+
+def render_teaser(sig: Signal, signal_id: int, stats: dict | None = None) -> str:
+    """Превью для free-юзера сверх недельного лимита / канала в режиме teaser.
+
+    stats (journal.stats()) — соц-пруф прямо на пейволле: не голое «по подписке», а
+    проверяемые цифры в точке, где юзер упёрся в лимит."""
     return (
         f"🔒 <b>СИГНАЛ #{signal_id}</b> — превью\n"
         f"{_sig_head(sig)}\n"
+        f"{_proof_line(stats)}"
         "Вход, стоп, тейки и разбор — по подписке.\n"
         "/subscribe — открыть все сигналы"
     )
@@ -161,12 +189,22 @@ def render_milestone(milestone: int, st: dict) -> str:
     )
 
 
-def render_result(c: dict, display_leverage: float = 0.0) -> str:
+def _streak_footer(streak: dict | None) -> str:
+    """Компактный живой скоуборд: серия последних N закрытых сделок (соц-пруф под постом
+    результата). streak — journal.recent_streak(): {n, sum_r, wins}."""
+    if not streak or not streak.get("n"):
+        return ""
+    n, wins = streak["n"], streak["wins"]
+    return (f"📈 Серия {n}: <b>{streak['sum_r']:+.1f}R</b> · {wins}/{n} в плюс\n")
+
+
+def render_result(c: dict, display_leverage: float = 0.0, streak: dict | None = None) -> str:
     """Результат закрытой сделки (публичный трек-рекорд).
 
     display_leverage>0 — ведущим числом показываем результат при плече ×N
     (иллюстративная арифметика: реального плеча бот не знает, сделки не
-    исполняет); сырое движение цены остаётся вторым числом. R — всегда."""
+    исполняет); сырое движение цены остаётся вторым числом. R — всегда.
+    streak (journal.recent_streak()) — футер серии последних N сделок."""
     r = c["result_r"] or 0.0
     if c["status"] == "stopped":
         head, emoji = f"🛑 <b>Сигнал #{c['id']} — стоп</b>", "📉"
@@ -185,5 +223,6 @@ def render_result(c: dict, display_leverage: float = 0.0) -> str:
         f"{head}\n{_c_head(c)}\n"
         f"Результат: <b>{r:+.2f}R</b>  {emoji}\n"
         f"{move_line}{LINE}\n"
+        f"{_streak_footer(streak)}"
         "Вся статистика честно: /stats у @rsirange_bot"
     )

@@ -2166,7 +2166,7 @@ def main() -> None:
         except Exception:                              # noqa: BLE001 — формат не роняет цикл
             log.exception("формат алерта #%s", sid)
             full = f"🔔 Сигнал #{sid} (ошибка форматирования — детали в журнале)"
-        teaser = templates.render_teaser(sig, sid)
+        teaser = templates.render_teaser(sig, sid, stats=journal.stats())  # соц-пруф на пейволле
         # разовая покупка сигнала (paid media): кнопка на тизере, если включена цена
         unlock_price = runtime.paid_signal_stars()
         unlock_kb = None
@@ -2498,7 +2498,8 @@ def main() -> None:
                     log.info("сигнал #%s: пост expired OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] in ("tp1", "tp2", "tp3", "stopped"):
                     msg = await bot.send_message(
-                        channel, templates.render_result(c, runtime.display_leverage()),
+                        channel, templates.render_result(
+                            c, runtime.display_leverage(), streak=journal.recent_streak(10)),
                         parse_mode="HTML")
                     log.info("сигнал #%s: пост result(%s) OK (msg_id=%s)",
                              c["id"], c["status"], msg.message_id)
