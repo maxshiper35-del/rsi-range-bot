@@ -153,6 +153,15 @@ def set_trackrecord_last_week(week_key: str) -> None:
     set_value("trackrecord_last_week", week_key)
 
 
+def weekly_digest_last_week() -> str | None:
+    """ISO-неделя последнего личного дайджеста подписчикам — не рассылать дважды за неделю."""
+    return _raw("weekly_digest_last_week")
+
+
+def set_weekly_digest_last_week(week_key: str) -> None:
+    set_value("weekly_digest_last_week", week_key)
+
+
 def last_board_update_at() -> str | None:
     return _raw("last_board_update_at")
 

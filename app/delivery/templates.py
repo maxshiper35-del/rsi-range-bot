@@ -123,6 +123,43 @@ def render_teaser(sig: Signal, signal_id: int, stats: dict | None = None) -> str
     )
 
 
+def render_winback(promo_code: str, days: int, valid_days: int,
+                   stats: dict | None = None) -> str:
+    """Win-back ушедшему подписчику: соц-пруф + персональный одноразовый промокод (срочность).
+
+    Это returning-payer копия (в отличие от TRIAL_DRIP — first-purchase). Промокод даёт
+    конкретный повод вернуться сейчас, а не абстрактное «возвращайтесь»."""
+    return (
+        "👋 <b>Скучали по сигналам?</b>\n"
+        f"{_proof_line(stats)}"
+        f"🎁 Ваш промокод <code>{esc(promo_code)}</code> — +{days} дн. доступа, "
+        f"сгорает через {valid_days} дн.\n"
+        f"Активировать: <code>/promo {esc(promo_code)}</code>\n"
+        "Или /subscribe — все тарифы.\n"
+        "⚠️ Не финсовет. Платите за инструмент и проверяемую статистику, не за прибыль."
+    )
+
+
+def render_weekly_digest(period_label: str, wk: dict, st: dict) -> str:
+    """Недельный личный дайджест подписчику: итоги ЭТОЙ недели (stats_for_period) + всё время.
+
+    Личное касание-ретеншн, дублирует канальную карточку текстом. Только факты по журналу,
+    без обещаний. wk — journal.stats_for_period, st — journal.stats."""
+    wr = wk.get("winrate", 0) * 100
+    return (
+        f"🗓 <b>Итоги недели {esc(period_label)}</b>\n{LINE}\n"
+        f"Закрыто: <b>{wk.get('trades', 0)}</b>  "
+        f"(✅ {wk.get('wins', 0)} / 🛑 {wk.get('losses', 0)})\n"
+        f"Winrate недели: <b>{wr:.0f}%</b> · итог <b>{wk.get('total_r', 0):+.1f}R</b>\n"
+        f"Открыто сейчас: {st.get('open', 0)}\n"
+        f"{LINE}\n"
+        f"За всё время: {st.get('trades', 0)} сделок · матож. "
+        f"<b>{st.get('expectancy_r', 0):+.2f}R</b> · итог {st.get('total_r', 0):+.1f}R\n"
+        "Полная статистика и журнал: /stats\n"
+        "⚠️ Не финсовет. Прошлые результаты не определяют будущие."
+    )
+
+
 def render_fill(c: dict, show_price: bool = True) -> str:
     """Лимитный вход исполнился (c — словарь из journal.update_outcomes_from_bars).
 

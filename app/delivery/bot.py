@@ -2306,15 +2306,23 @@ def main() -> None:
                 # стадию всё равно отмечаем: юзер с закрытой личкой не должен
                 # получать ретраи каждый час до конца триала
                 await asyncio.to_thread(payments.mark_trial_drip, uid, stage)
-        # win-back: одно напоминание в первые 2 дня после истечения подписки
+        # win-back: одно напоминание в первые 2 дня после истечения подписки. Персональный
+        # одноразовый промокод wb<tg_id> (+7 дн, сгорает за 5) — конкретный повод вернуться
+        # сейчас. Промокод выдаём ДО отправки; при сбое отправки всё равно mark_reminded,
+        # чтобы юзер с закрытой личкой не ретраился каждый такт (как в дрипе).
+        _WB_DAYS, _WB_VALID = 7, 5
         for row in await asyncio.to_thread(payments.due_for_winback, 2):
+            uid = row["tg_id"]
             try:
-                await bot.send_message(row["tg_id"],
-                                       "👋 Соскучились по сигналам? /subscribe — вернуть доступ "
-                                       "за минуту.")
-                await asyncio.to_thread(payments.mark_winback_reminded, row["tg_id"])
+                code = await asyncio.to_thread(
+                    payments.issue_winback_promo, uid, _WB_DAYS, _WB_VALID)
+                await bot.send_message(
+                    uid,
+                    templates.render_winback(code, _WB_DAYS, _WB_VALID, stats=journal.stats()),
+                    parse_mode="HTML")
             except Exception as e:                     # noqa: BLE001
-                log.warning("winback %s: %s", row["tg_id"], e)
+                log.warning("winback %s: %s", uid, e)
+            await asyncio.to_thread(payments.mark_winback_reminded, uid)
         # авто-watchlist (мега-план MAX, ставка 3): раз в сутки пересобрать список по
         # ликвидности; новые символы — только через бэктест-гейт. Дефолт ВЫКЛ (флаг).
         now_iso = clock.utcnow_iso()
@@ -2451,6 +2459,29 @@ def main() -> None:
                     await asyncio.to_thread(journal.record_ledger_hash, len(rows), checksum)
                 except Exception as e:                      # noqa: BLE001
                     log.warning("еженедельный трек-рекорд: %s", e)
+            # недельный ЛИЧНЫЙ дайджест подписчикам (ретеншн) — отдельный маркер от карточки,
+            # чтобы card/CSV и рассылка не блокировали друг друга. Маркер ставим ДО рассылки:
+            # краш посреди рассылки не должен переслать дайджест всем заново.
+            if should_post_weekly(runtime.weekly_digest_last_week(), week_key):
+                await asyncio.to_thread(runtime.set_weekly_digest_last_week, week_key)
+                try:
+                    d_start, d_end = weekly_report_period(now_dt)
+                    d_wk = await asyncio.to_thread(
+                        journal.stats_for_period, d_start.isoformat(), d_end.isoformat())
+                    d_st = await asyncio.to_thread(journal.stats)
+                    d_label = (f"{d_start.strftime('%d.%m')}"
+                               f"–{(d_end - timedelta(days=1)).strftime('%d.%m')}")
+                    d_text = templates.render_weekly_digest(d_label, d_wk, d_st)
+                    sent = 0
+                    for uid in await asyncio.to_thread(payments.active_subscriber_ids):
+                        try:
+                            await bot.send_message(uid, d_text, parse_mode="HTML")
+                            sent += 1
+                        except Exception as e:              # noqa: BLE001 — заблокировал бота
+                            log.warning("дайджест -> %s: %s", uid, e)
+                    log.info("недельный дайджест разослан: %d подписчикам", sent)
+                except Exception as e:                      # noqa: BLE001
+                    log.warning("недельный дайджест: %s", e)
 
     async def _on_close(closed):
         # мягкое уведомление АДМИНУ (не в канал): серия стопов подряд на ВКЛЮЧЁННОМ сетапе —

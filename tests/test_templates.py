@@ -110,3 +110,29 @@ def test_trial_drip_texts():
     assert "/trackrecord" in templates.TRIAL_DRIP[2]          # день 3: проверь сам
     assert "/subscribe" in templates.TRIAL_DRIP[3]            # финал: тарифы
     assert "не за обещание прибыли" in templates.TRIAL_DRIP[3]  # честность и в продаже
+
+
+def test_render_winback_has_promo_and_proof():
+    stats = {"trades": 30, "winrate": 0.5, "expectancy_r": 0.1}
+    txt = templates.render_winback("wb123", days=7, valid_days=5, stats=stats)
+    assert "<code>wb123</code>" in txt and "+7 дн" in txt and "5 дн" in txt
+    assert "/promo wb123" in txt
+    assert "30 закрытых" in txt                             # соц-пруф присутствует
+    assert "Не финсовет" in txt
+
+
+def test_render_winback_escapes_code():
+    txt = templates.render_winback("<b>x</b>", 7, 5, stats=None)
+    assert "&lt;b&gt;x&lt;/b&gt;" in txt              # промокод из юзердаты экранирован
+
+
+def test_render_weekly_digest():
+    wk = {"trades": 5, "wins": 3, "losses": 2, "winrate": 0.6, "total_r": 2.4}
+    st = {"trades": 40, "expectancy_r": 0.08, "total_r": 6.1, "open": 2}
+    txt = templates.render_weekly_digest("01.06–07.06", wk, st)
+    assert "01.06–07.06" in txt
+    assert "Закрыто: <b>5</b>" in txt and "✅ 3 / 🛑 2" in txt
+    assert "60%" in txt and "+2.4R" in txt
+    assert "Открыто сейчас: 2" in txt
+    assert "40 сделок" in txt and "+0.08R" in txt
+    assert "/stats" in txt

@@ -476,6 +476,23 @@ def mark_winback_reminded(tg_id: int) -> None:
                (clock.utcnow_iso(), tg_id))
 
 
+def issue_winback_promo(tg_id: int, days: int, valid_days: int) -> str:
+    """Персональный одноразовый промокод wb<tg_id> для win-back: +days подписки, max_uses=1,
+    сгорает через valid_days (срочность). Пересоздаётся НАЧИСТО каждый цикл win-back — иначе
+    повторно ушедший юзер получил бы уже погашенный код (already_used). Win-back срабатывает
+    раз на цикл лапса (winback_reminded_at сбрасывается в _extend_and_activate при реактивации),
+    поэтому пересоздание безопасно. -> код для подстановки в сообщение."""
+    code = f"wb{tg_id}"
+    expires = (_now_dt() + timedelta(days=valid_days)).isoformat()
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM promo_redemptions WHERE code=?", (code,))
+        conn.execute("DELETE FROM promo_codes WHERE code=?", (code,))
+        conn.execute(
+            "INSERT INTO promo_codes(code, days, max_uses, used_count, expires_at, created_at) "
+            "VALUES(?,?,1,0,?,?)", (code, days, expires, clock.utcnow_iso()))
+    return code
+
+
 # ---------------------------------------------------------------------------
 # Атрибуция роста: источник прихода юзера (deep-link /start src_<label>)
 # ---------------------------------------------------------------------------

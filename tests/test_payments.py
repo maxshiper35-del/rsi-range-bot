@@ -491,3 +491,32 @@ def test_trial_drip_excludes_paid_and_stale(fresh_db):
     assert payments.expire_stale_trial_drips(5.0) == 1      # помечен задним числом
     assert payments.get_user(603)["trial_drip_stage"] == 3
     assert payments.expire_stale_trial_drips(5.0) == 0      # идемпотентно
+
+
+def test_issue_winback_promo_redeemable(fresh_db):
+    from app.delivery import payments
+    payments.register_user(701, "lapsed")
+    code = payments.issue_winback_promo(701, days=7, valid_days=5)
+    assert code == "wb701"
+    # промокод создан, одноразовый, с датой сгорания
+    row = fresh_db.query_one("SELECT * FROM promo_codes WHERE code=?", (code,))
+    assert row["days"] == 7 and row["max_uses"] == 1 and row["expires_at"] is not None
+    # погашается и продлевает подписку
+    res = payments.redeem_promo(701, code)
+    assert res["ok"] is True and res["days"] == 7
+    assert payments.is_paid(701) is True
+    # повторно тем же юзером — уже применял
+    assert payments.redeem_promo(701, code)["reason"] == "already_used"
+
+
+def test_issue_winback_promo_refreshes_each_cycle(fresh_db):
+    from app.delivery import payments
+    payments.register_user(702, "repeat")
+    code = payments.issue_winback_promo(702, 7, 5)
+    payments.redeem_promo(702, code)                        # погасил в первый лапс
+    # второй цикл win-back: код пересоздаётся начисто -> снова погашаем
+    code2 = payments.issue_winback_promo(702, 7, 5)
+    assert code2 == code                                    # тот же wb<tg_id>
+    assert fresh_db.query_one(
+        "SELECT COUNT(*) AS c FROM promo_redemptions WHERE code=?", (code,))["c"] == 0
+    assert payments.redeem_promo(702, code2)["ok"] is True  # снова доступен
