@@ -23,7 +23,9 @@ def test_record_signal(fresh_db):
 
 def test_dedup_survives_entry_drift(fresh_db):
     """Аудит [2]: дрейф входа при стабильном стопе — тот же импульс, дедуп обязан сработать.
-    Разный сетап или разный стоп — НЕ дубль."""
+    Аудит-2 стратегии [3]: пока сигнал того же (symbol,tf,side,setup) АКТИВЕН, новый не
+    создаётся и с ДРУГИМ стопом (якорь S дрейфует к новым свингам того же движения —
+    точный матч по стопу пропускал каскады: 4×6226 на WLD, 5×LTF-BB в день −3R)."""
     from app.brain import journal
     sid = journal.record_signal(_sig(entry=106.2, stop=110.0, setup="6226"))
     # вход «уполз» (E обновил экстремум), стоп=S тот же, сетап тот же -> ДУБЛЬ
@@ -31,11 +33,16 @@ def test_dedup_survives_entry_drift(fresh_db):
     assert journal.find_duplicate_setup(_sig(entry=106.2, stop=110.0, setup="6226")) == sid
     # другой сетап при том же стопе -> НЕ дубль
     assert journal.find_duplicate_setup(_sig(entry=105.8, stop=110.0, setup="1:1")) is None
-    # другой стоп -> НЕ дубль
-    assert journal.find_duplicate_setup(_sig(entry=105.8, stop=111.0, setup="6226")) is None
-    # после истечения дубль снимается (можно завести заново)
+    # другой стоп, но первый сигнал ещё АКТИВЕН -> ДУБЛЬ (дрейф якоря, не новый сетап)
+    assert journal.find_duplicate_setup(_sig(entry=105.8, stop=111.0, setup="6226")) == sid
+    # первый закрылся (result_r есть) -> честный повторный сетап с другим стопом разрешён
     from app import db
-    db.execute("UPDATE signals SET status='expired' WHERE id=?", (sid,))
+    db.execute("UPDATE signals SET status='stopped', result_r=-1.0 WHERE id=?", (sid,))
+    assert journal.find_duplicate_setup(_sig(entry=105.8, stop=111.0, setup="6226")) is None
+    # ...но тот же стоп у закрытого всё ещё дубль (не-expired правило якоря сохраняется)
+    assert journal.find_duplicate_setup(_sig(entry=105.8, stop=110.0, setup="6226")) == sid
+    # после истечения дубль снимается полностью (можно завести заново)
+    db.execute("UPDATE signals SET status='expired', result_r=NULL WHERE id=?", (sid,))
     assert journal.find_duplicate_setup(_sig(entry=105.8, stop=110.0, setup="6226")) is None
 
 
@@ -429,3 +436,118 @@ def test_equity_series_matches_total(fresh_db):
     series = journal.equity_series()
     assert len(series) == 2
     assert abs(sum(series) - journal.stats()["total_r"]) < 1e-9
+
+
+# --- Аудит-2: лукахед и оптимизм бара филла (контракт честности) ---
+def test_no_lookahead_htf_signal_on_ltf_bars(fresh_db):
+    """CRITICAL аудита-2: created_at хранит ОТКРЫТИЕ решающего бара; 4h-сигнал, скорящийся
+    1h-барами, не должен исполняться от баров ИЗНУТРИ решающего 4h-бара (живой пример #126:
+    филл за 1ч45м до рождения сигнала). Скоринг стартует с ЗАКРЫТИЯ решающего бара."""
+    from app.brain import journal
+    sig = Signal(symbol="BTC/USDT:USDT", side=Side.SHORT, timeframe="4h", entry=100.0,
+                 stop=110.0, take_profits=[80.0], risk_reward=2.0, confidence=0.6,
+                 reasons=["тест"], created_at="2026-01-01T00:00:00+00:00",
+                 indicators_snapshot={"setup": "6226"})
+    journal.record_signal(sig)                          # решающий 4h-бар: 00:00–04:00
+    touch = [(100, 101, 99, 100)] * 3                   # 1h-бары 01:00/02:00/03:00 касаются entry
+    inside = {"BTC/USDT:USDT": _bars(touch, start="2026-01-01T01:00:00+00:00", step_min=60)}
+    assert journal.update_outcomes_from_bars(inside) == []          # ЛУКАХЕД ЗАПРЕЩЁН
+    row = fresh_db.query_one("SELECT status, filled_at FROM signals WHERE id=1")
+    assert row["status"] == "open" and row["filled_at"] is None
+    # бар ПОСЛЕ закрытия решающего (04:00) касается -> честный филл
+    after = touch + [(100, 101, 99, 100)]
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(after, start="2026-01-01T01:00:00+00:00", step_min=60)})
+    assert [c["status"] for c in res] == ["filled"]
+    assert res[0]["filled_at"] == "2026-01-01T04:00:00+00:00"
+
+
+def test_fill_bar_tp_not_awarded(fresh_db):
+    """Аудит-2 математики [2]: на баре ФИЛЛА high/low не говорят, была ли цена у тейка
+    до или после исполнения лимитки — тейк на баре филла не присуждается (стоп — да)."""
+    from app.brain import journal
+    journal.record_signal(_sig())                       # SHORT 100 / stop 110 / tp 80
+    one_bar = [(100, 101, 79, 95)]                      # касание entry И тейка, стоп не задет
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(one_bar, start="2026-01-01T00:15:00+00:00")})
+    assert [c["status"] for c in res] == ["filled"]     # только филл, БЕЗ tp1
+    assert fresh_db.query_one("SELECT status FROM signals WHERE id=1")["status"] == "open"
+    # следующий бар дошёл до тейка -> честный tp1
+    two_bars = one_bar + [(95, 96, 79, 80)]
+    res2 = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(two_bars, start="2026-01-01T00:15:00+00:00")})
+    assert [c["status"] for c in res2] == ["tp1"]
+    assert fresh_db.query_one("SELECT result_r FROM signals WHERE id=1")["result_r"] == 2.0
+
+
+def test_fill_bar_stop_still_awarded(fresh_db):
+    """Консервативность сохраняется: стоп на баре филла ПРИСУЖДАЕТСЯ (в отличие от тейка)."""
+    from app.brain import journal
+    journal.record_signal(_sig())                       # SHORT 100 / stop 110 / tp 80
+    one_bar = [(100, 111, 79, 95)]                      # entry + стоп + тейк одним баром
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(one_bar, start="2026-01-01T00:15:00+00:00")})
+    assert [c["status"] for c in res] == ["filled", "stopped"]
+    assert fresh_db.query_one("SELECT result_r FROM signals WHERE id=1")["result_r"] == -1.0
+
+
+def test_persisted_fill_bar_tp_not_awarded(fresh_db):
+    """Стрим-филл внутри бара: бар, СОДЕРЖАЩИЙ филл, тоже не присуждает тейк."""
+    from app import db
+    from app.brain import journal
+    journal.record_signal(_sig())                       # SHORT 100 / stop 110 / tp 80
+    db.execute("UPDATE signals SET filled_at=? WHERE id=1", ("2026-01-01T00:20:00+00:00",))
+    bar_with_fill = [(100, 101, 79, 95)]                # бар 00:15 содержит филл 00:20; low у тейка
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(bar_with_fill, start="2026-01-01T00:15:00+00:00")})
+    assert res == []                                    # тейк на баре филла не присуждён
+    two = bar_with_fill + [(95, 96, 79, 80)]
+    res2 = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(two, start="2026-01-01T00:15:00+00:00")})
+    assert [c["status"] for c in res2] == ["tp1"]
+
+
+def test_touch_after_window_expires(fresh_db):
+    """Аудит-2 математики [7]: касание entry ПОСЛЕ окна ожидания -> expired, не филл
+    (подписчик по контракту уже снял лимитку)."""
+    from app.brain import journal
+    journal.record_signal(_sig())                       # created 00:00, m15 -> decision 00:15
+    late = [(100, 101, 99, 100)]                        # касание, но через ~51ч после decision
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(late, start="2026-01-03T04:00:00+00:00", step_min=15)})
+    assert [c["status"] for c in res] == ["expired"]
+    row = fresh_db.query_one("SELECT status, filled_at FROM signals WHERE id=1")
+    assert row["status"] == "expired" and row["filled_at"] is None
+
+
+def test_export_deterministic_and_excludes_ttl_candidates(fresh_db):
+    """Аудит-2 математики [8][9]: порядок экспорта стабилен при равных created_at
+    (вторичный ключ id -> стабильный sha256), TTL-истёкшие кандидаты не попадают в CSV."""
+    from app.brain import journal
+    journal.record_signal(_sig(symbol="BTC/USDT:USDT"))         # id=1, created одинаковый
+    journal.record_signal(_sig(symbol="ETH/USDT:USDT"))         # id=2, created одинаковый
+    cid = journal.record_candidate(_sig(symbol="SOL/USDT:USDT"))  # кандидат (semiauto)
+    from app import db
+    db.execute("UPDATE signals SET created_at=? WHERE id=?",
+               ("2020-01-01T00:00:00+00:00", cid))
+    assert journal.expire_stale_candidates() == [cid]           # TTL истёк -> expired
+    rows = journal.export_public_trades()
+    ids = [r["id"] for r in rows]
+    assert ids == sorted(ids)                                   # стабильный порядок
+    assert cid not in ids                                       # кандидат не в публичном CSV
+    # обычный expired (был опубликован как open) — в CSV остаётся
+    db.execute("UPDATE signals SET status='expired' WHERE id=1")
+    assert 1 in [r["id"] for r in journal.export_public_trades()]
+
+
+def test_oldest_open_anchor(fresh_db):
+    """Глубина фетча поллера: MIN(COALESCE(filled_at, created_at)) нескорённых сигналов."""
+    from app import db
+    from app.brain import journal
+    assert journal.oldest_open_anchor("BTC/USDT:USDT") is None
+    journal.record_signal(_sig(created_at="2026-01-02T00:00:00+00:00"))
+    assert journal.oldest_open_anchor("BTC/USDT:USDT") == "2026-01-02T00:00:00+00:00"
+    db.execute("UPDATE signals SET filled_at=? WHERE id=1", ("2026-01-01T05:00:00+00:00",))
+    assert journal.oldest_open_anchor("BTC/USDT:USDT") == "2026-01-01T05:00:00+00:00"
+    db.execute("UPDATE signals SET status='stopped', result_r=-1.0 WHERE id=1")
+    assert journal.oldest_open_anchor("BTC/USDT:USDT") is None  # закрытые не считаются

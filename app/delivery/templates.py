@@ -297,8 +297,10 @@ def render_result(c: dict, display_leverage: float = 0.0, streak: dict | None = 
     move_line = ""
     if pct is not None:
         if display_leverage > 0:
+            # клэмп −100%: ниже позиция ликвидирована — «−120% депозита» физически невозможен
+            lev_pct = max(pct * display_leverage, -100.0)
             move_line = (f"При плече ×{display_leverage:g}: "
-                         f"<b>{pct * display_leverage:+.1f}%</b>"
+                         f"<b>{lev_pct:+.1f}%</b>"
                          f"  (движение цены {pct:+.2f}%)\n")
         else:
             move_line = f"Движение цены: {pct:+.2f}%\n"

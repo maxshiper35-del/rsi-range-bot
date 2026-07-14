@@ -96,3 +96,13 @@ def test_backtest_cli_args():
     a = parse_args(["--symbol", "ETH/USDT:USDT", "--tf", "30m", "--setups", "1:1",
                     "--ladder", "1:0.5,2.26:0.5", "--be", "1", "--time-filter"])
     assert a.tf == "30m" and a.setups == "1:1" and a.be == 1 and a.time_filter is True
+
+
+def test_max_wait_bars_single_source():
+    """Аудит-2 математики [4]: окно ожидания филла — единый источник (50ч) в барах СВОЕГО ТФ;
+    захардкоженные 50 баров на 15m давали 12.5ч против живых 50ч."""
+    from app.sim.backtest import _max_wait_bars
+    assert _max_wait_bars("1h") == 50
+    assert _max_wait_bars("m15") == 200
+    assert _max_wait_bars("15m") == 200
+    assert _max_wait_bars("4h") == 13                   # ceil(50/4)

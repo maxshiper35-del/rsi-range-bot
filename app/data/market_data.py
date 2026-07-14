@@ -25,6 +25,24 @@ def seconds_to_next_close(tf: str, now_ts: float) -> float:
     return rem if rem > 0 else float(period)
 
 
+def _scoring_limit(symbol: str, tf: str) -> int:
+    """Глубина фетча для скоринга: если у символа есть старый нескорённый сигнал (филл или
+    создание за левым краем стандартных 200 баров), обрезанное окно даёт слепые зоны —
+    пропущенный стоп в дыре флипал бы исход (аудит-2 математики [5]). -> [200..1000]."""
+    from datetime import datetime, timezone
+
+    from app.brain.journal import oldest_open_anchor
+    try:
+        anchor = oldest_open_anchor(symbol)
+        if not anchor:
+            return 200
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(anchor)).total_seconds()
+        need = int(age / _TF_SECONDS.get(tf, 3600)) + 80    # запас на окно ожидания/лаг
+        return min(1000, max(200, need))
+    except Exception:                                       # noqa: BLE001 — глубина не роняет цикл
+        return 200
+
+
 def poll_once(symbols: list, timeframes: list, engine=None,
               frames_loader: Callable | None = None, pause_sec: float = 0.0,
               mode: str | None = None) -> tuple[list, list]:
@@ -44,7 +62,11 @@ def poll_once(symbols: list, timeframes: list, engine=None,
     scan = scan_auto if mode == "auto" else scan_semiauto
 
     log = get_logger("poller")
-    loader = frames_loader or load_frames
+    base_tf = min(timeframes, key=lambda t: SMCEngine.TF_MINUTES.get(t, 10 ** 9))
+    # дефолтный загрузчик углубляет фетч под старые нескорённые сигналы символа;
+    # инъектированный (тесты) сохраняет двухаргументный контракт (symbol, tfs)
+    loader = frames_loader or (
+        lambda s, tfs_: load_frames(s, tfs_, limit=_scoring_limit(s, base_tf)))
     engine = engine or SMCEngine()
     import time as _time
 
@@ -66,7 +88,6 @@ def poll_once(symbols: list, timeframes: list, engine=None,
     # барами, иначе сигнал висит open вечно и публичная статистика недосчитывает
     # закрытых сделок. Только СКОРИНГ (никакого scan) — новые сигналы по ним не ищем.
     from app.brain.journal import symbols_with_open_positions
-    base_tf = min(timeframes, key=lambda t: SMCEngine.TF_MINUTES.get(t, 10 ** 9))
     for symbol in symbols_with_open_positions():
         if symbol in bars_by_symbol:
             continue

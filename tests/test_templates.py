@@ -159,3 +159,10 @@ def test_render_notify_states():
     assert "выключены" in muted
     quiet = templates.render_notify({"muted": False, "quiet_start": 22, "quiet_end": 6})
     assert "22:00–06:00 UTC" in quiet
+
+
+def test_render_result_leverage_clamped_at_liquidation():
+    """Аудит-2 математики [10]: «−120% депозита» физически невозможен — клэмп на −100%."""
+    txt = templates.render_result(
+        _closed(status="stopped", result_r=-1.0, price_move_pct=-3.0), display_leverage=40.0)
+    assert "-100.0%" in txt and "-120" not in txt

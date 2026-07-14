@@ -14,7 +14,6 @@ backtest.py — офлайн-прогон SMC-движка на истории �
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 import pandas as pd
 
@@ -82,7 +81,7 @@ def _cost_r(entry: float, stop: float, fee_pct: float, slippage_pct: float) -> f
 
 
 def _simulate_open(df: pd.DataFrame, side: Side, entry: float, stop: float,
-                   tranches: list, fill_index: int, move_be_after: Optional[int],
+                   tranches: list, fill_index: int, move_be_after: int | None,
                    fee_pct: float, slippage_pct: float, funding_bps: float):
     """Симуляция позиции от fill до выхода. -> (outcome, result_r, mfe, mae, exit_index) | None."""
     high = df["high"].to_numpy()
@@ -99,7 +98,8 @@ def _simulate_open(df: pd.DataFrame, side: Side, entry: float, stop: float,
 
     def close_out(outcome, exit_i):
         bars = max(exit_i - fill_index, 0)
-        cost = _cost_r(entry, stop, fee_pct, slippage_pct) + funding_bps / 10000.0 * entry / risk * bars
+        cost = (_cost_r(entry, stop, fee_pct, slippage_pct)
+                + funding_bps / 10000.0 * entry / risk * bars)
         return outcome, realized - cost, mfe, mae, exit_i
 
     for i in range(fill_index + 1, n):
@@ -136,14 +136,28 @@ def _simulate_open(df: pd.DataFrame, side: Side, entry: float, stop: float,
     return None
 
 
+def _max_wait_bars(timeframe: str) -> int:
+    """Окно ожидания филла В БАРАХ своего ТФ из ЕДИНОГО источника (journal.MAX_WAIT_HOURS).
+    Захардкоженные 50 баров на 15m давали 12.5ч против живых 50ч — исследовательские
+    прогоны молча воспроизводили инцидент 2026-07-13 (аудит-2 математики [4])."""
+    from math import ceil
+
+    from app.brain.journal import MAX_WAIT_HOURS
+    from app.brain.smc_setups import SMCEngine
+    return ceil(MAX_WAIT_HOURS * 60 / SMCEngine.TF_MINUTES.get(timeframe, 60))
+
+
 def run_backtest(df: pd.DataFrame, symbol: str, timeframe: str = "m15",
-                 engine: Optional[SMCEngine] = None, cfg: Optional[SMCConfig] = None,
-                 window: int = 300, min_bars: int = 20, max_wait: int = 50,
+                 engine: SMCEngine | None = None, cfg: SMCConfig | None = None,
+                 window: int = 300, min_bars: int = 20, max_wait: int | None = None,
                  fee_pct: float = 0.055, slippage_pct: float = 0.02,
-                 tp_ladder: Optional[list] = None, move_be_after: Optional[int] = None,
+                 tp_ladder: list | None = None, move_be_after: int | None = None,
                  funding_bps_per_bar: float = 0.0) -> BacktestReport:
     """tp_ladder: список (R_множитель, доля), напр. [(1.0,0.5),(2.0,0.3),(3.0,0.2)].
-    None -> один тейк = take_profits[0] с result = risk_reward (совместимо со старым поведением)."""
+    None -> один тейк = take_profits[0] с result = risk_reward (совместимо со старым поведением).
+    max_wait: None -> journal.MAX_WAIT_HOURS в барах ЭТОГО ТФ (единое окно с живым судьёй)."""
+    if max_wait is None:
+        max_wait = _max_wait_bars(timeframe)
     engine = engine or SMCEngine(cfg or SMCConfig(use_time_filter=False))
     high = df["high"].to_numpy()
     low = df["low"].to_numpy()
@@ -165,7 +179,8 @@ def run_backtest(df: pd.DataFrame, symbol: str, timeframe: str = "m15",
             tranches = [{"level": sig.entry + sgn * rm * risk, "r": rm, "frac": fr, "done": False}
                         for rm, fr in tp_ladder]
         else:
-            tranches = [{"level": sig.take_profits[0], "r": sig.risk_reward, "frac": 1.0, "done": False}]
+            tranches = [{"level": sig.take_profits[0], "r": sig.risk_reward,
+                         "frac": 1.0, "done": False}]
 
         filled_at = next((j for j in range(i + 1, min(n, i + 1 + max_wait))
                           if low[j] <= sig.entry <= high[j]), None)

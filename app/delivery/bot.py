@@ -2362,8 +2362,14 @@ def main() -> None:
 
         bars = int(3 * 30.44 * 86400 / _TF_SECONDS["1h"])
         df = fetch_history(symbol, "1h", target_bars=bars)
-        rep = run_backtest(df, symbol, "1h",
-                           cfg=SMCConfig(use_time_filter=False,
+        # ПАРИТЕТ с живым движком (аудит-2 математики [3]): гейт мерил другую стратегию —
+        # тайм-фильтр выключен (в проде дефолт ВКЛ), рантайм-пороги не передавались,
+        # окно 300 вместо живых 200 баров. Порог допуска должен мериться на той же
+        # популяции сигналов, которой символ будет реально торговаться.
+        rep = run_backtest(df, symbol, "1h", window=200,
+                           cfg=SMCConfig(min_confidence=runtime.min_confidence(),
+                                         min_impulse_atr=runtime.min_impulse_atr(),
+                                         min_rr_open_model=runtime.min_rr_open_model(),
                                          enabled_setups=tuple(runtime.enabled_setups())))
         return (watchlist_gate_decision(rep.expectancy_r, rep.trades),
                 rep.expectancy_r, rep.trades)

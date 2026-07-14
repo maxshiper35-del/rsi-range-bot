@@ -15,6 +15,11 @@ from app.core.signal_engine import Side, Signal
 
 _TP_COLS = ("tp1", "tp2", "tp3")
 
+# Окно ожидания исполнения лимитки — В ЧАСАХ, не барах: смена ТФ скоринга не должна менять
+# окно (инцидент 2026-07-13). ЕДИНЫЙ источник для живого судьи и бэктеста (backtest.py
+# конвертирует в бары своего ТФ) — расхождение живого и исследовательского окна = drift.
+MAX_WAIT_HOURS = 50.0
+
 
 def unfilled_open_signals(symbol: str) -> list:
     """Открытые сигналы символа без зафиксированного филла (для реалтайм-стрима)."""
@@ -105,13 +110,19 @@ def find_duplicate_setup(signal: Signal) -> int | None:
     ДРЕЙФУЕТ каждый бар. Дедуп по точному (entry,stop) промахивался на тренде и плодил
     дубли открытых сигналов -> раздувал число сделок и искажал винрейт (аудит [2]).
     Дедупим по (symbol, timeframe, side, stop, setup) среди не-expired — стоп устойчив
-    к дрейфу входа. Тег сетапа сверяем в Python (не json_extract) ради переносимости.
+    к дрейфу входа. ПЛЮС: пока АКТИВЕН сигнал того же (symbol, tf, side, setup), новый не
+    создаётся ДАЖЕ с другим стопом — якорь S сам дрейфует к новым подтверждённым свингам
+    того же движения, и точный матч по стопу пропускал каскады дублей (аудит-2 стратегии
+    [3]: 4×6226 на WLD одним движением; 5×LTF-BB на BTC в день −3R). Закрытый/истёкший
+    сигнал не блокирует честный повторный сетап позже.
+    Тег сетапа сверяем в Python (не json_extract) ради переносимости.
     """
     setup = signal.indicators_snapshot.get("setup", "") \
         if isinstance(signal.indicators_snapshot, dict) else ""
     rows = db.query(
         "SELECT id, snapshot_json FROM signals WHERE symbol=? AND timeframe=? AND side=? "
-        "AND stop=? AND status != 'expired' ORDER BY id DESC",
+        "AND ((stop=? AND status != 'expired') "
+        "OR (status IN ('open','candidate') AND result_r IS NULL)) ORDER BY id DESC",
         (signal.symbol, signal.timeframe, signal.side.value, signal.stop))
     for r in rows:
         if _setup_of(r) == setup:
@@ -190,11 +201,32 @@ def record_ledger_hash(row_count: int, sha256: str) -> None:
 def export_public_trades() -> list:
     """Полный публичный журнал для /trackrecord и еженедельного экспорта: и открытые, и
     закрытые сигналы, БЕЗ candidate/rejected (это отдельный когортный эксперимент /report,
-    не публичный трек-рекорд — сознательно другая выборка, чтобы не путать читателя CSV)."""
+    не публичный трек-рекорд — сознательно другая выборка, чтобы не путать читателя CSV).
+
+    Исключаются и TTL-истёкшие кандидаты (status='expired', но никогда не подтверждались
+    и не публиковались — аудит-2 математики [8]). ORDER BY created_at, id: у created_at
+    массовые совпадения (один бар), без вторичного ключа порядок строк при равных ключах
+    не гарантирован SQLite — два экспорта одинаковых данных могли бы дать разные sha256."""
     return db.query(
         "SELECT id, symbol, side, timeframe, entry, stop, tp1, tp2, tp3, status, result_r, "
         "created_at, closed_at FROM signals WHERE status NOT IN ('candidate','rejected') "
-        "ORDER BY created_at")
+        "AND NOT (status='expired' "
+        "AND EXISTS (SELECT 1 FROM signal_events e WHERE e.signal_id = signals.id "
+        "AND e.event = 'candidate') "
+        "AND NOT EXISTS (SELECT 1 FROM signal_events c WHERE c.signal_id = signals.id "
+        "AND c.event = 'confirmed')) "
+        "ORDER BY created_at, id")
+
+
+def oldest_open_anchor(symbol: str) -> str | None:
+    """Самая старая точка (филл или создание) нескорённых сигналов символа — поллер по ней
+    выбирает ГЛУБИНУ фетча баров: обрезанное окно даёт слепые зоны, где пропущенный стоп
+    флипает исход (аудит-2 математики [5]). -> ISO | None (нет нескорённых)."""
+    row = db.query_one(
+        "SELECT MIN(COALESCE(filled_at, created_at)) AS a FROM signals WHERE symbol=? "
+        "AND ((status='open' AND result_r IS NULL) "
+        "OR (status='rejected' AND result_r IS NULL AND closed_at IS NULL))", (symbol,))
+    return row["a"] if row else None
 
 
 def _outcome_for(row, price: float):
@@ -260,21 +292,22 @@ def update_outcomes(latest_prices: dict[str, float]) -> int:
 
 
 def _outcome_from_bars(row, df) -> tuple | None:
-    """Исход по ХРОНОЛОГИИ закрытых баров после created_at (честный скоринг).
+    """Исход по ХРОНОЛОГИИ закрытых баров ПОСЛЕ ЗАКРЫТИЯ решающего бара (честный скоринг).
 
     Фазы: (1) ждём касания entry (лимитный вход, low<=entry<=high) — без fill сделки НЕТ;
-    (2) после fill: стоп и тейк проверяются по high/low каждого бара, при касании обоих
-    в одном баре — консервативно СТОП. Если fill не случился за MAX_WAIT_HOURS -> 'expired'.
+    просрочка окна MAX_WAIT_HOURS проверяется ДО касания (тач после окна — ордер уже снят).
+    (2) после fill: стоп и тейк по high/low каждого бара; оба в одном баре — консервативно
+    СТОП; на САМОМ баре филла тейк НЕ присуждается (high/low не говорят, была ли цена у
+    тейка ДО или ПОСЛЕ исполнения лимитки — ретрейсный лимит почти всегда касается
+    тейк-стороны до филла; аудит-2 математики [2]), стоп на баре филла — присуждается.
     -> (status, event, result_r|None, exit_price|None, fill_dt_iso|None)
-       | None (ждём fill, баров мало). status='open' — вход исполнен, развязки ещё нет.
+       | None (ждём fill / баров мало / окно не покрывает филл).
+       status='open' — вход исполнен, развязки ещё нет.
     """
     import pandas as pd
 
-    # окно ожидания филла — В ЧАСАХ, не в барах: иначе смена ТФ скоринга меняет окно и
-    # ложно истекает уже исполненные/свежие сигналы (инцидент 2026-07-13 при включении
-    # 15m — filled-сигналы с филлом позже 12.5ч помечались expired, противореча посту
-    # «вход исполнен»). 50ч ≈ прежние 50 баров на 1h — для 1h поведение не меняется.
-    max_wait_h = 50.0
+    from app.brain.smc_setups import SMCEngine
+
     entry, stop, side = row["entry"], row["stop"], row["side"]
     risk = abs(entry - stop)
     if risk <= 0 or "dt" not in df.columns:
@@ -282,23 +315,33 @@ def _outcome_from_bars(row, df) -> tuple | None:
     tps = [(c, row[c]) for c in _TP_COLS if row[c] is not None]
     dts = pd.to_datetime(df["dt"], utc=True)
     created = pd.to_datetime(row["created_at"], utc=True)
+    # created_at хранит ОТКРЫТИЕ решающего бара (метка ccxt); сигнал реально существует с
+    # его ЗАКРЫТИЯ. Скоринг идёт барами МЛАДШЕГО ТФ конфигурации — старый фильтр по created
+    # впускал бары ИЗНУТРИ решающего бара старшего ТФ: филл/исход из цены, которую детектор
+    # уже видел (ЛУКАХЕД; живой пример #126 — 4h-сигнал «исполнился» за 1ч45м до своего
+    # рождения и ушёл в −1R в публичный журнал). Старт — строго с закрытия решающего бара.
+    decision = created + pd.Timedelta(minutes=SMCEngine.TF_MINUTES.get(row["timeframe"], 60))
 
+    tp_block_dt = None                               # dt бара филла: тейк на нём не присуждаем
     # если филл УЖЕ зафиксирован ранее (bar-скоринг или реалтайм-стрим) — НЕ перевыводим
-    # его и НИКОГДА не истекаем: сдвиг окна баров за created_at (долгоживущая позиция,
-    # фиксированная глубина фетча) иначе ложно пометил бы живую исполненную сделку как
-    # expired (аудит 2026-07-13, находка [1]). Официальный исход всё равно bar-based —
-    # доскориваем стоп/тейк с бара, СОДЕРЖАЩЕГО филл (стрим даёт внутрибарный ts).
+    # его и НИКОГДА не истекаем (аудит 2026-07-13 [1]). Доскориваем с бара, СОДЕРЖАЩЕГО филл.
     persisted_fill = row["filled_at"] if "filled_at" in row.keys() else None
     if persisted_fill is not None:
         filled = True
         fill_dt = persisted_fill
         fill_ts = pd.to_datetime(persisted_fill, utc=True)
         at_or_before = dts[dts <= fill_ts]
-        bars = df.loc[dts >= at_or_before.iloc[-1]] if not at_or_before.empty else df
+        if at_or_before.empty:
+            # окно баров НЕ покрывает филл: скоринг по обрезку пропустил бы стоп в дыре и
+            # мог флипнуть исход (аудит-2 [5]) — ждём, поллер добирает глубину фетча
+            return None
+        bars = df.loc[dts >= at_or_before.iloc[-1]]
+        if not bars.empty:
+            tp_block_dt = pd.to_datetime(bars.iloc[0]["dt"], utc=True)
     else:
         filled = False
         fill_dt = None
-        bars = df.loc[dts > created]
+        bars = df.loc[dts >= decision]
     if bars.empty:
         return None
 
@@ -306,22 +349,23 @@ def _outcome_from_bars(row, df) -> tuple | None:
         hi, lo = float(b["high"]), float(b["low"])
         bar_dt = pd.to_datetime(b["dt"], utc=True)
         if not filled:
-            if lo <= entry <= hi:
-                filled = True                        # вход исполнен; стоп/тейк — с этого же бара
-                fill_dt = bar_dt.isoformat()
-            elif (bar_dt - created).total_seconds() > max_wait_h * 3600:
-                # лимитка не исполнилась за окно — сделки не было
+            if (bar_dt - decision).total_seconds() > MAX_WAIT_HOURS * 3600:
+                # лимитка не исполнилась за окно — сделки не было (тач ПОСЛЕ окна не в счёт:
+                # подписчик, следующий контракту, уже снял ордер — аудит-2 математики [7])
                 return ("expired", "expired", None, None, None)
-            else:
+            if not (lo <= entry <= hi):
                 continue
+            filled = True                            # вход исполнен на ЭТОМ баре
+            fill_dt = bar_dt.isoformat()
+            tp_block_dt = bar_dt
         if side == "LONG":
             if lo <= stop:
                 return ("stopped", "stopped", -1.0, stop, fill_dt)  # стоп-первым (консервативно)
-            hit = [(c, tp) for c, tp in tps if hi >= tp]
+            hit = [] if bar_dt == tp_block_dt else [(c, tp) for c, tp in tps if hi >= tp]
         else:
             if hi >= stop:
                 return ("stopped", "stopped", -1.0, stop, fill_dt)
-            hit = [(c, tp) for c, tp in tps if lo <= tp]
+            hit = [] if bar_dt == tp_block_dt else [(c, tp) for c, tp in tps if lo <= tp]
         if hit:
             col, tp = hit[-1]                        # лучший достигнутый в этом баре тейк
             r = (tp - entry) / risk if side == "LONG" else (entry - tp) / risk
@@ -374,13 +418,17 @@ def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
         base = {"id": row["id"], "symbol": row["symbol"], "side": row["side"],
                 "timeframe": row["timeframe"], "shadow": shadow,
                 "setup": _setup_of(row), "entry": row["entry"], "filled_at": fill_dt}
-        # первый раз увидели исполнение лимитки — персистим; уведомление — не для теней
+        # первый раз увидели исполнение лимитки — персистим; уведомление — не для теней.
+        # Гейт по rowcount: если реалтайм-стрим успел проставить filled_at между нашим
+        # SELECT и этим UPDATE, событие «вход исполнен» уже ушло из стрима — второй пост
+        # в канал был бы дублем (аудит-2 математики [6] / UX [9])
         if fill_dt is not None and row["filled_at"] is None:
             with db.transaction() as conn:
-                conn.execute("UPDATE signals SET filled_at=?, updated_at=? "
-                             "WHERE id=? AND filled_at IS NULL",
-                             (fill_dt, now, row["id"]))
-            if not shadow:
+                cur = conn.execute("UPDATE signals SET filled_at=?, updated_at=? "
+                                   "WHERE id=? AND filled_at IS NULL",
+                                   (fill_dt, now, row["id"]))
+                fill_won = cur.rowcount == 1
+            if fill_won and not shadow:
                 closed.append({**base, "status": "filled", "result_r": None,
                                "exit_price": None, "price_move_pct": None})
         if status == "open":
@@ -395,7 +443,7 @@ def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
                 "INSERT INTO signal_events(signal_id, event, price, r_at_event, created_at) "
                 "VALUES (?,?,?,?,?)",
                 (row["id"], ("shadow" if event != "expired" else "expired") if shadow else event,
-                 None, r_val, now),
+                 exit_price, r_val, now),                # цена выхода — полный аудит-след
             )
         closed.append({**base, "status": status, "result_r": r_val, "exit_price": exit_price,
                        "price_move_pct": _price_move_pct(row["side"], row["entry"], exit_price)})

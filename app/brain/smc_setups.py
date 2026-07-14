@@ -315,11 +315,12 @@ def detect_setup_1_1(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = None
 # ---------------------------------------------------------------------------
 # §2.2 LTF-модель по POI (вход от OB/BB после слома)
 # ---------------------------------------------------------------------------
-def build_ltf_poi(htf_df: pd.DataFrame, ltf_df: pd.DataFrame, symbol: str,
+def build_ltf_poi(htf_df: pd.DataFrame | None, ltf_df: pd.DataFrame, symbol: str,
                   cfg: SMCConfig | None = None, timeframe: str = "m5") -> Signal | None:
     """Слом LTF -> откат в OB/BB -> вход от MT(50%), стоп за дальнюю границу блока.
 
     HTF-тренд идёт как усилитель bias (совпадение направления += confidence).
+    htf_df=None (старший ТФ набора) — нейтральный bias и честная причина без «HTF».
     """
     cfg = cfg or SMCConfig()
     imp = _find_impulse(ltf_df, cfg)
@@ -345,11 +346,20 @@ def build_ltf_poi(htf_df: pd.DataFrame, ltf_df: pd.DataFrame, symbol: str,
             return None
         take = entry + rr * risk
 
-    htf_sw = det.find_swings(htf_df, cfg.swing_left, cfg.swing_right)
-    htf_trend = det.market_structure(htf_df, htf_sw)
-    aligned = ((htf_trend == Bias.BEAR and imp.side == Side.SHORT)
-               or (htf_trend == Bias.BULL and imp.side == Side.LONG))
-    bias = 0.75 if aligned else 0.5
+    if htf_df is None:
+        # старший ТФ набора: HTF-контекста НЕТ. Раньше сюда передавали тот же frame — bias
+        # 0.75 просто повторял собственный слом, а причина врала про «контекст HTF»
+        # (аудит-2 стратегии [6]). Честно: нейтральный bias, честная причина.
+        aligned = False
+        bias = 0.5
+        ctx_reason = "без HTF-контекста (старший ТФ набора)"
+    else:
+        htf_sw = det.find_swings(htf_df, cfg.swing_left, cfg.swing_right)
+        htf_trend = det.market_structure(htf_df, htf_sw)
+        aligned = ((htf_trend == Bias.BEAR and imp.side == Side.SHORT)
+                   or (htf_trend == Bias.BULL and imp.side == Side.LONG))
+        bias = 0.75 if aligned else 0.5
+        ctx_reason = "контекст/POI HTF" + (" (совпадает с трендом)" if aligned else "")
     trigger = 1.0 if imp.brk.body_confirmed else 0.0
     sweep = 1.0 if imp.swept else 0.5
     confl, cf_reasons = _confluence_score(ltf_df, entry, imp.side, cfg, imp.swings, imp.clean, None)
@@ -358,7 +368,7 @@ def build_ltf_poi(htf_df: pd.DataFrame, ltf_df: pd.DataFrame, symbol: str,
         return None
 
     reasons = [
-        "контекст/POI HTF" + (" (совпадает с трендом)" if aligned else ""),
+        ctx_reason,
         f"слом LTF {imp.brk.kind}",
         f"вход от {block.kind} (MT 50%), стоп за дальнюю границу блока",
     ] + cf_reasons
@@ -475,7 +485,8 @@ class SMCEngine:
     # длительность ТФ в минутах — для fallback-выбора самого младшего как входного
     TF_MINUTES = {"m1": 1, "1m": 1, "m3": 3, "3m": 3, "m5": 5, "5m": 5, "M5": 5,
                   "m15": 15, "15m": 15, "M15": 15, "m30": 30, "30m": 30,
-                  "1h": 60, "H1": 60, "h1": 60, "4h": 240, "H4": 240, "h4": 240,
+                  "1h": 60, "H1": 60, "h1": 60, "2h": 120, "h2": 120, "H2": 120,
+                  "4h": 240, "H4": 240, "h4": 240, "6h": 360, "12h": 720,
                   "1d": 1440, "D1": 1440, "d1": 1440}
 
     def __init__(self, config: SMCConfig | None = None):
@@ -498,8 +509,9 @@ class SMCEngine:
         if self._setup_enabled("open-SMC"):
             candidates.append(build_opening_model(df, symbol, self.cfg, timeframe, "SMC", htf_df))
         if self._setup_enabled("LTF"):
-            candidates.append(build_ltf_poi(htf_df if htf_df is not None else df, df,
-                                            symbol, self.cfg, timeframe))
+            # htf_df=None на старшем ТФ передаётся КАК ЕСТЬ: подстановка df вместо HTF
+            # выдавала «контекст HTF» из самого же frame (аудит-2 стратегии [6])
+            candidates.append(build_ltf_poi(htf_df, df, symbol, self.cfg, timeframe))
         # страховочный фильтр по фактическому тегу из snapshot
         signals = [c for c in candidates if c is not None]
         signals = [c for c in signals
