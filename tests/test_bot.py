@@ -765,3 +765,11 @@ def test_format_terms_covers_key_sections():
     assert "никогда не пишем первыми в личку" in txt
     assert "храним минимум" in txt.lower()
     assert "не юридическая" in txt.lower()          # честная оговорка про черновик
+
+
+def test_lifecycle_chart_wanted():
+    # карта на посте цикла сделки — только когда флаг ВКЛ И канал в full (teaser прячет уровни)
+    assert bot.lifecycle_chart_wanted(True, "full") is True
+    assert bot.lifecycle_chart_wanted(True, "teaser") is False   # teaser не раскрывает уровни
+    assert bot.lifecycle_chart_wanted(False, "full") is False    # флаг выключен
+    assert bot.lifecycle_chart_wanted(False, "teaser") is False

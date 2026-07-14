@@ -140,6 +140,14 @@ def test_signal_chart_enabled_flag(fresh_db):
     assert runtime.effective()["signal_chart_enabled"] is True
 
 
+def test_lifecycle_chart_enabled_flag(fresh_db):
+    from app import runtime
+    assert runtime.lifecycle_chart_enabled() is True    # дефолт ВКЛ (просили график на филле/тейке)
+    runtime.set_value("lifecycle_chart_enabled", "0")
+    assert runtime.lifecycle_chart_enabled() is False
+    assert runtime.effective()["lifecycle_chart_enabled"] is False
+
+
 def test_intro_tier(fresh_db):
     from app import runtime
     assert runtime.intro_price_stars() == 10            # дефолт: пробный 10⭐/5ч

@@ -332,6 +332,15 @@ def signal_chart_enabled() -> bool:
     return (_raw("signal_chart_enabled") or "0").lower() in _TRUE
 
 
+def lifecycle_chart_enabled() -> bool:
+    """Прикладывать ли PNG-карту к постам ЖИЗНЕННОГО ЦИКЛА сделки — «вход исполнен» и
+    результат (тейк/стоп). Отдельный от signal_chart флаг: карта сигнала показывает сетап,
+    а эти — как отработало. Дефолт ВКЛ (пользователь просил график на филле/тейке); рендерим
+    только в full-режиме канала (в teaser карта раскрыла бы скрытые уровни). Сбой рендера —
+    откат на текст, пост не теряется."""
+    return (_raw("lifecycle_chart_enabled") or "1").lower() in _TRUE
+
+
 def display_leverage() -> float:
     """Плечо для ИЛЛЮСТРАЦИИ результата в постах канала (×N; 0 — строка выключена).
     Реального плеча бот не знает — сделки не исполняет, каждый выбирает своё;
@@ -365,6 +374,7 @@ def effective() -> dict:
         "trial_days": trial_days(),
         "display_leverage": display_leverage(),
         "signal_chart_enabled": signal_chart_enabled(),
+        "lifecycle_chart_enabled": lifecycle_chart_enabled(),
         "intro_price_stars": intro_price_stars(),
         "intro_hours": intro_hours(),
         "paid_signal_stars": paid_signal_stars(),

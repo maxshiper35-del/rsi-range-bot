@@ -560,6 +560,12 @@ def build_signal_chart_data(sig: Signal, sid: int, df: pd.DataFrame,
     }
 
 
+def lifecycle_chart_wanted(chart_enabled: bool, channel_mode: str) -> bool:
+    """Рисовать ли карту на посте цикла сделки (филл/результат): флаг ВКЛ И канал в full —
+    в teaser карта раскрыла бы скрытые уровни входа/стопа/тейков. Чистая функция для тестов."""
+    return chart_enabled and channel_mode == "full"
+
+
 def should_refresh_board(last_update: str | None, now_iso: str, hours: int = 24) -> bool:
     """Пора ли обновлять живое табло: нет прошлого обновления ИЛИ прошло >= hours."""
     if last_update is None:
@@ -1698,6 +1704,8 @@ def main() -> None:
                else "🖼 График сигнала: выкл", callback_data="adm_charttoggle"),
              b(text="⚡️ Стрим: вкл" if eff["stream_enabled"] else "⚡️ Стрим: выкл",
                callback_data="adm_streamtoggle")],
+            [b(text="📈 График филл/тейк: вкл" if eff["lifecycle_chart_enabled"]
+               else "📈 График филл/тейк: выкл", callback_data="adm_lifechartoggle")],
             [b(text="⚙️ Стратегия", callback_data="adm_nav_strategy"),
              b(text="💰 Цены", callback_data="adm_nav_prices")],
             [b(text="📈 Символы", callback_data="adm_nav_symbols")],
@@ -2203,6 +2211,9 @@ def main() -> None:
         elif data == "adm_charttoggle":
             await asyncio.to_thread(runtime.set_value, "signal_chart_enabled",
                                     "0" if runtime.signal_chart_enabled() else "1")
+        elif data == "adm_lifechartoggle":
+            await asyncio.to_thread(runtime.set_value, "lifecycle_chart_enabled",
+                                    "0" if runtime.lifecycle_chart_enabled() else "1")
         elif data == "adm_streamtoggle":
             await asyncio.to_thread(runtime.set_value, "stream_enabled",
                                     "0" if runtime.stream_enabled() else "1")
@@ -2297,6 +2308,32 @@ def main() -> None:
         data = build_signal_chart_data(
             sig, sid, df, datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC"))
         return graphics.render_signal_chart(data)
+
+    def _chart_for_id(sid):
+        # синхронно (DB + ccxt + Playwright) — только через asyncio.to_thread. Достаём сигнал
+        # по id и рисуем ту же карту (свечи + зоны вход/стоп/тейки); свежие бары уже включают
+        # развязку сделки. None -> сигнал не найден (у вызывающего откат на текст).
+        row = journal.signal_row(sid)
+        if row is None:
+            return None
+        return _signal_chart_png(journal.row_to_signal(row), sid)
+
+    async def _send_lifecycle_post(channel, sid, text, want_chart):
+        """Пост цикла сделки (филл/результат) с картой, если want_chart. Любой сбой рендера
+        /биржи -> откат на чистый текст (карта не критична, пост не теряется). -> Message."""
+        photo = None
+        if want_chart:
+            try:
+                photo = await asyncio.to_thread(_chart_for_id, sid)
+            except Exception as e:                     # noqa: BLE001 — биржа/рендер
+                log.warning("карта поста #%s: %s", sid, e)
+        if photo is None:
+            return await bot.send_message(channel, text, parse_mode="HTML")
+        file = BufferedInputFile(photo, filename=f"signal_{sid}.png")
+        if caption_fits(text):
+            return await bot.send_photo(channel, file, caption=text, parse_mode="HTML")
+        await bot.send_photo(channel, file)            # подпись не влезла — фото отдельно
+        return await bot.send_message(channel, text, parse_mode="HTML")
 
     def _watchlist_gate(symbol: str) -> tuple:
         # бэктест-гейт кандидата в авто-watchlist: 3 мес 1h на включённых сетапах
@@ -2701,18 +2738,23 @@ def main() -> None:
                     # если сделка не закрылась этим же тиком — результат сам скажет, что вход был
                     if c["id"] in resolved_ids or not fill_is_fresh(c, now_dt):
                         continue
-                    msg = await bot.send_message(channel, templates.render_fill(c, show_price),
-                                                 parse_mode="HTML")
+                    want_chart = lifecycle_chart_wanted(
+                        runtime.lifecycle_chart_enabled(), runtime.channel_mode())
+                    msg = await _send_lifecycle_post(
+                        channel, c["id"], templates.render_fill(c, show_price), want_chart)
                     log.info("сигнал #%s: пост filled OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] == "expired":
                     msg = await bot.send_message(channel, templates.render_expired(c),
                                                  parse_mode="HTML")
                     log.info("сигнал #%s: пост expired OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] in ("tp1", "tp2", "tp3", "stopped"):
-                    msg = await bot.send_message(
-                        channel, templates.render_result(
-                            c, runtime.display_leverage(), streak=journal.recent_streak(10)),
-                        parse_mode="HTML")
+                    want_chart = lifecycle_chart_wanted(
+                        runtime.lifecycle_chart_enabled(), runtime.channel_mode())
+                    msg = await _send_lifecycle_post(
+                        channel, c["id"],
+                        templates.render_result(c, runtime.display_leverage(),
+                                                streak=journal.recent_streak(10)),
+                        want_chart)
                     log.info("сигнал #%s: пост result(%s) OK (msg_id=%s)",
                              c["id"], c["status"], msg.message_id)
             except Exception as e:                     # noqa: BLE001
@@ -2770,10 +2812,11 @@ def main() -> None:
                      "timeframe": row["timeframe"], "status": "filled",
                      "entry": row["entry"], "filled_at": now_iso}
                 try:
-                    msg = await bot.send_message(
-                        channel,
-                        templates.render_fill(c, runtime.channel_mode() == "full"),
-                        parse_mode="HTML")
+                    want_chart = lifecycle_chart_wanted(
+                        runtime.lifecycle_chart_enabled(), runtime.channel_mode())
+                    msg = await _send_lifecycle_post(
+                        channel, row["id"],
+                        templates.render_fill(c, runtime.channel_mode() == "full"), want_chart)
                     log.info("сигнал #%s: пост filled OK (msg_id=%s, realtime)",
                              row["id"], msg.message_id)
                 except Exception as e:                 # noqa: BLE001
