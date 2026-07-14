@@ -33,15 +33,33 @@ def scan_frames(symbol: str, frames: dict[str, pd.DataFrame], engine: SMCEngine,
     return sig
 
 
+def _side_capacity_ok(side_value: str, symbol: str) -> bool:
+    """Портфельный лимит направления: 9 коррелированных монет × ТФ × сетапы без лимита
+    набирали 15+ однонаправленных позиций = одна ставка с риском 15R (день −12.7R,
+    14.07.2026). Считаем ВСЕ активные open (ждущие лимитки тоже несут риск). 0 = выкл."""
+    from app import runtime
+    from app.logging_conf import get_logger
+
+    cap = runtime.max_open_per_side()
+    if cap <= 0 or journal.open_side_counts().get(side_value, 0) < cap:
+        return True
+    get_logger("scan").info("лимит направления: %s %s пропущен (max_open_per_side=%d)",
+                            side_value, symbol, cap)
+    return False
+
+
 def scan_auto(symbol: str, frames: dict[str, pd.DataFrame],
               engine: SMCEngine) -> list[tuple]:
     """Авто-режим: сетапы на КАЖДОМ входном ТФ -> сразу АКТИВНЫЕ сигналы (status=open).
 
     Возвращает список (Signal, signal_id) — по одному на входной ТФ (15m/1h/4h), где
-    есть сетап. Пустой список — сетапов нет или все дубли (тот же импульс на баре)."""
+    есть сетап. Пустой список — сетапов нет, все дубли, или сторона упёрлась в
+    портфельный лимит (max_open_per_side)."""
     out = []
     for sig in engine.analyze_multi(frames, symbol):
         if journal.find_duplicate_setup(sig) is not None:
+            continue
+        if not _side_capacity_ok(sig.side.value, symbol):
             continue
         sid = journal.record_signal(sig)
         out.append((sig, sid))
@@ -54,11 +72,13 @@ def scan_semiauto(symbol: str, frames: dict[str, pd.DataFrame],
 
     Возвращает список (Signal, signal_id) — оператор подтверждает/отклоняет контекст.
     Пустой список — сетапов нет ЛИБО все уже записаны (дедуп: не спамим оператора тем
-    же импульсом на каждом баре).
+    же импульсом на каждом баре), либо лимит направления.
     """
     out = []
     for sig in engine.analyze_multi(frames, symbol):
         if journal.find_duplicate_setup(sig) is not None:
+            continue
+        if not _side_capacity_ok(sig.side.value, symbol):
             continue
         sid = journal.record_candidate(sig)
         out.append((sig, sid))
@@ -92,12 +112,32 @@ def scan_watchlist(symbols: list[str], engine: SMCEngine | None = None,
 # ---------------------------------------------------------------------------
 # Рендер команд
 # ---------------------------------------------------------------------------
-def format_stats(st: dict) -> str:
-    """Текст /stats из journal.stats()."""
+def format_stats(st: dict, epoch_st: dict | None = None,
+                 epoch_label: str | None = None) -> str:
+    """Текст /stats из journal.stats(). epoch_st/epoch_label — блок «новый код»
+    (journal.stats_since_created от runtime.strategy_epoch): легаси-бэклог не
+    смешивается с оценкой обновлённой стратегии."""
     if st["trades"] == 0:
         return ("📊 Статистика пока пустая — сделки ещё не закрывались.\n"
                 f"Открытых сигналов: {st['open']}.\n"
                 f"{NO_MANUAL_EDITS_LINE}")
+    # чистое движение цены (без плеча): R-результат в процентах рынка
+    move_block = ""
+    if st.get("avg_tp_move_pct") or st.get("avg_stop_move_pct"):
+        move_block = (
+            f"Ход цены (без плеча): тейк в среднем <b>{st['avg_tp_move_pct']:+.2f}%</b>, "
+            f"стоп <b>{st['avg_stop_move_pct']:+.2f}%</b>\n"
+            f"Чистое движение суммарно: <b>{st.get('total_move_pct', 0):+.1f}%</b>\n")
+    epoch_block = ""
+    if epoch_st is not None and epoch_label:
+        if epoch_st["trades"]:
+            epoch_block = (
+                f"🆕 Новый код (сигналы с {epoch_label}): {epoch_st['trades']} закрыто · "
+                f"wr {epoch_st['winrate']:.0%} · Σ <b>{epoch_st['total_r']:+.2f}R</b> · "
+                f"открыто {epoch_st['open']}\n")
+        else:
+            epoch_block = (f"🆕 Новый код (сигналы с {epoch_label}): закрытых пока нет, "
+                           f"открыто {epoch_st['open']}\n")
     return (
         "📊 <b>Публичная статистика</b> (по закрытым сделкам)\n"
         "────────────────────\n"
@@ -105,6 +145,8 @@ def format_stats(st: dict) -> str:
         f"Winrate: <b>{st['winrate']:.0%}</b>  ({st['wins']}/{st['trades']})\n"
         f"Матожидание: <b>{st['expectancy_r']:+.2f}R</b> на сделку\n"
         f"Суммарно: <b>{st['total_r']:+.2f}R</b>\n"
+        f"{move_block}"
+        f"{epoch_block}"
         "────────────────────\n"
         f"{_small_sample_warning(st['trades'])}"
         f"{NO_MANUAL_EDITS_LINE}\n"
@@ -192,7 +234,7 @@ def format_report(cs: dict) -> str:
     return "\n".join(lines)
 
 
-def format_by_setup(by_setup: dict) -> str:
+def format_by_setup(by_setup: dict, title: str = "📐 Статистика по сетапам") -> str:
     """Текст /bysetup — разбивка по тегу сетапа (journal.stats_by_setup()) с лестницей
     порогов значимости, не одним числом: n<20 — рано даже для направления, n≥20 — есть
     направление (без выводов), n≥30 — предварительно (НЕ уровень для публичного канала),
@@ -200,8 +242,8 @@ def format_by_setup(by_setup: dict) -> str:
     именно LTF-BB уже показал проблему в бэктесте и живой практике, LTF-OB отдельно не
     проверялся."""
     if not by_setup:
-        return "📐 По сетапам\n────────────────────\nЗакрытых сделок пока нет."
-    lines = ["📐 Статистика по сетапам", "────────────────────"]
+        return f"{title}\n────────────────────\nЗакрытых сделок пока нет."
+    lines = [title, "────────────────────"]
     for setup, s in sorted(by_setup.items()):
         n = s["trades"]
         lines.append(f"• {setup}: {n} сд | wr {s['winrate']:.0%} | "
@@ -251,6 +293,7 @@ _ADMIN_NUMERIC_FIELDS = {
     "min_confidence": ("Мин. уверенность сетапа, 0..1", "unit"),
     "min_impulse_atr": ("Мин. размер импульса в ATR", "float"),
     "min_rr_open_model": ("Мин. reward/risk для сетапа open-SMC", "float"),
+    "max_open_per_side": ("Макс. активных сигналов в одну сторону, 0 = без лимита", "int"),
     "display_leverage": ("Плечо для показа результата в постах, ×N (0 — выключить строку)",
                          "float"),
     "intro_price_stars": ("Цена пробного тарифа в Stars (0 — выключить пробный)", "int"),
@@ -862,8 +905,9 @@ def format_help(is_admin: bool) -> str:
     return text
 
 
-def format_admin_status(eff: dict, users: dict) -> str:
-    """Статус управления для /admin и /status."""
+def format_admin_status(eff: dict, users: dict, exposure: dict | None = None) -> str:
+    """Статус управления для /admin и /status. exposure — journal.open_side_counts()."""
+    exposure = exposure or {}
     return (
         "🛠 Управление RSI Range\n"
         f"{'⏸ НА ПАУЗЕ' if eff['paused'] else '▶️ РАБОТАЕТ'}\n"
@@ -875,6 +919,8 @@ def format_admin_status(eff: dict, users: dict) -> str:
         f"Мин. уверенность: {eff['min_confidence']:.2f}  ·  "
         f"мин. импульс: {eff['min_impulse_atr']:.1f}×ATR  ·  "
         f"мин. RR open-SMC: {eff['min_rr_open_model']:.2f}\n"
+        f"Экспозиция: LONG {exposure.get('LONG', 0)} / SHORT {exposure.get('SHORT', 0)} "
+        f"(лимит {eff['max_open_per_side']}/сторону)\n"
         f"Канал: {eff['channel']} "
         f"({'вкл' if eff['channel_enabled'] else 'выкл'} · {eff['channel_mode']})\n"
         f"Цена: {eff['price_stars']}⭐ / {eff['price_usdt']:g} USDT / {eff['sub_days']} дн\n"
@@ -1653,8 +1699,14 @@ def main() -> None:
     @dp.message(Command("stats"))
     @dp.message(F.text == "📊 Статистика")
     async def _stats(m):
-        await m.answer(await asyncio.to_thread(lambda: format_stats(journal.stats())),
-                       parse_mode="HTML")
+        def _collect():
+            st = journal.stats()
+            epoch = runtime.strategy_epoch()
+            if not epoch:
+                return format_stats(st)
+            label = f"{epoch[8:10]}.{epoch[5:7]}"        # ISO -> ДД.ММ
+            return format_stats(st, journal.stats_since_created(epoch), label)
+        await m.answer(await asyncio.to_thread(_collect), parse_mode="HTML")
 
     @dp.message(Command("trackrecord"))
     @dp.message(F.text == "📄 Трек-рекорд")
@@ -1769,6 +1821,8 @@ def main() -> None:
                callback_data="adm_prompt_min_impulse_atr")],
             [b(text=f"🎚 Мин. RR open-SMC: {eff['min_rr_open_model']:.2f}",
                callback_data="adm_prompt_min_rr_open_model")],
+            [b(text=f"⚖️ Лимит/сторону: {eff['max_open_per_side']}",
+               callback_data="adm_prompt_max_open_per_side")],
             [b(text="◀️ Назад", callback_data="adm_nav_main")],
         ])
 
@@ -1816,7 +1870,8 @@ def main() -> None:
     async def _panel(chat_id):
         eff = await asyncio.to_thread(runtime.effective)
         users = await asyncio.to_thread(payments.user_counts)
-        await bot.send_message(chat_id, format_admin_status(eff, users),
+        exposure = await asyncio.to_thread(journal.open_side_counts)
+        await bot.send_message(chat_id, format_admin_status(eff, users, exposure),
                                reply_markup=_admin_kb(eff))
 
     async def _set(m, key, value, reply):
@@ -1836,7 +1891,8 @@ def main() -> None:
             return
         eff = await asyncio.to_thread(runtime.effective)
         users = await asyncio.to_thread(payments.user_counts)
-        await m.answer(format_admin_status(eff, users))
+        exposure = await asyncio.to_thread(journal.open_side_counts)
+        await m.answer(format_admin_status(eff, users, exposure))
 
     @dp.message(Command("health"))
     @dp.message(F.text == "🩺 Health")
@@ -2088,7 +2144,14 @@ def main() -> None:
         if not _is_admin(m):
             return
         by_setup = await asyncio.to_thread(journal.stats_by_setup)
-        await m.answer(format_by_setup(by_setup))
+        text = format_by_setup(by_setup)
+        epoch = runtime.strategy_epoch()
+        if epoch:
+            fresh = await asyncio.to_thread(journal.stats_by_setup, epoch)
+            label = f"{epoch[8:10]}.{epoch[5:7]}"
+            text += "\n\n" + format_by_setup(
+                fresh, title=f"🆕 По сетапам — новый код (сигналы с {label})")
+        await m.answer(text)
 
     @dp.message(Command("growth"))
     @dp.message(F.text == "📈 Growth")
@@ -2321,7 +2384,9 @@ def main() -> None:
         kb = {"main": _admin_kb, "strategy": _strategy_kb,
              "prices": _prices_kb, "symbols": _symbols_kb}[screen](eff)
         try:
-            await cq.message.edit_text(format_admin_status(eff, users), reply_markup=kb)
+            exposure = await asyncio.to_thread(journal.open_side_counts)
+            await cq.message.edit_text(format_admin_status(eff, users, exposure),
+                                       reply_markup=kb)
         except Exception:                              # noqa: BLE001 — «message not modified» и т.п.
             pass
         await cq.answer("Готово")

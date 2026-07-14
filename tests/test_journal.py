@@ -551,3 +551,38 @@ def test_oldest_open_anchor(fresh_db):
     assert journal.oldest_open_anchor("BTC/USDT:USDT") == "2026-01-01T05:00:00+00:00"
     db.execute("UPDATE signals SET status='stopped', result_r=-1.0 WHERE id=1")
     assert journal.oldest_open_anchor("BTC/USDT:USDT") is None  # закрытые не считаются
+
+
+def test_open_side_counts_and_stats_move_pct(fresh_db):
+    """Портфельная экспозиция по направлениям + чистое движение цены в stats()."""
+    from app.brain import journal
+    journal.record_signal(_sig(symbol="BTC/USDT:USDT"))                   # SHORT, закроем в tp
+    journal.record_signal(_sig(symbol="ETH/USDT:USDT", entry=200.0, stop=210.0, tp=180.0,
+                               created_at="2026-01-01T00:15:00+00:00"))   # SHORT, закроем в стоп
+    journal.record_signal(_sig(symbol="SOL/USDT:USDT", side=Side.LONG,
+                               entry=50.0, stop=45.0, tp=60.0,
+                               created_at="2026-01-01T00:30:00+00:00"))   # LONG, останется open
+    assert journal.open_side_counts() == {"LONG": 1, "SHORT": 2}
+    journal.update_outcomes({"BTC/USDT:USDT": 79.0, "ETH/USDT:USDT": 211.0})  # tp1 / stop
+    assert journal.open_side_counts() == {"LONG": 1, "SHORT": 0}
+    st = journal.stats()
+    # BTC SHORT 100->80: ход +20%; ETH SHORT 200->210 (стоп): ход −5%
+    assert st["avg_tp_move_pct"] == 20.0
+    assert st["avg_stop_move_pct"] == -5.0
+    assert st["total_move_pct"] == 15.0
+
+
+def test_stats_since_created_epoch_split(fresh_db):
+    """Эпоха нового кода: агрегат только по сигналам, СОЗДАННЫМ с даты (не closed_at)."""
+    from app.brain import journal
+    journal.record_signal(_sig(symbol="BTC/USDT:USDT",
+                               created_at="2026-01-01T00:00:00+00:00"))   # легаси
+    journal.record_signal(_sig(symbol="ETH/USDT:USDT", entry=200.0, stop=210.0, tp=180.0,
+                               created_at="2026-02-01T00:00:00+00:00"))   # новый код
+    journal.update_outcomes({"BTC/USDT:USDT": 79.0, "ETH/USDT:USDT": 179.0})  # оба tp
+    full = journal.stats()
+    fresh = journal.stats_since_created("2026-01-15T00:00:00+00:00")
+    assert full["trades"] == 2 and fresh["trades"] == 1
+    assert fresh["total_r"] == 2.0 and fresh["wins"] == 1
+    by_setup_fresh = journal.stats_by_setup(since_created="2026-01-15T00:00:00+00:00")
+    assert by_setup_fresh["6226"]["trades"] == 1

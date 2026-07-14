@@ -330,6 +330,20 @@ def trial_days() -> int:
     return _num("trial_days", int, 5)
 
 
+def max_open_per_side() -> int:
+    """Портфельный лимит направления: максимум одновременных активных сигналов (open,
+    включая ждущие лимитки — обе несут риск) в ОДНУ сторону по всему вотчлисту.
+    Урок 14.07.2026: 15 одновременных SHORT на коррелированных монетах = одна ставка
+    с риском 15R — памп рынка вынес все стопы разом (−12.7R за день). 0 = без лимита."""
+    return _num("max_open_per_side", int, 6)
+
+
+def strategy_epoch() -> str | None:
+    """ISO-момент последнего КРУПНОГО обновления стратегии — /stats и /bysetup показывают
+    отдельную стату «нового кода», не смешивая её с легаси-бэклогом старых сигналов."""
+    return _raw("strategy_epoch")
+
+
 def referral_reward_days() -> int:
     """Сколько дней подписки получает реферер за реальный первый платёж приглашённого
     (задача 23). Дефолт 7 — соразмерно win-back промо, окупается первым же платежом."""
@@ -377,6 +391,7 @@ def effective() -> dict:
         "min_confidence": min_confidence(),
         "min_impulse_atr": min_impulse_atr(),
         "min_rr_open_model": min_rr_open_model(),
+        "max_open_per_side": max_open_per_side(),
         "enabled_setups": enabled_setups(),
         "price_stars": price_stars(),
         "price_usdt": price_usdt(),

@@ -441,7 +441,7 @@ def test_format_by_setup():
     idx = next(i for i, ln in enumerate(lines) if "1:1: 120 сд" in ln)
     assert "⚠️" not in lines[idx + 1]                       # у 1:1 (n=120) предупреждения нет
 
-    empty_txt = "📐 По сетапам\n────────────────────\nЗакрытых сделок пока нет."
+    empty_txt = "📐 Статистика по сетапам\n────────────────────\nЗакрытых сделок пока нет."
     assert bot.format_by_setup({}) == empty_txt
 
 
@@ -773,3 +773,40 @@ def test_lifecycle_chart_wanted():
     assert bot.lifecycle_chart_wanted(True, "teaser") is False   # teaser не раскрывает уровни
     assert bot.lifecycle_chart_wanted(False, "full") is False    # флаг выключен
     assert bot.lifecycle_chart_wanted(False, "teaser") is False
+
+
+def test_scan_auto_respects_max_open_per_side(fresh_db):
+    """Портфельный лимит направления: при N активных в сторону новый сигнал не создаётся
+    (урок 14.07: 15 одновременных SHORT = одна ставка с риском 15R)."""
+    from app import runtime
+    from app.brain import journal
+    runtime.set_value("max_open_per_side", "2")
+    eng = SMCEngine(SMCConfig(use_time_filter=False))
+    df = _df()
+    assert len(bot.scan_auto("AAA/USDT:USDT", {"1h": df}, eng)) == 1   # SHORT #1
+    assert len(bot.scan_auto("BBB/USDT:USDT", {"1h": df}, eng)) == 1   # SHORT #2 (лимит достигнут)
+    assert bot.scan_auto("CCC/USDT:USDT", {"1h": df}, eng) == []       # SHORT #3 -> отсечён
+    assert journal.open_side_counts()["SHORT"] == 2
+    # закрыли одну -> место освободилось
+    from app import db
+    db.execute("UPDATE signals SET status='stopped', result_r=-1.0 WHERE id=1")
+    assert len(bot.scan_auto("CCC/USDT:USDT", {"1h": df}, eng)) == 1
+    # 0 = лимит выключен
+    runtime.set_value("max_open_per_side", "0")
+    assert len(bot.scan_auto("DDD/USDT:USDT", {"1h": df}, eng)) == 1
+
+
+def test_format_stats_move_and_epoch_blocks():
+    st = {"trades": 10, "open": 3, "wins": 6, "losses": 4, "winrate": 0.6,
+          "expectancy_r": 0.2, "total_r": 2.0,
+          "avg_tp_move_pct": 4.5, "avg_stop_move_pct": -2.1, "total_move_pct": 18.6}
+    ep = {"trades": 2, "wins": 1, "losses": 1, "winrate": 0.5,
+          "expectancy_r": 0.5, "total_r": 1.0, "open": 4}
+    txt = bot.format_stats(st, ep, "14.07")
+    assert "тейк в среднем <b>+4.50%</b>" in txt and "стоп <b>-2.10%</b>" in txt
+    assert "Чистое движение суммарно: <b>+18.6%</b>" in txt
+    assert "🆕 Новый код (сигналы с 14.07): 2 закрыто" in txt and "открыто 4" in txt
+    # без эпохи и движений — старый вид, ничего лишнего
+    st0 = {**st, "avg_tp_move_pct": 0.0, "avg_stop_move_pct": 0.0, "total_move_pct": 0.0}
+    txt0 = bot.format_stats(st0)
+    assert "Ход цены" not in txt0 and "Новый код" not in txt0

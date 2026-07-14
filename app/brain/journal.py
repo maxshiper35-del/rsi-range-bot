@@ -218,6 +218,16 @@ def export_public_trades() -> list:
         "ORDER BY created_at, id")
 
 
+def open_side_counts() -> dict:
+    """Активные сигналы по направлениям (open, включая ждущие лимитки — обе несут риск):
+    -> {"LONG": n, "SHORT": m}. Для портфельного лимита направления и /status."""
+    out = {"LONG": 0, "SHORT": 0}
+    for r in db.query("SELECT side, COUNT(*) AS n FROM signals "
+                      "WHERE status='open' AND result_r IS NULL GROUP BY side"):
+        out[r["side"]] = r["n"]
+    return out
+
+
 def oldest_open_anchor(symbol: str) -> str | None:
     """Самая старая точка (филл или создание) нескорённых сигналов символа — поллер по ней
     выбирает ГЛУБИНУ фетча баров: обрезанное окно даёт слепые зоны, где пропущенный стоп
@@ -487,15 +497,27 @@ def cohort_stats() -> dict:
 
 
 def stats() -> dict:
-    """Публичные агрегаты для /stats: winrate, expectancy(R), суммарный PnL(R), счётчики."""
+    """Публичные агрегаты для /stats: winrate, expectancy(R), суммарный PnL(R), счётчики,
+    плюс ЧИСТОЕ движение цены (без плеча): средний ход в тейках и в стопах и суммарный % —
+    чтобы R-результат читался и в процентах рынка («+1R ≈ +N% хода»)."""
     # только реально закрытые активные сделки; candidate/rejected (теневые) — не публичная стата
     rows = db.query(
-        "SELECT result_r FROM signals WHERE status IN ('tp1','tp2','tp3','stopped','expired') "
-        "AND result_r IS NOT NULL")
+        "SELECT side, entry, stop, tp1, tp2, tp3, status, result_r FROM signals "
+        "WHERE status IN ('tp1','tp2','tp3','stopped') AND result_r IS NOT NULL")
     rs = [r["result_r"] for r in rows]
     n = len(rs)
     wins = [r for r in rs if r > 0]
     total_r = sum(rs)
+    tp_moves: list[float] = []
+    stop_moves: list[float] = []
+    for r in rows:
+        # выход по уровням сигнала (та же математика, что скоринг): tpX -> его уровень,
+        # stopped -> стоп; ход считается «в пользу сделки» (SHORT инвертирован)
+        exit_price = r["stop"] if r["status"] == "stopped" else r[r["status"]]
+        mv = _price_move_pct(r["side"], r["entry"], exit_price)
+        if mv is None:
+            continue
+        (stop_moves if r["status"] == "stopped" else tp_moves).append(mv)
     open_n = db.query_one(
         "SELECT COUNT(*) AS c FROM signals WHERE status='open'")["c"]  # type: ignore[index]
     return {
@@ -506,7 +528,30 @@ def stats() -> dict:
         "expectancy_r": round(total_r / n, 4) if n else 0.0,
         "total_r": round(total_r, 4),
         "open": open_n,
+        "avg_tp_move_pct": round(sum(tp_moves) / len(tp_moves), 3) if tp_moves else 0.0,
+        "avg_stop_move_pct": round(sum(stop_moves) / len(stop_moves), 3) if stop_moves else 0.0,
+        "total_move_pct": round(sum(tp_moves) + sum(stop_moves), 2),
     }
+
+
+def stats_since_created(start_iso: str) -> dict:
+    """Агрегат ТОЛЬКО по сигналам, СОЗДАННЫМ с start_iso (эпоха обновления стратегии):
+    легаси-бэклог доносится по старым правилам и не должен смешиваться с оценкой нового
+    кода. Скоуп по created_at, не closed_at — важно, КОГДА сигнал родился."""
+    rows = db.query(
+        "SELECT result_r FROM signals WHERE status IN ('tp1','tp2','tp3','stopped') "
+        "AND result_r IS NOT NULL AND created_at >= ?", (start_iso,))
+    rs = [r["result_r"] for r in rows]
+    n = len(rs)
+    wins = sum(1 for r in rs if r > 0)
+    total_r = sum(rs)
+    open_n = db.query_one(
+        "SELECT COUNT(*) AS c FROM signals WHERE status='open' AND created_at >= ?",
+        (start_iso,))["c"]  # type: ignore[index]
+    return {"trades": n, "wins": wins, "losses": n - wins,
+            "winrate": round(wins / n, 4) if n else 0.0,
+            "expectancy_r": round(total_r / n, 4) if n else 0.0,
+            "total_r": round(total_r, 4), "open": open_n}
 
 
 def recent_streak(n: int = 10) -> dict:
@@ -576,16 +621,18 @@ def stats_by_symbol() -> dict:
     return out
 
 
-def stats_by_setup() -> dict:
+def stats_by_setup(since_created: str | None = None) -> dict:
     """Разбивка публичной статистики по тегу сетапа (6226/1:1/open-SMC/LTF-BB/LTF-OB) —
     для /bysetup и живого табло. Тег живёт в snapshot_json (JSON-поле, не колонка) —
     парсим в Python, не через json_extract в SQL (переносимость важнее при этом объёме).
     LTF-BB и LTF-OB НЕ схлопываются в один бакет — именно LTF-BB показал проблему
     в бэктесте/живой эксплуатации, LTF-OB отдельно не проверялся.
+    since_created — только сигналы, созданные с этой даты (эпоха нового кода).
     """
     rows = db.query(
         "SELECT snapshot_json, result_r FROM signals WHERE status IN "
-        "('tp1','tp2','tp3','stopped','expired') AND result_r IS NOT NULL")
+        "('tp1','tp2','tp3','stopped','expired') AND result_r IS NOT NULL "
+        "AND created_at >= ?", (since_created or "",))
     by_setup: dict = {}
     for r in rows:
         try:
