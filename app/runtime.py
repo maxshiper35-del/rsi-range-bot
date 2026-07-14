@@ -110,6 +110,13 @@ def min_impulse_atr() -> float:
     return _num("min_impulse_atr", float, 1.0)
 
 
+def min_rr_open_model() -> float:
+    """Мин. reward/risk для сетапа open-SMC — единственного, где entry и take выбираются
+    независимо друг от друга (не фикс. доля риска). Без пола сигнал может выйти с riск
+    в разы больше вознаграждения (живой пример — сделка #145, RR=0.02)."""
+    return _num("min_rr_open_model", float, 0.5)
+
+
 # Дефолт: только Setup 1:1 включён. Честный walk-forward бэктест (docs/ — вынесены из репо)
 # показал 6226 и LTF-BB/LTF-OB стабильно убыточными на BTC/ETH/SOL 12 мес; живая эксплуатация
 # (BTC LONG LTF-BB ×3 подряд, все в стоп, −3R за один день) подтвердила это на практике.
@@ -365,6 +372,7 @@ def effective() -> dict:
         "channel_mode": channel_mode(),
         "min_confidence": min_confidence(),
         "min_impulse_atr": min_impulse_atr(),
+        "min_rr_open_model": min_rr_open_model(),
         "enabled_setups": enabled_setups(),
         "price_stars": price_stars(),
         "price_usdt": price_usdt(),

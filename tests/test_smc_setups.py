@@ -267,3 +267,31 @@ def test_build_opening_model_short():
     assert abs(sig.stop - 113.5) < 0.1               # за точку разворота
     assert sig.indicators_snapshot["setup"] == "open-SMC"
     assert sig.risk_reward > 0
+
+
+def test_build_opening_model_rejects_low_rr():
+    # open-SMC — единственный сетап, где entry (ближайший к mid FVG) и take (фикс. E)
+    # выбираются НЕЗАВИСИМО: если FVG оказался у самого E, reward -> 0 при полном risk
+    # (живая сделка #145: risk 2.58%, reward 0.06%, RR=0.02). Порог должен отсекать такое.
+    df = _df(_BARS_SHORT)
+    baseline = build_opening_model(df, "TEST/USDT", SMCConfig(), model="SMC")
+    assert baseline is not None and baseline.risk_reward == 1.35   # RR фикстуры (справочно)
+    # порог выше фактического RR -> сигнал отклонён
+    rejected = build_opening_model(
+        df, "TEST/USDT", SMCConfig(min_rr_open_model=1.5), model="SMC")
+    assert rejected is None
+    # порог ниже фактического RR -> сигнал по-прежнему проходит
+    passed = build_opening_model(
+        df, "TEST/USDT", SMCConfig(min_rr_open_model=1.0), model="SMC")
+    assert passed is not None and passed.risk_reward == 1.35
+
+
+def test_build_opening_model_signal_145_regression():
+    # точная геометрия сигнала #145 (WLD/USDT LONG, живой инцидент): entry 0.39375,
+    # stop 0.3836, take 0.394 -> risk 0.01015 (2.58%), reward 0.00025 (0.06%), RR=0.02.
+    # Дефолтный порог (0.5) обязан отбрасывать такой сигнал.
+    entry, stop, take = 0.39375, 0.3836, 0.394
+    risk, reward = abs(entry - stop), abs(entry - take)
+    rr = round(reward / risk, 2)
+    assert rr == 0.02                                 # подтверждаем геометрию инцидента
+    assert rr < SMCConfig().min_rr_open_model          # дефолтный пол (0.5) отсекает

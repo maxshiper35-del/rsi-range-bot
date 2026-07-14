@@ -43,6 +43,7 @@ class SMCConfig(StrategyConfig):
     max_impulse_wick_ratio: float = 0.33
     entry_band_atr: float = 0.5              # «у входа» = в пределах band*ATR
     min_impulse_atr: float = 1.0             # мин. размер импульса в ATR (фильтр мелкой структуры)
+    min_rr_open_model: float = 0.5           # мин. reward/risk для open-SMC (build_opening_model)
 
     # фибо и RR (дословно со слайдов)
     fib_entry_6226: float = 0.62
@@ -393,6 +394,12 @@ def build_opening_model(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = N
     if risk <= 0 or reward <= 0:
         return None
     rr = round(reward / risk, 2)
+    # в отличие от 6226/1:1/LTF (тейк = фикс. доля риска, RR задан конструкцией), здесь entry
+    # и take выбираются НЕЗАВИСИМО (entry — ближайший к mid FVG, take — фикс. уровень E) —
+    # если единственный найденный FVG оказался у самого E, reward стремится к нулю при полном
+    # risk (найдено на живой сделке #145: RR=0.02, стоп 2.58% вместо тейка 0.06%)
+    if rr < cfg.min_rr_open_model:
+        return None
 
     bias = _bias_score(df, imp.side, htf_df, cfg)
     trigger = 1.0 if imp.brk.body_confirmed else 0.0

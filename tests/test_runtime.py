@@ -111,7 +111,7 @@ def test_format_admin_status():
     eff = {"paused": True, "symbols": ["BTC/USDT:USDT"], "timeframes": ["15m", "1h"],
            "signal_mode": "auto", "channel": "-100123", "channel_enabled": True,
            "channel_mode": "full", "min_confidence": 0.5, "min_impulse_atr": 1.0,
-           "enabled_setups": ("1:1",),
+           "min_rr_open_model": 0.5, "enabled_setups": ("1:1",),
            "price_stars": 1000, "price_usdt": 20, "sub_days": 30, "free_per_week": 3}
     txt = bot.format_admin_status(eff, {"total": 5, "paid": 2})
     assert "НА ПАУЗЕ" in txt and "BTC/USDT:USDT" in txt and "платных 2" in txt
@@ -204,3 +204,11 @@ def test_vip_channel_settings(fresh_db):
     eff = runtime.effective()
     assert eff["vip_channel_id"] == "@rsi_range_vip"
     assert eff["vip_invite_link"] == "https://t.me/+abc123"
+
+
+def test_min_rr_open_model_flag(fresh_db):
+    from app import runtime
+    assert runtime.min_rr_open_model() == 0.5            # дефолт: пол на живой инцидент #145
+    runtime.set_value("min_rr_open_model", "0.8")
+    assert runtime.min_rr_open_model() == 0.8
+    assert runtime.effective()["min_rr_open_model"] == 0.8

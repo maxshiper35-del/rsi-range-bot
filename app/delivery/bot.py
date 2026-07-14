@@ -250,6 +250,7 @@ _ADMIN_NUMERIC_FIELDS = {
     "trial_days": ("Длительность триала для новых юзеров, дней (целое число)", "int"),
     "min_confidence": ("Мин. уверенность сетапа, 0..1", "unit"),
     "min_impulse_atr": ("Мин. размер импульса в ATR", "float"),
+    "min_rr_open_model": ("Мин. reward/risk для сетапа open-SMC", "float"),
     "display_leverage": ("Плечо для показа результата в постах, ×N (0 — выключить строку)",
                          "float"),
     "intro_price_stars": ("Цена пробного тарифа в Stars (0 — выключить пробный)", "int"),
@@ -871,7 +872,8 @@ def format_admin_status(eff: dict, users: dict) -> str:
         f"Режим сигналов: {eff['signal_mode']}\n"
         f"Сетапы: {', '.join(eff['enabled_setups']) or '—'}\n"
         f"Мин. уверенность: {eff['min_confidence']:.2f}  ·  "
-        f"мин. импульс: {eff['min_impulse_atr']:.1f}×ATR\n"
+        f"мин. импульс: {eff['min_impulse_atr']:.1f}×ATR  ·  "
+        f"мин. RR open-SMC: {eff['min_rr_open_model']:.2f}\n"
         f"Канал: {eff['channel']} "
         f"({'вкл' if eff['channel_enabled'] else 'выкл'} · {eff['channel_mode']})\n"
         f"Цена: {eff['price_stars']}⭐ / {eff['price_usdt']:g} USDT / {eff['sub_days']} дн\n"
@@ -1724,6 +1726,8 @@ def main() -> None:
                callback_data="adm_prompt_min_confidence")],
             [b(text=f"🎚 Мин. импульс: {eff['min_impulse_atr']:.1f}×ATR",
                callback_data="adm_prompt_min_impulse_atr")],
+            [b(text=f"🎚 Мин. RR open-SMC: {eff['min_rr_open_model']:.2f}",
+               callback_data="adm_prompt_min_rr_open_model")],
             [b(text="◀️ Назад", callback_data="adm_nav_main")],
         ])
 
