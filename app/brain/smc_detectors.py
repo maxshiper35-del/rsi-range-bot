@@ -113,11 +113,15 @@ def find_swings(df: pd.DataFrame, left: int = 2, right: int = 2) -> list[Swing]:
     n = len(df)
     out: list[Swing] = []
     for i in range(left, n - right):
+        # тай-брейк равных экстремумов: строго > слева, >= справа — регистрируется ПЕРВЫЙ
+        # из равных. Строгие оба конца делали учебниковый EQH/EQL (равный дабл-топ)
+        # невидимым для find_equal_levels — ту самую ликвидность, за которой стратегия
+        # охотится (аудит-2 стратегии [9])
         hi = highs[i]
-        if hi > highs[i - left:i].max() and hi > highs[i + 1:i + right + 1].max():
+        if hi > highs[i - left:i].max() and hi >= highs[i + 1:i + right + 1].max():
             out.append(Swing(index=i, price=float(hi), kind=Kind.HIGH))
         lo = lows[i]
-        if lo < lows[i - left:i].min() and lo < lows[i + 1:i + right + 1].min():
+        if lo < lows[i - left:i].min() and lo <= lows[i + 1:i + right + 1].min():
             out.append(Swing(index=i, price=float(lo), kind=Kind.LOW))
     return out
 
@@ -189,7 +193,8 @@ def detect_bpr(fvgs: list[Zone]) -> list[Zone]:
 # ---------------------------------------------------------------------------
 # 1.3 Ликвидность: EQH/EQL, POOL, PDH/PDL/PWH/PWL
 # ---------------------------------------------------------------------------
-def find_equal_levels(swings: list[Swing], atr: float, tol_atr: float = 0.1) -> list[LiquidityLevel]:
+def find_equal_levels(swings: list[Swing], atr: float,
+                      tol_atr: float = 0.1) -> list[LiquidityLevel]:
     """EQH/EQL — два соседних (по времени) однотипных свинга в пределах tol_atr*ATR."""
     tol = tol_atr * atr
     out: list[LiquidityLevel] = []
@@ -238,7 +243,8 @@ def prev_period_levels(df_htf: pd.DataFrame, dt_col: str = "dt") -> dict[str, Li
     days = list(dict.fromkeys(d["_date"]))
     if len(days) >= 2:
         prev = d[d["_date"] == days[-2]]
-        hi = prev["high"].idxmax(); lo = prev["low"].idxmin()
+        hi = prev["high"].idxmax()
+        lo = prev["low"].idxmin()
         out["PDH"] = LiquidityLevel(float(prev["high"].max()), int(hi), "PDH")
         out["PDL"] = LiquidityLevel(float(prev["low"].min()), int(lo), "PDL")
 
@@ -246,7 +252,8 @@ def prev_period_levels(df_htf: pd.DataFrame, dt_col: str = "dt") -> dict[str, Li
     if len(weeks) >= 2:
         yr, wk = weeks[-2]
         prev = d[(d["_year"] == yr) & (d["_week"] == wk)]
-        hi = prev["high"].idxmax(); lo = prev["low"].idxmin()
+        hi = prev["high"].idxmax()
+        lo = prev["low"].idxmin()
         out["PWH"] = LiquidityLevel(float(prev["high"].max()), int(hi), "PWH")
         out["PWL"] = LiquidityLevel(float(prev["low"].min()), int(lo), "PWL")
     return out
@@ -255,11 +262,15 @@ def prev_period_levels(df_htf: pd.DataFrame, dt_col: str = "dt") -> dict[str, Li
 # ---------------------------------------------------------------------------
 # 1.4 Свип ликвидности (снятие)
 # ---------------------------------------------------------------------------
-def detect_sweep(df: pd.DataFrame, level: LiquidityLevel, lookback: int = 20) -> SweepEvent | None:
+def detect_sweep(df: pd.DataFrame, level: LiquidityLevel, lookback: int = 20,
+                 expect: Kind | None = None) -> SweepEvent | None:
     """Снятие уровня: тень прокалывает уровень, а тело закрывается обратно.
 
     Съём хая: high > level и close <= level (direction=HIGH).
     Съём лоя: low  < level и close >= level (direction=LOW).
+    expect — для SWING/POOL: какая сторона свипа валидна (HIGH для шорт-якоря/свинг-хая,
+    LOW для лонг-якоря). Без этого «свипом» считался и РЕКЛЕЙМ (прокол НИЖЕ хая с
+    закрытием выше — аргумент ПРОТИВ сделки), поднимая confidence (аудит-2 стратегии [4]).
     confirmed=True всегда (работаем на закрытых барах). Возвращает последний свип.
     """
     high = df["high"].to_numpy()
@@ -277,9 +288,9 @@ def detect_sweep(df: pd.DataFrame, level: LiquidityLevel, lookback: int = 20) ->
         elif level.kind in ("PDL", "PWL", "EQL") and down:
             found = SweepEvent(level, i, Kind.LOW, True)
         elif level.kind in ("SWING", "POOL"):
-            if up:
+            if up and expect in (None, Kind.HIGH):
                 found = SweepEvent(level, i, Kind.HIGH, True)
-            elif down:
+            elif down and expect in (None, Kind.LOW):
                 found = SweepEvent(level, i, Kind.LOW, True)
     return found
 
@@ -396,7 +407,7 @@ CORRELATIONS: dict[tuple[str, str], tuple[float, str]] = {
 # 1.6 OB (ордер-блок) и BB (брейкер-блок)
 # ---------------------------------------------------------------------------
 def detect_order_block(df: pd.DataFrame, swings: list[Swing],
-                       structure_break: "StructureBreak | None", trend: Bias,
+                       structure_break: StructureBreak | None, trend: Bias,
                        window: int = 10) -> Zone | None:
     """Единая модель OB/BB: движение против тренда, снявшее ликвидность + импульсный выход.
 

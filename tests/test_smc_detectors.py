@@ -89,13 +89,15 @@ def test_find_pools():
 
 # --- 1.4 свип --------------------------------------------------------------
 def test_detect_sweep_high():
-    rows = [(9, 9.5, 8.5, 9), (9, 9.6, 8.8, 9.2), (9.5, 10.5, 9.0, 9.8)]  # прокол 10 вверх, закрытие ниже
+    # прокол 10 вверх, закрытие ниже
+    rows = [(9, 9.5, 8.5, 9), (9, 9.6, 8.8, 9.2), (9.5, 10.5, 9.0, 9.8)]
     ev = detect_sweep(make_df(rows), LiquidityLevel(10.0, 0, "EQH"))
     assert ev is not None and ev.direction == Kind.HIGH and ev.confirmed
 
 
 def test_detect_sweep_low():
-    rows = [(11, 11.5, 10.5, 11), (11, 11.2, 10.6, 10.9), (10.5, 11.0, 9.5, 10.2)]  # прокол 10 вниз, закрытие выше
+    # прокол 10 вниз, закрытие выше
+    rows = [(11, 11.5, 10.5, 11), (11, 11.2, 10.6, 10.9), (10.5, 11.0, 9.5, 10.2)]
     ev = detect_sweep(make_df(rows), LiquidityLevel(10.0, 0, "EQL"))
     assert ev is not None and ev.direction == Kind.LOW and ev.confirmed
 
@@ -162,3 +164,28 @@ def test_detect_smt_direct_divergence():
     b = make_df(base + [(10, 10.4, 9.6, 10.1)])  # без нового лоя
     smt = detect_smt(a, b, correlation="direct", lookback=20)
     assert smt is not None and smt.side == "LONG"
+
+
+def test_detect_sweep_swing_respects_expected_side():
+    """Аудит-2 стратегии [4]: для SWING-якоря валиден только свип СВОЕЙ стороны.
+    Реклейм хая (прокол НИЖЕ уровня, закрытие выше) — аргумент против сделки, не свип."""
+    from app.brain.smc_detectors import Kind
+    # бар прокалывает 10.0 СНИЗУ и закрывается выше (реклейм уровня-хая)
+    rows = [(11, 11.5, 10.5, 11), (10.5, 11.0, 9.8, 10.3)]
+    level = LiquidityLevel(10.0, 0, "SWING")
+    assert detect_sweep(make_df(rows), level, expect=Kind.HIGH) is None   # не свип хая
+    assert detect_sweep(make_df(rows), level, expect=Kind.LOW) is not None  # но свип лоя
+    # честный свип хая (прокол вверх, закрытие ниже) проходит гейт expect=HIGH
+    rows_hi = [(9, 9.5, 8.5, 9), (9.5, 10.5, 9.0, 9.8)]
+    assert detect_sweep(make_df(rows_hi), level, expect=Kind.HIGH) is not None
+
+
+def test_find_swings_registers_equal_double_top():
+    """Аудит-2 стратегии [9]: равный дабл-топ (EQH) должен дать свинг (первый из равных);
+    строгие неравенства с обеих сторон делали его невидимым."""
+    rows = [(9, 9.2, 8.8, 9), (9, 9.5, 8.9, 9.1), (9.5, 10.0, 9.3, 9.7),   # high 10.0 @2
+            (9.7, 9.8, 9.4, 9.5), (9.5, 10.0, 9.2, 9.6),                    # РАВНЫЙ high 10.0 @4
+            (9.6, 9.7, 9.0, 9.1), (9.1, 9.2, 8.8, 9.0)]
+    swings = find_swings(make_df(rows), left=2, right=2)
+    highs = [s for s in swings if s.kind.name == "HIGH" and abs(s.price - 10.0) < 1e-9]
+    assert len(highs) == 1 and highs[0].index == 2      # первый из равных, ровно один

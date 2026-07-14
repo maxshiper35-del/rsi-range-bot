@@ -51,10 +51,12 @@ class SMCConfig(StrategyConfig):
     rr_6226: float = 2.26
     rr_setup11: float = 1.0
 
-    # время (окна нормализованы в UTC; исходно New-York, UTC-4)
+    # время: окно из слайдов задано ПО НЬЮ-ЙОРКУ — храним в NY-минутах и конвертируем
+    # закрытие бара через zoneinfo (DST!): фикс UTC-4 зимой сдвигал окно на час, а минута
+    # ОТКРЫТИЯ бара пропускала решения на ТФ позже заявленного (аудит-2 стратегии [5])
     use_time_filter: bool = True
-    entry_window_utc: tuple = (11 * 60, 18 * 60)   # NY-4 07:00-14:00 -> UTC 11:00-18:00
-    after_break_utc: int = 11 * 60                  # NY-4 07:00 -> UTC 11:00
+    entry_window_ny: tuple = (7 * 60, 14 * 60)      # NY 07:00-14:00, полуинтервал [lo, hi)
+    after_break_ny: int = 7 * 60                    # слом не раньше NY 07:00
 
     # веса SMC-confidence (сумма = 1.0)
     w_bias: float = 0.30
@@ -70,12 +72,22 @@ class SMCConfig(StrategyConfig):
 # ---------------------------------------------------------------------------
 # Время бара
 # ---------------------------------------------------------------------------
-def _bar_minute_utc(df: pd.DataFrame, i: int) -> int | None:
-    """Минута дня в UTC для бара i, если в df есть колонка dt; иначе None."""
+def _bar_close_minute_ny(df: pd.DataFrame, i: int, tf_minutes: int) -> int | None:
+    """Минута дня America/New_York на ЗАКРЫТИИ бара i (метка dt = ОТКРЫТИЕ, ccxt).
+
+    Решение существует с закрытия бара — фильтровать надо его момент, не открытие;
+    zoneinfo даёт честный DST (зимой NY = UTC-5, фикс «UTC-4» сдвигал окно на час)."""
     if "dt" not in df.columns:
         return None
-    ts = pd.to_datetime(df["dt"].iloc[i], utc=True)
-    return int(ts.hour) * 60 + int(ts.minute)
+    from zoneinfo import ZoneInfo
+    ts = pd.to_datetime(df["dt"].iloc[i], utc=True) + pd.Timedelta(minutes=tf_minutes)
+    loc = ts.tz_convert(ZoneInfo("America/New_York"))
+    return int(loc.hour) * 60 + int(loc.minute)
+
+
+def _in_window(m: int, lo: int, hi: int) -> bool:
+    """Минута дня в полуинтервале [lo, hi); lo > hi — окно через полночь."""
+    return lo <= m < hi if lo <= hi else (m >= lo or m < hi)
 
 
 # ---------------------------------------------------------------------------
@@ -123,14 +135,15 @@ def _confluence_score(df: pd.DataFrame, entry: float, side: Side, cfg: SMCConfig
     fvgs = det.detect_fvg(df, min_gap_atr=cfg.fvg_min_gap_atr)
     near = [z for z in fvgs if z.bottom - band <= entry <= z.top + band]
     if near:
-        # правило инверсии: инвертированная зона входа не даёт бонуса (мягкий штраф),
-        # а не жёсткий отказ — выбор «ближайшего FVG» слишком грубый для hard-гейта.
-        z = det.apply_inversion_rule(df, near[0])
-        if z.inverted:
-            reasons.append("зона входа инвертирована (перекрыта телом) — без бонуса")
-        else:
+        # бонус — если есть хоть одна НЕинвертированная зона у входа; «без бонуса» — только
+        # когда ВСЕ ближние зоны перекрыты телом. Раньше судьбу решала СТАРЕЙШАЯ зона
+        # (near[0]): свежий валидный FVG не получал бонуса из-за древней инвертированной
+        # зоны рядом, и наоборот (аудит-2 стратегии [8]).
+        if any(not det.apply_inversion_rule(df, z).inverted for z in near):
             score += 0.4
             reasons.append("FVG/имбаланс у входа")
+        else:
+            reasons.append("зоны входа инвертированы (перекрыты телом) — без бонуса")
 
     eqs = det.find_equal_levels(swings, atr, cfg.eq_tol_atr)
     if any(e.kind == "EQH" for e in eqs) or any(e.kind == "EQL" for e in eqs):
@@ -214,7 +227,10 @@ def _find_impulse(df: pd.DataFrame, cfg: SMCConfig) -> _Impulse | None:
         if atr > 0 and abs(S - E) < cfg.min_impulse_atr * atr:
             return None
 
-    sweep = det.detect_sweep(df, level, lookback=cfg.sweep_lookback)
+    # направленный свип: для SHORT-якоря (свинг-хай) валиден только съём ХАЯ, для LONG —
+    # только съём ЛОЯ; иначе реклейм уровня засчитывался как свип (аудит-2 стратегии [4])
+    expect = Kind.HIGH if side == Side.SHORT else Kind.LOW
+    sweep = det.detect_sweep(df, level, lookback=cfg.sweep_lookback, expect=expect)
     clean = _impulse_clean(df, s_index, e_index, cfg.max_impulse_wick_ratio)
     return _Impulse(side, float(S), float(E), s_index, e_index,
                     swept=sweep is not None, clean=clean, brk=brk, swings=swings)
@@ -251,12 +267,13 @@ def build_6226(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = None,
     # --- гейт времени (жёсткий, если есть метки времени) ---
     in_entry_window: bool | None = None
     if cfg.use_time_filter:
-        m_break = _bar_minute_utc(df, imp.brk.break_index)
-        m_now = _bar_minute_utc(df, len(df) - 1)
+        tf_min = SMCEngine.TF_MINUTES.get(timeframe, 60)
+        m_break = _bar_close_minute_ny(df, imp.brk.break_index, tf_min)
+        m_now = _bar_close_minute_ny(df, len(df) - 1, tf_min)
         if m_break is not None and m_now is not None:
-            lo, hi = cfg.entry_window_utc
-            in_entry_window = lo <= m_now < hi
-            if m_break < cfg.after_break_utc or not in_entry_window:
+            lo, hi = cfg.entry_window_ny
+            in_entry_window = _in_window(m_now, lo, hi)
+            if m_break < cfg.after_break_ny or not in_entry_window:
                 return None                        # вне окна — отбраковка
 
     bias = _bias_score(df, imp.side, htf_df, cfg)

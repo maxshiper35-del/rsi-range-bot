@@ -9,9 +9,10 @@ from app.brain.smc_detectors import Kind, Swing  # noqa: F401 (использу�
 from app.brain.smc_setups import (
     SMCConfig,
     SMCEngine,
-    _bar_minute_utc,
+    _bar_close_minute_ny,
     _confidence,
     _find_impulse,
+    _in_window,
     build_6226,
     build_ltf_poi,
     build_opening_model,
@@ -243,9 +244,22 @@ def test_dealing_range():
     assert dealing_range(sw) == (100.5, 113.5)
 
 
-def test_bar_minute_utc():
+def test_bar_close_minute_ny():
+    # 5 января = EST (UTC-5): бар открыт 13:00 UTC, ТФ 60м -> закрытие 14:00 UTC = 09:00 NY
     df = _df(_BARS_SHORT, dt_start=datetime(2026, 1, 5, 13, 0, tzinfo=timezone.utc), step_min=0)
-    assert _bar_minute_utc(df, 0) == 13 * 60
+    assert _bar_close_minute_ny(df, 0, 60) == 9 * 60
+    # 6 июля = EDT (UTC-4): то же закрытие 14:00 UTC = 10:00 NY — DST учитывается честно
+    df_summer = _df(_BARS_SHORT, dt_start=datetime(2026, 7, 6, 13, 0, tzinfo=timezone.utc),
+                    step_min=0)
+    assert _bar_close_minute_ny(df_summer, 0, 60) == 10 * 60
+
+
+def test_in_window_wraps_midnight():
+    assert _in_window(23 * 60, 22 * 60, 2 * 60) is True     # окно через полночь
+    assert _in_window(1 * 60, 22 * 60, 2 * 60) is True
+    assert _in_window(12 * 60, 22 * 60, 2 * 60) is False
+    assert _in_window(7 * 60, 7 * 60, 14 * 60) is True      # обычное окно, [lo, hi)
+    assert _in_window(14 * 60, 7 * 60, 14 * 60) is False
 
 
 # --- §2.2 LTF-POI и модели открытия ----------------------------------------
