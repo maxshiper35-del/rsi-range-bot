@@ -38,12 +38,19 @@ def query_one(sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
 
 
 def execute(sql: str, params: Sequence[Any] = ()) -> int:
-    """INSERT -> lastrowid, иначе rowcount."""
+    """INSERT -> lastrowid, иначе rowcount.
+
+    Ветвление по типу statement ОБЯЗАТЕЛЬНО: sqlite3.lastrowid отражает
+    last_insert_rowid() уровня СОЕДИНЕНИЯ — после любого INSERT последующий UPDATE
+    на новом курсоре всё равно вернул бы rowid того INSERT (найдено аудитом-2:
+    UPDATE после register_user возвращал tg_id вместо rowcount)."""
     with _write_lock:
         conn = get_conn()
         cur = conn.execute(sql, params)
         conn.commit()
-        return cur.lastrowid or cur.rowcount
+        if sql.lstrip()[:6].upper() == "INSERT":
+            return cur.lastrowid or cur.rowcount
+        return cur.rowcount
 
 
 def executemany(sql: str, rows: Iterable[Sequence[Any]]) -> int:

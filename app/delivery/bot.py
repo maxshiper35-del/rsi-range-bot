@@ -1062,12 +1062,14 @@ def main() -> None:
     bot = Bot(token=cfg.tg_bot_token)
     dp = Dispatcher()
 
-    async def _reward_referrer(tg_id: int) -> None:
+    async def _reward_referrer(tg_id: int, paid_days: float) -> None:
         """Реф-награда за РЕАЛЬНЫЙ платёж приглашённого + уведомление реферера. Best-effort:
-        идемпотентна (одна награда на приглашённого), вызывается из всех путей платежа."""
+        идемпотентна (одна награда на приглашённого), вызывается из всех путей платежа.
+        paid_days — длительность оплаченного периода: короткие (intro) не квалифицируют."""
         try:
             reward = await asyncio.to_thread(
-                payments.reward_referrer_on_payment, tg_id, runtime.referral_reward_days())
+                payments.reward_referrer_on_payment, tg_id,
+                runtime.referral_reward_days(), paid_days)
         except Exception as e:                             # noqa: BLE001
             log.warning("referral reward %s: %s", tg_id, e)
             return
@@ -1315,34 +1317,37 @@ def main() -> None:
             prices=[LabeledPrice(label=f"{human} доступа", amount=stars)],
         )
 
+    async def _pay_tier(cq, days: float, stars: int, label: str | None = None):
+        """Общий путь кнопок оплаты. Гейт stars<=0: старые /subscribe-сообщения в истории
+        чата хранят кнопки выключенных тарифов — без гейта клик слал бы invoice с amount=0
+        (Bad Request) и вечный спиннер юзеру (аудит-2 [12])."""
+        if stars <= 0:
+            await cq.answer("Этот тариф сейчас недоступен — см. актуальные в /subscribe.",
+                            show_alert=True)
+            return
+        await _send_stars_invoice(cq.from_user.id, days, stars, label)
+        await cq.answer()
+
     @dp.callback_query(F.data == "pay_stars")
     async def _pay_stars(cq):
-        await _send_stars_invoice(cq.from_user.id, runtime.sub_days(), runtime.price_stars())
-        await cq.answer()
+        await _pay_tier(cq, runtime.sub_days(), runtime.price_stars())
 
     @dp.callback_query(F.data == "pay_stars_intro")
     async def _pay_stars_intro(cq):
-        await _send_stars_invoice(cq.from_user.id, round(runtime.intro_hours() / 24, 6),
-                                  runtime.intro_price_stars())
-        await cq.answer()
+        await _pay_tier(cq, round(runtime.intro_hours() / 24, 6), runtime.intro_price_stars())
 
     @dp.callback_query(F.data == "pay_stars_quarter")
     async def _pay_stars_quarter(cq):
-        await _send_stars_invoice(cq.from_user.id, 90, runtime.quarter_price_stars())
-        await cq.answer()
+        await _pay_tier(cq, 90, runtime.quarter_price_stars())
 
     @dp.callback_query(F.data == "pay_stars_year")
     async def _pay_stars_year(cq):
-        await _send_stars_invoice(cq.from_user.id, 365, runtime.year_price_stars(),
-                                  label="1 год")
-        await cq.answer()
+        await _pay_tier(cq, 365, runtime.year_price_stars(), label="1 год")
 
     @dp.callback_query(F.data == "pay_stars_life")
     async def _pay_stars_life(cq):
         # lifetime = 36500 дней (100 лет): без спец-статуса в БД — просто далёкий paid_until
-        await _send_stars_invoice(cq.from_user.id, 36500, runtime.lifetime_price_stars(),
-                                  label="навсегда (lifetime)")
-        await cq.answer()
+        await _pay_tier(cq, 36500, runtime.lifetime_price_stars(), label="навсегда (lifetime)")
 
     @dp.callback_query(F.data.startswith("unlock:"))
     async def _unlock(cq):
@@ -1594,18 +1599,22 @@ def main() -> None:
     @dp.message(F.successful_payment)
     async def _paid(m):
         sp = m.successful_payment
-        days: float = cfg.sub_days
         try:
             days = float(sp.invoice_payload.split(":")[1])
         except Exception:                               # noqa: BLE001
-            pass
+            # нечитаемый payload — фолбэк на АКТУАЛЬНЫЙ runtime.sub_days (не boot-time cfg)
+            # с громким следом: молча выдать 30 дн за lifetime-чардж нельзя (аудит-2 [10])
+            days = float(runtime.sub_days())
+            log.warning("successful_payment: нечитаемый payload %r от %s (charge=%s) — "
+                        "фолбэк %s дн", sp.invoice_payload, m.from_user.id,
+                        sp.telegram_payment_charge_id, days)
         applied = await asyncio.to_thread(
             payments.grant_subscription, m.from_user.id, "stars",
             float(sp.total_amount), sp.currency, days, sp.telegram_payment_charge_id)
         if applied:
             await m.answer(f"✅ Подписка активна на {_fmt_days(days)}! Сигналы теперь приходят "
                            f"автоматически на закрытии свечей. Статус: /subscribe")
-            await _reward_referrer(m.from_user.id)         # реф-награда за реальный платёж
+            await _reward_referrer(m.from_user.id, days)   # реф-награда за реальный платёж
         else:
             await m.answer("Этот платёж уже был учтён. Спасибо! Статус: /subscribe")
 
@@ -2112,7 +2121,7 @@ def main() -> None:
         days = int(parts[2]) if len(parts) > 2 and parts[2].isdecimal() else runtime.sub_days()
         await asyncio.to_thread(payments.admin_grant, tg, days)
         await m.answer(f"✅ Подписка выдана {tg} на {days} дн.")
-        await _reward_referrer(tg)                         # /grant = подтверждение USDT-оплаты
+        await _reward_referrer(tg, days)                   # /grant = подтверждение USDT-оплаты
 
     @dp.message(Command("revoke"))
     async def _revoke(m):
@@ -2146,8 +2155,13 @@ def main() -> None:
             await bot.refund_star_payment(
                 user_id=uid, telegram_payment_charge_id=pay["charge_id"])
         except Exception as e:                          # noqa: BLE001 — отказ Telegram
-            await m.answer(f"Telegram отказал в возврате: {e}")
-            return
+            if "CHARGE_ALREADY_REFUNDED" not in str(e):
+                await m.answer(f"Telegram отказал в возврате: {e}")
+                return
+            # уже возвращён на стороне Telegram (краш между API и БД в прошлый раз) —
+            # дочиниваем БД, иначе строка вечно paid и /refund зациклен (аудит-2 [9])
+            log.warning("refund %s: уже возвращён у Telegram, дочиниваю запись #%s",
+                        uid, pay["id"])
         await asyncio.to_thread(payments.mark_refunded, pay["id"], uid, pay["days"])
         await m.answer(f"↩️ Возвращено {pay['amount']:g}⭐ юзеру {uid}; "
                        f"подписка скорректирована (−{_fmt_days(pay['days'])}).")
@@ -2488,13 +2502,13 @@ def main() -> None:
         except Exception as e:                         # noqa: BLE001
             log.warning("poll_cryptobot: %s", e)
             activated = []
-        for uid in activated:
+        for uid, paid_days in activated:
             try:
                 await bot.send_message(
                     uid, "✅ Оплата USDT получена — подписка активна! /subscribe")
             except Exception as e:                     # noqa: BLE001
                 log.warning("usdt activate notify %s: %s", uid, e)
-            await _reward_referrer(uid)                # реф-награда за реальный USDT-платёж
+            await _reward_referrer(uid, paid_days)     # реф-награда за реальный USDT-платёж
         # эскалация зависших USDT-заявок (>6ч без /grant): пингуем один раз;
         # метка ставится безусловно — сбой доставки одному админу не даёт вечный повтор
         for claim in await asyncio.to_thread(payments.stale_usdt_claims, 6):
@@ -2538,11 +2552,15 @@ def main() -> None:
             try:
                 code = await asyncio.to_thread(
                     payments.issue_winback_promo, uid, _WB_DAYS, _WB_VALID)
+            except Exception as e:                     # noqa: BLE001 — сбой БД: ретрай след. тактом
+                log.warning("winback issue %s: %s", uid, e)
+                continue                                # штамп НЕ ставим — касание не потрачено
+            try:
                 await bot.send_message(
                     uid,
                     templates.render_winback(code, _WB_DAYS, _WB_VALID, stats=journal.stats()),
                     parse_mode="HTML")
-            except Exception as e:                     # noqa: BLE001
+            except Exception as e:                     # noqa: BLE001 — закрытая личка: не ретраить
                 log.warning("winback %s: %s", uid, e)
             await asyncio.to_thread(payments.mark_winback_reminded, uid)
         # авто-watchlist (мега-план MAX, ставка 3): раз в сутки пересобрать список по

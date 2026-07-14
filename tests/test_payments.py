@@ -373,7 +373,7 @@ def test_poll_cryptobot_adds_bonus_days(fresh_db, monkeypatch):
 
     monkeypatch.setattr(payments, "_cryptobot_call", fake_call)
     payments.create_cryptobot_invoice(800, 30, amount=20)
-    assert payments.poll_cryptobot() == [800]
+    assert payments.poll_cryptobot() == [(800, 30.0)]   # (tg_id, оплаченные дни) для реф-гейта
     until = datetime.fromisoformat(payments.get_user(800)["paid_until"])
     delta = until - datetime.now(timezone.utc)
     assert timedelta(days=31) < delta < timedelta(days=33)   # 30 + 2 бонусных
@@ -398,7 +398,7 @@ def test_cryptobot_invoice_and_poll(fresh_db, monkeypatch):
     pay_url, inv_id = payments.create_cryptobot_invoice(600, 30, amount=20)
     assert inv_id == "555" and "CryptoBot" in pay_url
     assert payments.is_paid(600) is False                          # ждём оплату
-    assert payments.poll_cryptobot() == [600]                      # оплачено -> активировано
+    assert payments.poll_cryptobot() == [(600, 30.0)]              # оплачено -> активировано
     assert payments.is_paid(600) is True
     assert payments.poll_cryptobot() == []                         # идемпотентно
     get_settings.cache_clear()
@@ -556,14 +556,14 @@ def test_referral_reward_on_first_payment_only(fresh_db):
     ref_until_before = payments.get_user(820)["paid_until"]
     # первый реальный платёж приглашённого -> награда рефереру
     payments.grant_subscription(821, "stars", 1000, "XTR", 30, "chg_1")
-    out = payments.reward_referrer_on_payment(821, 7)
+    out = payments.reward_referrer_on_payment(821, 7, paid_days=30)
     assert out == (820, 7)
     assert payments.is_paid(820) is True
     assert payments.get_user(820)["paid_until"] != ref_until_before
     rewarded_until = payments.get_user(820)["paid_until"]
     # второй платёж (renewal) НЕ повторяет награду (идемпотентно)
     payments.grant_subscription(821, "stars", 1000, "XTR", 30, "chg_2")
-    assert payments.reward_referrer_on_payment(821, 7) is None
+    assert payments.reward_referrer_on_payment(821, 7, paid_days=30) is None
     assert payments.get_user(820)["paid_until"] == rewarded_until
 
 
@@ -571,7 +571,7 @@ def test_referral_reward_noop_without_referrer(fresh_db):
     from app.delivery import payments
     payments.register_user(830, "solo")
     payments.grant_subscription(830, "stars", 1000, "XTR", 30, "chg_s")
-    assert payments.reward_referrer_on_payment(830, 7) is None
+    assert payments.reward_referrer_on_payment(830, 7, paid_days=30) is None
 
 
 def test_referral_stats(fresh_db):
@@ -581,7 +581,7 @@ def test_referral_stats(fresh_db):
         payments.register_user(uid, f"inv{uid}")
         payments.set_referrer(uid, 840)
     payments.grant_subscription(841, "stars", 1000, "XTR", 30, "chg_a")
-    payments.reward_referrer_on_payment(841, 7)
+    payments.reward_referrer_on_payment(841, 7, paid_days=30)
     st = payments.referral_stats(840)
     assert st == {"invited": 3, "rewarded": 1}
 
@@ -621,3 +621,154 @@ def test_notify_quiet_hours_windows(fresh_db):
 def test_is_signal_suppressed_unknown_user(fresh_db):
     from app.delivery import payments
     assert payments.is_signal_suppressed(999999, 3) is False   # незнакомый юзер — не подавляем
+
+
+# --- Аудит-2: дыры в выручке и денежные гонки ---
+def test_winback_requires_real_payment(fresh_db):
+    """Аудит-2 [1]: триал/промо ставят paid_until, но win-back — только реально платившим,
+    иначе каждый триальщик получал бы вечный цикл бесплатных промо."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import db
+    from app.delivery import payments
+    payments.grant_trial(900, 5)                        # триал, ни одного платежа
+    three_days = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    db.execute("UPDATE users SET paid_until=?, tier='free' WHERE tg_id=?", (three_days, 900))
+    assert payments.due_for_winback(2) == []            # не платил -> не будим
+
+
+def test_winback_not_rearmed_by_promo_redemption(fresh_db):
+    """Аудит-2 [1]: погашение win-back-промокода НЕ перевзводит win-back — иначе
+    «лапс -> промо -> погасил -> лапс -> снова промо» давало бы бесплатный доступ вечно."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import db
+    from app.delivery import payments
+    payments.grant_subscription(901, "stars", 1000, "XTR", 30, "wb_real")  # реальный платёж
+    three_days = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    db.execute("UPDATE users SET paid_until=?, tier='free' WHERE tg_id=?", (three_days, 901))
+    assert [r["tg_id"] for r in payments.due_for_winback(2)] == [901]      # цикл 1: пора
+    code = payments.issue_winback_promo(901, 7, 5)
+    payments.mark_winback_reminded(901)
+    assert payments.redeem_promo(901, code)["ok"] is True                  # погасил промо
+    # промо НЕ сбросило метку -> после нового лапса win-back НЕ повторяется
+    db.execute("UPDATE users SET paid_until=?, tier='free' WHERE tg_id=?", (three_days, 901))
+    assert payments.due_for_winback(2) == []
+    # а вот НОВЫЙ реальный платёж перевзводит цикл
+    payments.grant_subscription(901, "stars", 1000, "XTR", 30, "wb_real2")
+    db.execute("UPDATE users SET paid_until=?, tier='free' WHERE tg_id=?", (three_days, 901))
+    assert [r["tg_id"] for r in payments.due_for_winback(2)] == [901]
+
+
+def test_personal_promo_owner_binding(fresh_db):
+    """Аудит-2 [4]: wb<tg_id> угадываем (id публичны) — погасить может только владелец."""
+    from app.delivery import payments
+    payments.register_user(910, "victim")
+    payments.register_user(911, "attacker")
+    code = payments.issue_winback_promo(910, 7, 5)
+    res = payments.redeem_promo(911, code)              # чужой код
+    assert res["ok"] is False and res["reason"] == "not_found"   # факт существования скрыт
+    assert payments.redeem_promo(910, code)["ok"] is True        # владелец гасит нормально
+
+
+def test_referral_reward_requires_qualifying_days(fresh_db):
+    """Аудит-2 [2]: intro-платёж (часы за 10⭐) не квалифицирует реф-награду (анти-ферма);
+    флаг rewarded при отказе не тратится — полноценный платёж позже награждает."""
+    from app.delivery import payments
+    payments.register_user(920, "ref")
+    payments.register_user(921, "invitee")
+    payments.set_referrer(921, 920)
+    payments.grant_subscription(921, "stars", 10, "XTR", 0.21, "intro_chg")
+    assert payments.reward_referrer_on_payment(921, 7, paid_days=0.21) is None
+    assert payments.get_user(921)["referral_rewarded_at"] is None   # флаг не потрачен
+    payments.grant_subscription(921, "stars", 1000, "XTR", 30, "month_chg")
+    assert payments.reward_referrer_on_payment(921, 7, paid_days=30) == (920, 7)
+
+
+def test_due_for_reminder_skips_hour_tariffs(fresh_db):
+    """Аудит-2 [5]: intro (часы) не должен получать «истекает» через минуты после покупки."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import db
+    from app.delivery import payments
+    payments.grant_subscription(930, "stars", 10, "XTR", 0.21, "intro5h")  # ~5 часов
+    assert payments.due_for_reminder(3) == []           # осталось < 12ч -> молчим
+    # а месячная подписка с истечением через 2 дня — напоминаем как раньше
+    payments.grant_subscription(931, "stars", 1000, "XTR", 30, "m1")
+    soon = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    db.execute("UPDATE users SET paid_until=? WHERE tg_id=?", (soon, 931))
+    assert [r["tg_id"] for r in payments.due_for_reminder(3)] == [931]
+
+
+def test_expire_overdue_respects_concurrent_payment(fresh_db):
+    """Аудит-2 [6]: понижение — условный UPDATE; юзер с будущим paid_until (оплатил между
+    SELECT и UPDATE) не понижается."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import db
+    from app.delivery import payments
+    payments.grant_subscription(940, "stars", 1000, "XTR", 30, "e1")
+    future = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
+    db.execute("UPDATE users SET paid_until=? WHERE tg_id=?", (future, 940))
+    assert payments.expire_overdue() == []              # будущий paid_until -> не трогаем
+    assert payments.get_user(940)["tier"] == "paid"
+
+
+def test_register_user_keeps_username(fresh_db):
+    """Аудит-2 [8]: служебный register_user(tg_id) без username не затирает известное имя."""
+    from app.delivery import payments
+    payments.register_user(950, "known_name")
+    payments.register_user(950)                         # служебный вызов (grant/promo/mute)
+    assert payments.get_user(950)["username"] == "known_name"
+
+
+def test_admin_grant_supersedes_pending_cryptobot(fresh_db, monkeypatch):
+    """Аудит-2 [3]: /grant гасит pending USDT-инвойсы — авто-поллер не начислит вторично."""
+    from app import runtime
+    from app.delivery import payments
+    runtime.set_value("cryptobot_token", "tok")
+
+    def fake_call(method, params, post=True):
+        if method == "createInvoice":
+            return {"invoice_id": 970, "bot_invoice_url": "https://t.me/x"}
+        return {"items": [{"invoice_id": 970, "status": "paid"}]}   # оплачен ПОСЛЕ гранта
+
+    monkeypatch.setattr(payments, "_cryptobot_call", fake_call)
+    payments.create_cryptobot_invoice(960, 30, amount=20)
+    payments.admin_grant(960, 30)                       # админ подтвердил вручную
+    first_until = payments.get_user(960)["paid_until"]
+    assert payments.poll_cryptobot() == []              # инвойс погашен -> двойного нет
+    assert payments.get_user(960)["paid_until"] == first_until
+
+
+def test_poll_cryptobot_marks_provider_expired(fresh_db, monkeypatch):
+    """Аудит-2 [7]: истёкший у провайдера инвойс закрывается локально (не вечный pending)."""
+    from app import runtime
+    from app.delivery import payments
+    runtime.set_value("cryptobot_token", "tok")
+
+    def fake_call(method, params, post=True):
+        if method == "createInvoice":
+            return {"invoice_id": 980, "bot_invoice_url": "https://t.me/x"}
+        return {"items": [{"invoice_id": 980, "status": "expired"}]}
+
+    monkeypatch.setattr(payments, "_cryptobot_call", fake_call)
+    payments.create_cryptobot_invoice(981, 30, amount=20)
+    assert payments.poll_cryptobot() == []
+    row = fresh_db.query_one("SELECT status FROM payments WHERE invoice_id='980'")
+    assert row["status"] == "expired"
+    assert payments.poll_cryptobot() == []              # pending больше нет -> не опрашиваем
+
+
+def test_mark_refunded_inside_transaction(fresh_db):
+    """Аудит-2 [9]: вычет дней читает paid_until под локом; платёж помечается refunded."""
+    from app.delivery import payments
+    payments.grant_subscription(990, "stars", 1000, "XTR", 30, "r1")
+    pay = payments.find_refundable_stars_payment(990)
+    assert pay is not None
+    payments.mark_refunded(pay["id"], 990, pay["days"])
+    assert payments.find_refundable_stars_payment(990) is None     # больше нечего возвращать
+    # paid_until срезан к «сейчас» (не в минус)
+    from datetime import datetime, timezone
+    until = datetime.fromisoformat(payments.get_user(990)["paid_until"])
+    assert abs((until - datetime.now(timezone.utc)).total_seconds()) < 120

@@ -24,6 +24,13 @@ class _RefRewarded(Exception):
     """Внутренний сигнал: реферер уже награждён (гонка) — откатить транзакцию награды."""
 
 
+# Минимальная длительность ОПЛАЧЕННОГО периода, квалифицирующая реф-награду: intro-тариф
+# (часы за 10⭐) не считается — иначе ферма «10⭐ intro с мультиаккаунта -> +7 дн (~233⭐)
+# рефереру» с положительным ROI для накрутчика (аудит-2 [2]). 7 дн отсекает часовые тарифы
+# и пропускает все реальные (месяц/квартал/год/lifetime и /grant-подтверждение месяца).
+REFERRAL_MIN_PAID_DAYS = 7.0
+
+
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -35,7 +42,11 @@ def register_user(tg_id: int, username: str | None = None, lang: str = "ru") -> 
         "INSERT INTO users(tg_id, username, lang, tier, joined_at, updated_at) "
         "VALUES(?,?,?, 'free', ?, ?) "
         "ON CONFLICT(tg_id) DO UPDATE SET "
-        "username=excluded.username, updated_at=excluded.updated_at",
+        # COALESCE: служебные вызовы (grant/promo/mute) идут без username и не должны
+        # затирать известное имя в NULL (аудит-2 [8]); is_active=1 — возврат юзера
+        # (повторный /start) снимает пометку «заблокировал бота»
+        "username=COALESCE(excluded.username, username), is_active=1, "
+        "updated_at=excluded.updated_at",
         (tg_id, username, lang, now, now))
 
 
@@ -74,7 +85,7 @@ def grant_subscription(tg_id: int, method: str, amount: float, currency: str,
             "telegram_payment_charge_id, created_at, paid_at) "
             "VALUES(?,?,?,?,?, 'paid', ?, ?, ?, ?)",
             (tg_id, method, amount, currency, days, invoice_id, invoice_id, now, now))
-        _extend_and_activate(conn, tg_id, days)
+        _extend_and_activate(conn, tg_id, days, real_payment=True)
     return True
 
 
@@ -141,15 +152,16 @@ def find_refundable_stars_payment(tg_id: int) -> dict | None:
 def mark_refunded(payment_id: int, tg_id: int, days: float) -> None:
     """После успешного refundStarPayment: пометить платёж refunded и вычесть купленные
     дни из paid_until (не ниже текущего момента — промо/триал-хвосты не сгорают в минус,
-    а сама подписка от возвращённого платежа гаснет)."""
-    u = get_user(tg_id)
-    new_until = None
-    if u and u["paid_until"]:
-        cur = datetime.fromisoformat(u["paid_until"])
-        new_until = max(_now_dt(), cur - timedelta(days=days)).isoformat()
+    а сама подписка от возвращённого платежа гаснет).
+
+    Чтение paid_until — ВНУТРИ транзакции (под _write_lock): снаружи покупка, закоммиченная
+    между чтением и записью, была бы затёрта устаревшим new_until (аудит-2 [9])."""
     with db.transaction() as conn:
         conn.execute("UPDATE payments SET status='refunded' WHERE id=?", (payment_id,))
-        if new_until is not None:
+        u = conn.execute("SELECT paid_until FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+        if u and u["paid_until"]:
+            cur = datetime.fromisoformat(u["paid_until"])
+            new_until = max(_now_dt(), cur - timedelta(days=days)).isoformat()
             conn.execute("UPDATE users SET paid_until=?, updated_at=? WHERE tg_id=?",
                          (new_until, clock.utcnow_iso(), tg_id))
 
@@ -194,6 +206,11 @@ def redeem_promo(tg_id: int, code: str) -> dict:
     row = db.query_one("SELECT * FROM promo_codes WHERE code=?", (code,))
     if row is None:
         return {"ok": False, "days": None, "reason": "not_found"}
+    # персональный код (win-back wb<tg_id>) погашает ТОЛЬКО владелец: id в Telegram
+    # публичны, «первый погасивший забирает» позволял угонять чужой win-back (аудит-2 [4]).
+    # Чужому отвечаем not_found — не раскрываем сам факт существования кода.
+    if row["owner_tg_id"] is not None and row["owner_tg_id"] != tg_id:
+        return {"ok": False, "days": None, "reason": "not_found"}
     now = clock.utcnow_iso()
     if row["expires_at"] and row["expires_at"] < now:
         return {"ok": False, "days": None, "reason": "expired"}
@@ -227,16 +244,21 @@ def redeem_promo(tg_id: int, code: str) -> dict:
     return {"ok": True, "days": row["days"], "reason": None}
 
 
-def _extend_and_activate(conn, tg_id: int, days: float) -> str:
+def _extend_and_activate(conn, tg_id: int, days: float, real_payment: bool = False) -> str:
     """Продлить подписку от max(сейчас, текущий paid_until) на days; tier=paid.
 
-    -> new paid_until."""
+    real_payment=True (Stars / USDT / /grant-подтверждение) дополнительно перевзводит
+    win-back (winback_reminded_at=NULL). Промо/триал НЕ перевзводят: иначе цикл
+    «триал -> win-back-промо -> погасил -> снова win-back» раздавал бы полный доступ
+    бесплатно вечно (аудит-2 [1]). renew-напоминание перевзводится всегда — оно про
+    новую дату истечения, а не про источник дней. -> new paid_until."""
     now = clock.utcnow_iso()
     u = get_user(tg_id)
     base = u["paid_until"] if (u and u["paid_until"] and u["paid_until"] > now) else now
     new_until = (datetime.fromisoformat(base) + timedelta(days=days)).isoformat()
-    conn.execute("UPDATE users SET tier='paid', paid_until=?, renew_reminded_at=NULL, "
-                 "winback_reminded_at=NULL, updated_at=? WHERE tg_id=?",
+    wb_reset = ", winback_reminded_at=NULL" if real_payment else ""
+    conn.execute(f"UPDATE users SET tier='paid', paid_until=?, renew_reminded_at=NULL"
+                 f"{wb_reset}, updated_at=? WHERE tg_id=?",
                  (new_until, now, tg_id))
     return new_until
 
@@ -295,23 +317,36 @@ def plan_recipients(signal_id: int, free_limit: int, admin_ids) -> list:
 # Жизненный цикл подписки: истечение и напоминания
 # ---------------------------------------------------------------------------
 def expire_overdue() -> list[int]:
-    """Понизить истёкших paid -> free. -> tg_id понижённых (для уведомления)."""
+    """Понизить истёкших paid -> free. -> tg_id РЕАЛЬНО понижённых (для уведомления).
+
+    Понижение — условный UPDATE с повторной проверкой: между SELECT и UPDATE юзер мог
+    оплатить (платёжные хендлеры конкурентны с обслуживанием), безусловный UPDATE понизил
+    бы только что заплатившего и выкинул его из /announce и напоминаний (аудит-2 [6])."""
     now = clock.utcnow_iso()
     ids = [r["tg_id"] for r in db.query(
         "SELECT tg_id FROM users WHERE tier='paid' AND (paid_until IS NULL OR paid_until <= ?)",
         (now,))]
+    demoted = []
     for tg_id in ids:
-        db.execute("UPDATE users SET tier='free', updated_at=? WHERE tg_id=?", (now, tg_id))
-    return ids
+        n = db.execute(
+            "UPDATE users SET tier='free', updated_at=? WHERE tg_id=? AND tier='paid' "
+            "AND (paid_until IS NULL OR paid_until <= ?)", (now, tg_id, now))
+        if n == 1:
+            demoted.append(tg_id)
+    return demoted
 
 
-def due_for_reminder(days: int = 3) -> list:
-    """Платные, у кого подписка истекает в ближайшие `days` и кому ещё не напоминали."""
-    now = clock.utcnow_iso()
+def due_for_reminder(days: int = 3, min_left_hours: int = 12) -> list:
+    """Платные, у кого подписка истекает в ближайшие `days` и кому ещё не напоминали.
+
+    min_left_hours: не напоминать, когда осталось МЕНЬШЕ N часов — часовые тарифы (intro)
+    иначе получают «истекает» через минуты после покупки (подтверждено на обоих реальных
+    intro-покупателях, аудит-2 [5]); напоминание в последние часы — шум, не ценность."""
+    floor_ = (_now_dt() + timedelta(hours=min_left_hours)).isoformat()
     horizon = (_now_dt() + timedelta(days=days)).isoformat()
     return db.query(
         "SELECT tg_id, paid_until FROM users WHERE tier='paid' AND paid_until > ? "
-        "AND paid_until <= ? AND renew_reminded_at IS NULL", (now, horizon))
+        "AND paid_until <= ? AND renew_reminded_at IS NULL", (floor_, horizon))
 
 
 def mark_reminded(tg_id: int) -> None:
@@ -362,6 +397,9 @@ def create_cryptobot_invoice(tg_id: int, days: int, amount: float | None = None)
         "asset": "USDT", "amount": str(amount),
         "description": f"Подписка RSI Range Signals на {days} дней",
         "payload": f"{tg_id}:{days}",
+        # сутки на оплату: без expires_in инвойсы вечные — pending-хвост рос бы
+        # безгранично, а старый инвойс оплачивался бы по устаревшей цене (аудит-2 [7])
+        "expires_in": 86400,
     })
     inv_id = str(res["invoice_id"])
     pay_url = res.get("bot_invoice_url") or res.get("pay_url") or res.get("mini_app_invoice_url")
@@ -372,8 +410,9 @@ def create_cryptobot_invoice(tg_id: int, days: int, amount: float | None = None)
     return pay_url, inv_id
 
 
-def poll_cryptobot() -> list[int]:
-    """Проверить оплату pending USDT-инвойсов, активировать подписку. -> tg_id активированных.
+def poll_cryptobot() -> list[tuple[int, float]]:
+    """Проверить оплату pending USDT-инвойсов, активировать подписку.
+    -> [(tg_id, оплаченные_дни)] активированных — days нужны гейту реф-награды.
 
     К оплаченному инвойсу добавляются бонус-дни (runtime.usdt_bonus_days) — USDT дешевле
     мерчанту, чем Stars (~38% эфф. комиссии), перенаправляем бонусом, не наценкой.
@@ -389,8 +428,13 @@ def poll_cryptobot() -> list[int]:
                           {"invoice_ids": ",".join(p["invoice_id"] for p in pending)}, post=False)
     items = res.get("items", res) if isinstance(res, dict) else res
     paid = {str(it["invoice_id"]) for it in items if it.get("status") == "paid"}
+    dead = {str(it["invoice_id"]) for it in items if it.get("status") == "expired"}
     activated = []
     for p in pending:
+        if p["invoice_id"] in dead:                     # истёк у провайдера — закрыть локально
+            db.execute("UPDATE payments SET status='expired' WHERE id=? AND status='pending'",
+                       (p["id"],))
+            continue
         if p["invoice_id"] not in paid:
             continue
         now = clock.utcnow_iso()
@@ -399,8 +443,10 @@ def poll_cryptobot() -> list[int]:
                                "WHERE id=? AND status='pending'", (now, p["id"]))
             if cur.rowcount != 1:                       # уже обработан параллельно
                 continue
-            _extend_and_activate(conn, p["tg_id"], p["days"] + runtime.usdt_bonus_days())
-        activated.append(p["tg_id"])
+            _extend_and_activate(conn, p["tg_id"], p["days"] + runtime.usdt_bonus_days(),
+                                 real_payment=True)
+        # days платежа — для гейта реф-награды (intro-длительности не квалифицируют)
+        activated.append((p["tg_id"], float(p["days"])))
     return activated
 
 
@@ -415,7 +461,12 @@ def admin_grant(tg_id: int, days: int) -> bool:
     with db.transaction() as conn:
         # атомарно с выдачей: при падении между операциями не получим
         # «заявки закрыты, подписка не выдана» (замолкшая SLA-эскалация)
-        _extend_and_activate(conn, tg_id, days)
+        _extend_and_activate(conn, tg_id, days, real_payment=True)
+        # погасить pending USDT-инвойсы юзера: /grant = ручное подтверждение оплаты,
+        # авто-поллер не должен вторично начислить те же деньги (аудит-2 [3]);
+        # 'expired' — из существующего CHECK-набора статусов
+        conn.execute("UPDATE payments SET status='expired' "
+                     "WHERE tg_id=? AND method='cryptobot' AND status='pending'", (tg_id,))
         conn.execute("UPDATE usdt_claims SET resolved_at=? WHERE tg_id=? AND resolved_at IS NULL",
                      (clock.utcnow_iso(), tg_id))
     return True
@@ -466,12 +517,18 @@ def mark_claim_escalated(claim_id: int) -> None:
 def due_for_winback(days_after: int = 2, window_days: int = 3) -> list:
     """Юзеры для win-back: подписка истекла НЕ МЕНЕЕ `days_after` дней назад (отложенное
     касание, не дубль уведомления «истекла» в том же такте), но не давнее
-    `days_after + window_days` (давно ушедших не будим). Одно напоминание на цикл."""
+    `days_after + window_days` (давно ушедших не будим). Одно напоминание на цикл.
+
+    ТОЛЬКО реально плативших (EXISTS в payments): триал/промо тоже ставят paid_until,
+    и без этого гейта каждый триальщик получал бы вечный цикл бесплатных win-back-промо
+    (аудит-2 [1] — «вечная бесплатная подписка»)."""
     ceil = (_now_dt() - timedelta(days=days_after)).isoformat()
     floor = (_now_dt() - timedelta(days=days_after + window_days)).isoformat()
     return db.query(
         "SELECT tg_id, paid_until FROM users WHERE tier='free' AND paid_until IS NOT NULL "
-        "AND paid_until <= ? AND paid_until >= ? AND winback_reminded_at IS NULL",
+        "AND paid_until <= ? AND paid_until >= ? AND winback_reminded_at IS NULL "
+        "AND EXISTS (SELECT 1 FROM payments p WHERE p.tg_id = users.tg_id "
+        "AND p.status='paid')",
         (ceil, floor))
 
 
@@ -492,8 +549,9 @@ def issue_winback_promo(tg_id: int, days: int, valid_days: int) -> str:
         conn.execute("DELETE FROM promo_redemptions WHERE code=?", (code,))
         conn.execute("DELETE FROM promo_codes WHERE code=?", (code,))
         conn.execute(
-            "INSERT INTO promo_codes(code, days, max_uses, used_count, expires_at, created_at) "
-            "VALUES(?,?,1,0,?,?)", (code, days, expires, clock.utcnow_iso()))
+            "INSERT INTO promo_codes(code, days, max_uses, used_count, expires_at, "
+            "created_at, owner_tg_id) VALUES(?,?,1,0,?,?,?)",
+            (code, days, expires, clock.utcnow_iso(), tg_id))
     return code
 
 
@@ -515,11 +573,19 @@ def set_referrer(tg_id: int, referrer_id: int) -> bool:
         return cur.rowcount == 1
 
 
-def reward_referrer_on_payment(tg_id: int, days: int) -> tuple[int, int] | None:
+def reward_referrer_on_payment(tg_id: int, days: int,
+                               paid_days: float) -> tuple[int, int] | None:
     """Наградить реферера за приглашённого при его РЕАЛЬНОМ платеже (+days подписки рефереру).
-    Вызывать из путей реального платежа (Stars, USDT). Идемпотентно: referral_rewarded_at
-    даёт ОДНУ награду на приглашённого — на renewal не повторяется (флаг уже стоит), триал/промо
-    сюда не заходят. Само-реферал отсечён в set_referrer. -> (referrer_id, days) для уведомления."""
+    Вызывать из путей реального платежа (Stars, USDT, /grant). Идемпотентно:
+    referral_rewarded_at даёт ОДНУ награду на приглашённого — на renewal не повторяется
+    (флаг уже стоит), триал/промо сюда не заходят. Само-реферал отсечён в set_referrer.
+
+    paid_days — длительность ОПЛАЧЕННОГО периода: короткие тарифы (intro, часы) награду
+    не квалифицируют (REFERRAL_MIN_PAID_DAYS) — анти-ферма (аудит-2 [2]); флаг rewarded
+    при этом НЕ ставится, полноценный платёж позже всё ещё наградит.
+    -> (referrer_id, days) для уведомления."""
+    if paid_days < REFERRAL_MIN_PAID_DAYS:
+        return None
     u = get_user(tg_id)
     if u is None or u["invited_by"] is None or u["referral_rewarded_at"] is not None:
         return None
