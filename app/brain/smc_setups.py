@@ -102,23 +102,29 @@ def dealing_range(swings: list[det.Swing]) -> tuple[float, float] | None:
 
 
 def _bias_score(df: pd.DataFrame, side: Side, htf_df: pd.DataFrame | None,
-                cfg: SMCConfig) -> float:
-    ref = htf_df if htf_df is not None else df
-    ref_sw = det.find_swings(ref, cfg.swing_left, cfg.swing_right)
-    trend = det.market_structure(ref, ref_sw)
+                cfg: SMCConfig, entry: float | None = None) -> float:
+    """Контекст-скор [0..1] (раунд-2: компоненты ШТРАФУЮТ противоход, floor 0.5 делал
+    гейт вакуумным). Две честности против первой версии раунда-2:
+    - тренд-компонент СЧИТАЕТСЯ ТОЛЬКО от настоящего HTF: пре-брейк тренд собственного
+      фрейма против CHOCH по определению (это разворотный сетап) — штраф от себя же
+      убивал флагманские развороты; нет старшего контекста -> нейтрально;
+    - premium/discount оценивается по ЦЕНЕ ВХОДА (лимитка), не по close на момент скана:
+      суть ретрейсмента — возврат цены в зону, close после импульса всегда «не в зоне»."""
     want = Bias.BEAR if side == Side.SHORT else Bias.BULL
     score = 0.5
-    if trend == want:
-        score += 0.25
+    if htf_df is not None:
+        htf_sw = det.find_swings(htf_df, cfg.swing_left, cfg.swing_right)
+        score += 0.25 if det.market_structure(htf_df, htf_sw) == want else -0.25
     dr = dealing_range(det.find_swings(df, cfg.swing_left, cfg.swing_right))
     if dr:
         lo, hi = dr
         mid = (lo + hi) / 2.0
-        price = float(df["close"].iloc[-1])
-        in_premium = price > mid
-        if (side == Side.SHORT and in_premium) or (side == Side.LONG and not in_premium):
-            score += 0.25
-    return min(score, 1.0)
+        ref_price = float(entry) if entry is not None else float(df["close"].iloc[-1])
+        in_premium = ref_price > mid
+        right_zone = (side == Side.SHORT and in_premium) or (side == Side.LONG
+                                                             and not in_premium)
+        score += 0.25 if right_zone else -0.25
+    return max(0.0, min(score, 1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -276,9 +282,9 @@ def build_6226(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = None,
             if m_break < cfg.after_break_ny or not in_entry_window:
                 return None                        # вне окна — отбраковка
 
-    bias = _bias_score(df, imp.side, htf_df, cfg)
-    trigger = 1.0 if imp.brk.body_confirmed else 0.0
-    sweep = 1.0 if imp.swept else 0.5
+    bias = _bias_score(df, imp.side, htf_df, cfg, entry=entry)
+    trigger = 1.0 if imp.brk.body_confirmed else 0.5  # закреп телом / только закрытием
+    sweep = 1.0 if imp.swept else 0.0    # без свипа — 0, не 0.5 (раунд-2)
     confl, cf_reasons = _confluence_score(
         df, entry, imp.side, cfg, imp.swings, imp.clean, in_entry_window)
 
@@ -311,9 +317,9 @@ def detect_setup_1_1(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = None
     stop = imp.S                    # уровень 1
     take = imp.E                    # уровень 0
 
-    bias = _bias_score(df, imp.side, htf_df, cfg)
-    trigger = 1.0 if imp.brk.body_confirmed else 0.0
-    sweep = 1.0 if imp.swept else 0.5
+    bias = _bias_score(df, imp.side, htf_df, cfg, entry=entry)
+    trigger = 1.0 if imp.brk.body_confirmed else 0.5  # закреп телом / только закрытием
+    sweep = 1.0 if imp.swept else 0.0    # без свипа — 0, не 0.5 (раунд-2)
     confl, cf_reasons = _confluence_score(
         df, entry, imp.side, cfg, imp.swings, imp.clean, None)
     confidence = _confidence(bias, trigger, sweep, confl, cfg)
@@ -377,8 +383,8 @@ def build_ltf_poi(htf_df: pd.DataFrame | None, ltf_df: pd.DataFrame, symbol: str
                    or (htf_trend == Bias.BULL and imp.side == Side.LONG))
         bias = 0.75 if aligned else 0.5
         ctx_reason = "контекст/POI HTF" + (" (совпадает с трендом)" if aligned else "")
-    trigger = 1.0 if imp.brk.body_confirmed else 0.0
-    sweep = 1.0 if imp.swept else 0.5
+    trigger = 1.0 if imp.brk.body_confirmed else 0.5  # закреп телом / только закрытием
+    sweep = 1.0 if imp.swept else 0.0    # без свипа — 0, не 0.5 (раунд-2)
     confl, cf_reasons = _confluence_score(ltf_df, entry, imp.side, cfg, imp.swings, imp.clean, None)
     confidence = _confidence(bias, trigger, sweep, confl, cfg)
     if confidence < cfg.min_confidence:
@@ -428,9 +434,9 @@ def build_opening_model(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = N
     if rr < cfg.min_rr_open_model:
         return None
 
-    bias = _bias_score(df, imp.side, htf_df, cfg)
-    trigger = 1.0 if imp.brk.body_confirmed else 0.0
-    sweep = 1.0 if imp.swept else 0.5
+    bias = _bias_score(df, imp.side, htf_df, cfg, entry=entry)
+    trigger = 1.0 if imp.brk.body_confirmed else 0.5  # закреп телом / только закрытием
+    sweep = 1.0 if imp.swept else 0.0    # без свипа — 0, не 0.5 (раунд-2)
     confl, cf_reasons = _confluence_score(df, entry, imp.side, cfg, imp.swings, imp.clean, None)
     confidence = _confidence(bias, trigger, sweep, confl, cfg)
     if confidence < cfg.min_confidence:

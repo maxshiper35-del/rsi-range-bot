@@ -110,7 +110,12 @@ def test_structure_break_choch():
     df = make_df([(6, 6, 5, 6)] * 6 + [(5, 5, 3.5, 4.0)])  # close=4.0 < опорный лой 5.0
     br = detect_structure_break(df, _UPTREND_SWINGS, trend=Bias.BULL)
     assert br is not None and br.kind == "CHOCH"
-    assert br.direction == Bias.BEAR and br.pivot_price == 5.0 and br.body_confirmed
+    # open=5.0 сидит НА уровне -> тело НЕ целиком за уровнем: закреп только закрытием
+    assert br.direction == Bias.BEAR and br.pivot_price == 5.0 and not br.body_confirmed
+    # тело целиком под уровнем -> честный body_confirmed (раунд-2: флаг больше не константа)
+    df2 = make_df([(6, 6, 5, 6)] * 6 + [(4.8, 4.9, 3.5, 4.0)])
+    br2 = detect_structure_break(df2, _UPTREND_SWINGS, trend=Bias.BULL)
+    assert br2 is not None and br2.kind == "CHOCH" and br2.body_confirmed
 
 
 def test_structure_break_bos():

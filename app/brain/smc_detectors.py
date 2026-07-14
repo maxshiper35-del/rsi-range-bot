@@ -321,7 +321,11 @@ def market_structure(df: pd.DataFrame, swings: list[Swing]) -> Bias:
 
 def detect_structure_break(df: pd.DataFrame, swings: list[Swing], trend: Bias,
                            require_body_close: bool = True) -> StructureBreak | None:
-    """Слом опорной точки с закрепом ТЕЛОМ (close за уровнем).
+    """Слом опорной точки: детект — по CLOSE за уровнем (существование сигнала не меняем).
+
+    body_confirmed — честный флаг СИЛЫ закрепа: всё тело решающего бара (и open, и close)
+    за уровнем. Раньше был захардкожен True на всех 4 ветках — компонент «триггер» в
+    confidence был константой 1.0 и ничего не фильтровал (раунд-2 аудита-2).
 
     Опорная точка (по плану): в аптренде — лой, от которого поставлен самый высокий хай;
     в даунтренде — хай, от которого поставлен самый глубокий лой.
@@ -331,8 +335,15 @@ def detect_structure_break(df: pd.DataFrame, swings: list[Swing], trend: Bias,
     highs = [s for s in swings if s.kind == Kind.HIGH]
     lows = [s for s in swings if s.kind == Kind.LOW]
     close_last = float(df["close"].iloc[-1])
+    open_last = float(df["open"].iloc[-1])
     brk = len(df) - 1
     eps = 1e-9
+
+    def _body_above(level: float) -> bool:
+        return min(open_last, close_last) > level + eps
+
+    def _body_below(level: float) -> bool:
+        return max(open_last, close_last) < level - eps
 
     if trend == Bias.BULL:
         if not highs or not lows:
@@ -341,9 +352,11 @@ def detect_structure_break(df: pd.DataFrame, swings: list[Swing], trend: Bias,
         lows_before = [s for s in lows if s.index < hh.index]
         key = lows_before[-1] if lows_before else min(lows, key=lambda s: s.price)
         if close_last > hh.price + eps:
-            return StructureBreak("BOS", hh.price, hh.index, brk, Bias.BULL, True)
+            return StructureBreak("BOS", hh.price, hh.index, brk, Bias.BULL,
+                                  _body_above(hh.price))
         if close_last < key.price - eps:
-            return StructureBreak("CHOCH", key.price, key.index, brk, Bias.BEAR, True)
+            return StructureBreak("CHOCH", key.price, key.index, brk, Bias.BEAR,
+                                  _body_below(key.price))
     else:
         if not highs or not lows:
             return None
@@ -351,9 +364,11 @@ def detect_structure_break(df: pd.DataFrame, swings: list[Swing], trend: Bias,
         highs_before = [s for s in highs if s.index < ll.index]
         key = highs_before[-1] if highs_before else max(highs, key=lambda s: s.price)
         if close_last < ll.price - eps:
-            return StructureBreak("BOS", ll.price, ll.index, brk, Bias.BEAR, True)
+            return StructureBreak("BOS", ll.price, ll.index, brk, Bias.BEAR,
+                                  _body_below(ll.price))
         if close_last > key.price + eps:
-            return StructureBreak("CHOCH", key.price, key.index, brk, Bias.BULL, True)
+            return StructureBreak("CHOCH", key.price, key.index, brk, Bias.BULL,
+                                  _body_above(key.price))
     return None
 
 

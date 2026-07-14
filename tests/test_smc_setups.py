@@ -54,7 +54,8 @@ def _df(bars, dt_start=None, step_min=15):
 
 # --- 6226 ------------------------------------------------------------------
 def test_build_6226_short():
-    sig = build_6226(_df(_BARS_SHORT), "TEST/USDT", SMCConfig(use_time_filter=False))
+    sig = build_6226(_df(_BARS_SHORT), "TEST/USDT",
+                     SMCConfig(use_time_filter=False, min_confidence=0.0))
     assert sig is not None
     assert sig.side == Side.SHORT
     # R/R считается из фактических уровней (фибо 0.62/-0.26 дают ~2.32, не зашитые 2.26)
@@ -64,19 +65,20 @@ def test_build_6226_short():
     assert abs(sig.entry - 105.9) < 0.6      # E + 0.62*(S-E)
     assert abs(sig.stop - 113.5) < 0.1       # уровень 1
     assert abs(sig.take_profits[0] - 88.3) < 0.6  # уровень -0.26
-    assert sig.confidence >= 0.5
+    assert 0.0 <= sig.confidence <= 1.0   # уровень гейта проверяет отдельный тест
     assert sig.indicators_snapshot["setup"] == "6226"
     assert sig.indicators_snapshot["market"] == 94.0   # close последнего бара
 
 
 def test_build_6226_flat_returns_none():
     from app.core.signal_engine import _synthetic_uptrend
-    assert build_6226(_synthetic_uptrend(), "T", SMCConfig(use_time_filter=False)) is None
+    assert build_6226(_synthetic_uptrend(), "T",
+                  SMCConfig(use_time_filter=False, min_confidence=0.0)) is None
 
 
 # --- Setup 1:1 -------------------------------------------------------------
 def test_setup_1_1_short():
-    sig = detect_setup_1_1(_df(_BARS_SHORT), "TEST/USDT", SMCConfig())
+    sig = detect_setup_1_1(_df(_BARS_SHORT), "TEST/USDT", SMCConfig(min_confidence=0.0))
     assert sig is not None
     assert sig.side == Side.SHORT
     assert sig.risk_reward == 1.0
@@ -102,13 +104,13 @@ def test_6226_time_gate_allows_inside_window():
 
 # --- SMCEngine -------------------------------------------------------------
 def test_engine_analyze_single_returns_best():
-    eng = SMCEngine(SMCConfig(use_time_filter=False))
+    eng = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0))
     sig = eng.analyze_single(_df(_BARS_SHORT), "TEST/USDT", "m15")
     assert sig is not None and sig.side == Side.SHORT
 
 
 def test_engine_analyze_frames():
-    eng = SMCEngine(SMCConfig(use_time_filter=False))
+    eng = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0))
     frames = {"H1": _df(_BARS_SHORT), "m15": _df(_BARS_SHORT)}
     sig = eng.analyze(frames, "TEST/USDT")
     assert sig is not None
@@ -117,8 +119,10 @@ def test_engine_analyze_frames():
 def test_min_impulse_filter():
     # огромный порог импульса -> мелкую структуру отсекает, сигналов нет
     df = _df(_BARS_SHORT)
-    assert build_6226(df, "T", SMCConfig(use_time_filter=False, min_impulse_atr=1.0)) is not None
-    assert build_6226(df, "T", SMCConfig(use_time_filter=False, min_impulse_atr=100.0)) is None
+    assert build_6226(df, "T", SMCConfig(use_time_filter=False, min_confidence=0.0,
+                                     min_impulse_atr=1.0)) is not None
+    assert build_6226(df, "T", SMCConfig(use_time_filter=False, min_confidence=0.0,
+                                     min_impulse_atr=100.0)) is None
 
 
 # Живой инцидент 2026-07-11: LAB рухнул на ~97% за 5 дней, но 200-барное окно (~8 дней
@@ -165,7 +169,8 @@ _BARS_STALE_LOW = [
 
 def test_find_impulse_anchors_on_recent_swing_not_stale_extreme_short():
     df = _df(_BARS_STALE_HIGH)
-    imp = _find_impulse(df, SMCConfig(use_time_filter=False, min_impulse_atr=0.0))
+    imp = _find_impulse(df, SMCConfig(use_time_filter=False, min_confidence=0.0,
+                                  min_impulse_atr=0.0))
     assert imp is not None and imp.side == Side.SHORT
     assert imp.S == 113.5              # ближайший к слому реальный свинг
     assert imp.S != 500.0              # НЕ древний экстремум
@@ -173,7 +178,8 @@ def test_find_impulse_anchors_on_recent_swing_not_stale_extreme_short():
 
 def test_find_impulse_anchors_on_recent_swing_not_stale_extreme_long():
     df = _df(_BARS_STALE_LOW)
-    imp = _find_impulse(df, SMCConfig(use_time_filter=False, min_impulse_atr=0.0))
+    imp = _find_impulse(df, SMCConfig(use_time_filter=False, min_confidence=0.0,
+                                  min_impulse_atr=0.0))
     assert imp is not None and imp.side == Side.LONG
     assert imp.S == 93.5               # ближайший к слому реальный свинг
     assert imp.S != -300.0             # НЕ древний экстремум
@@ -182,17 +188,17 @@ def test_find_impulse_anchors_on_recent_swing_not_stale_extreme_long():
 def test_engine_enabled_setups_filter():
     df = _df(_BARS_SHORT)
     # только Setup 1:1 -> движок обязан вернуть именно его
-    eng = SMCEngine(SMCConfig(use_time_filter=False, enabled_setups=("1:1",)))
+    eng = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0, enabled_setups=("1:1",)))
     sig = eng.analyze_single(df, "TEST/USDT", "m15")
     assert sig is not None
     assert sig.indicators_snapshot["setup"] == "1:1"
     # 6226 выключен -> его тег не может появиться ни при каком выборе
-    eng2 = SMCEngine(SMCConfig(use_time_filter=False,
+    eng2 = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0,
                                enabled_setups=("1:1", "open-SMC", "LTF")))
     sig2 = eng2.analyze_single(df, "TEST/USDT", "m15")
     assert sig2 is None or sig2.indicators_snapshot["setup"] != "6226"
     # пустой набор -> None
-    eng3 = SMCEngine(SMCConfig(use_time_filter=False, enabled_setups=()))
+    eng3 = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0, enabled_setups=()))
     assert eng3.analyze_single(df, "TEST/USDT", "m15") is None
 
 
@@ -201,7 +207,7 @@ def test_created_at_is_bar_close_time():
     # и повторный анализ того же окна даёт тот же created_at
     start = datetime(2026, 1, 5, 13, 0, tzinfo=timezone.utc)
     df = _df(_BARS_SHORT, dt_start=start)
-    cfg = SMCConfig(use_time_filter=False)
+    cfg = SMCConfig(use_time_filter=False, min_confidence=0.0)
     sig1 = build_6226(df, "T", cfg)
     sig2 = build_6226(df, "T", cfg)
     assert sig1 is not None and sig2 is not None
@@ -212,7 +218,7 @@ def test_created_at_is_bar_close_time():
 
 def test_analyze_fallback_picks_youngest_tf():
     # frames без ENTRY_TFS: '1h' должен стать входным, '4h' — контекстом (не наоборот)
-    eng = SMCEngine(SMCConfig(use_time_filter=False))
+    eng = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0))
     frames = {"4h": _df(_BARS_SHORT), "1h": _df(_BARS_SHORT)}
     sig = eng.analyze(frames, "T")
     assert sig is not None
@@ -221,14 +227,15 @@ def test_analyze_fallback_picks_youngest_tf():
 
 def test_enabled_setups_specific_ltf_entry():
     # конкретная запись 'LTF-BB' должна проходить пре-гейт (двусторонний префикс-матч)
-    eng = SMCEngine(SMCConfig(use_time_filter=False, enabled_setups=("LTF-BB",)))
+    eng = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0,
+                              enabled_setups=("LTF-BB",)))
     sig = eng.analyze_single(_df(_BARS_SHORT), "T", "m15")
     assert sig is None or sig.indicators_snapshot["setup"] == "LTF-BB"
 
 
 def test_engine_flat_is_none():
     from app.core.signal_engine import _synthetic_uptrend
-    eng = SMCEngine(SMCConfig(use_time_filter=False))
+    eng = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0))
     out = eng.analyze_single(_synthetic_uptrend(), "T", "m15")
     assert out is None or out.side in (Side.LONG, Side.SHORT)
 
@@ -265,7 +272,7 @@ def test_in_window_wraps_midnight():
 # --- §2.2 LTF-POI и модели открытия ----------------------------------------
 def test_build_ltf_poi_short():
     df = _df(_BARS_SHORT)
-    sig = build_ltf_poi(df, df, "TEST/USDT", SMCConfig())
+    sig = build_ltf_poi(df, df, "TEST/USDT", SMCConfig(min_confidence=0.0))
     assert sig is not None
     assert sig.side == Side.SHORT
     assert abs(sig.stop - 113.5) < 0.1               # дальняя граница блока
@@ -275,7 +282,7 @@ def test_build_ltf_poi_short():
 
 def test_build_opening_model_short():
     df = _df(_BARS_SHORT)
-    sig = build_opening_model(df, "TEST/USDT", SMCConfig(), model="SMC")
+    sig = build_opening_model(df, "TEST/USDT", SMCConfig(min_confidence=0.0), model="SMC")
     assert sig is not None
     assert sig.side == Side.SHORT
     assert abs(sig.stop - 113.5) < 0.1               # за точку разворота
@@ -288,15 +295,15 @@ def test_build_opening_model_rejects_low_rr():
     # выбираются НЕЗАВИСИМО: если FVG оказался у самого E, reward -> 0 при полном risk
     # (живая сделка #145: risk 2.58%, reward 0.06%, RR=0.02). Порог должен отсекать такое.
     df = _df(_BARS_SHORT)
-    baseline = build_opening_model(df, "TEST/USDT", SMCConfig(), model="SMC")
+    baseline = build_opening_model(df, "TEST/USDT", SMCConfig(min_confidence=0.0), model="SMC")
     assert baseline is not None and baseline.risk_reward == 1.35   # RR фикстуры (справочно)
     # порог выше фактического RR -> сигнал отклонён
     rejected = build_opening_model(
-        df, "TEST/USDT", SMCConfig(min_rr_open_model=1.5), model="SMC")
+        df, "TEST/USDT", SMCConfig(min_confidence=0.0, min_rr_open_model=1.5), model="SMC")
     assert rejected is None
     # порог ниже фактического RR -> сигнал по-прежнему проходит
     passed = build_opening_model(
-        df, "TEST/USDT", SMCConfig(min_rr_open_model=1.0), model="SMC")
+        df, "TEST/USDT", SMCConfig(min_confidence=0.0, min_rr_open_model=1.0), model="SMC")
     assert passed is not None and passed.risk_reward == 1.35
 
 
@@ -309,3 +316,18 @@ def test_build_opening_model_signal_145_regression():
     rr = round(reward / risk, 2)
     assert rr == 0.02                                 # подтверждаем геометрию инцидента
     assert rr < SMCConfig().min_rr_open_model          # дефолтный пол (0.5) отсекает
+
+
+def test_confidence_gate_discriminates_weak_setups():
+    """Раунд-2: гейт confidence — реальный фильтр, не вакуум. Слабый сетап (без свипа /
+    контртренд / без конфлюэнса) при дефолтном min_confidence=0.5 отсекается, а с
+    выключенным гейтом (0.0) — существует. Floor больше не 0.55."""
+    df = _df(_BARS_SHORT)
+    eng_strict = SMCEngine(SMCConfig(use_time_filter=False, enabled_setups=("1:1",)))
+    eng_loose = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0,
+                                    enabled_setups=("1:1",)))
+    strict = eng_strict.analyze_single(df, "TEST/USDT", "m15")
+    loose = eng_loose.analyze_single(df, "TEST/USDT", "m15")
+    assert loose is not None                          # сетап конструктивно существует
+    assert loose.confidence < 0.5                     # ...но уверенность честно низкая
+    assert strict is None                             # дефолтный гейт его режет

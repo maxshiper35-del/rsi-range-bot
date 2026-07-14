@@ -42,7 +42,7 @@ def test_seconds_to_next_close_unknown_tf():
 
 def test_poll_once_auto_records_open_signal(fresh_db):
     """Авто-режим (прод по умолчанию): сигнал сразу активен."""
-    eng = SMCEngine(SMCConfig(use_time_filter=False))
+    eng = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0))
     found, _ = poll_once(["BTC/USDT:USDT"], ["m15"], engine=eng, frames_loader=_frames,
                          mode="auto")
     assert len(found) == 1
@@ -54,7 +54,7 @@ def test_poll_once_auto_records_open_signal(fresh_db):
 
 
 def test_poll_once_semiauto_records_candidate(fresh_db):
-    eng = SMCEngine(SMCConfig(use_time_filter=False))
+    eng = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0))
     found, _ = poll_once(["BTC/USDT:USDT"], ["m15"], engine=eng, frames_loader=_frames,
                          mode="semiauto")
     assert len(found) == 1
@@ -105,7 +105,7 @@ def test_poll_once_symbol_error_is_skipped(fresh_db):
             raise RuntimeError("биржа лежит")
         return _frames(symbol, timeframes)
 
-    eng = SMCEngine(SMCConfig(use_time_filter=False))
+    eng = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0))
     found, _ = poll_once(["BAD", "BTC/USDT:USDT"], ["m15"], engine=eng, frames_loader=loader,
                          mode="auto")
     assert len(found) == 1                             # BAD пропущен, цикл не упал
@@ -138,7 +138,7 @@ def test_poll_once_scores_orphan_symbol_not_in_watchlist(fresh_db):
                            "volume": [1000.0] * len(bars)})
         return {tf: df for tf in timeframes}
 
-    eng = SMCEngine(SMCConfig(use_time_filter=False))
+    eng = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0))
     # вотчлист НЕ содержит OLD — только ETH; OLD подхватывается orphan-скорингом
     _, closed = poll_once(["ETH/USDT:USDT"], ["1h"], engine=eng, frames_loader=loader,
                           mode="auto")
