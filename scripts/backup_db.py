@@ -67,13 +67,19 @@ def _verify_integrity(path: Path) -> None:
     if not ok:
         path.unlink(missing_ok=True)                        # closed до удаления
         raise RuntimeError(f"бэкап не прошёл integrity_check: {path} -> {detail}")
+    # компаньоны -wal/-shm от проверочного соединения: не нужны, а НЕпустой -wal рядом
+    # с восстановленной копией «доигрался» бы в неё при открытии (аудит-2 ops [10])
+    for suffix in ("-wal", "-shm"):
+        Path(str(path) + suffix).unlink(missing_ok=True)
 
 
 def _rotate(dst_dir: Path, keep_last: int) -> None:
-    """Оставить keep_last свежих файлов signals-*.db, старые удалить."""
+    """Оставить keep_last свежих файлов signals-*.db, старые удалить (с компаньонами)."""
     backups = sorted(dst_dir.glob("signals-*.db"))
     for old in backups[:-keep_last] if keep_last > 0 else backups:
         old.unlink()
+        for suffix in ("-wal", "-shm"):                     # ротация не копит сироты
+            Path(str(old) + suffix).unlink(missing_ok=True)
 
 
 def main() -> None:

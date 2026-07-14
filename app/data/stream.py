@@ -78,10 +78,13 @@ async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log) -> None:
 
     backoff = 1.0
     while True:
-        if not enabled():
-            await asyncio.sleep(30)
-            continue
         try:
+            # чек флага ВНУТРИ try: enabled() — синхронное чтение SQLite, редкий
+            # OperationalError (гонка с ночным бэкапом) вне try убивал таску навсегда
+            # (аудит-2 ops [2]) — реалтайм-филлы молча деградировали до бар-скоринга
+            if not enabled():
+                await asyncio.sleep(30)
+                continue
             symbols = get_symbols()
             interval = bybit_interval(get_tf())
             topics = [f"kline.{interval}.{ws_symbol(s)}" for s in symbols]
@@ -106,6 +109,10 @@ async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log) -> None:
                             continue
                         if frame.type != aiohttp.WSMsgType.TEXT:
                             break                       # close/error frame -> reconnect с backoff
+                        # отказ подписки Bybit молча терялся в parse_kline -> стрим «подключён»,
+                        # а филлы не приходят (аудит-2 ops [5]) — теперь виден в логе
+                        if '"success":false' in frame.data.replace(" ", ""):
+                            log.warning("стрим: отказ операции: %.200s", frame.data)
                         for evt in parse_kline(frame.data):
                             await on_intrabar(evt.symbol_ws, evt.high, evt.low)
             if planned:

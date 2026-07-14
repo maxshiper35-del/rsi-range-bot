@@ -7,6 +7,7 @@ seconds_to_next_close / poll_once / run_poller (такт по закрытию �
 """
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 
 import pandas as pd
@@ -183,9 +184,16 @@ async def run_poller(on_candidate, engine=None, on_tick=None, on_close=None) -> 
 # ---------------------------------------------------------------------------
 # Мультитаймфрейм и SMT-партнёр
 # ---------------------------------------------------------------------------
+# синхронный ccxt НЕ потокобезопасен, а инстанс общий для поллера (to_thread) и хендлеров
+# (график/гейт): гонка учёта троттлера недодерживала паузы ровно при совпадении рендера
+# с тактом -> залпы и 10006 (318 ретраев за 5.5 дней, аудит-2 ops [3][4])
+_EXCHANGE_LOCK = threading.Lock()
+
+
 def _exchange(exchange_id: str):
     """ОДИН ccxt-инстанс на биржу (кэш): встроенный rate-limiter ccxt работает только
-    внутри инстанса — новый объект на каждый вызов даёт залп запросов и 10006 от Bybit."""
+    внутри инстанса — новый объект на каждый вызов даёт залп запросов и 10006 от Bybit.
+    Вызовы fetch_* на инстансе — только под _EXCHANGE_LOCK."""
     import ccxt  # ленивый импорт
 
     cache = getattr(_exchange, "_cache", None)
@@ -194,6 +202,9 @@ def _exchange(exchange_id: str):
     if exchange_id not in cache:
         cache[exchange_id] = getattr(ccxt, exchange_id)({
             "enableRateLimit": True,
+            # 200мс между запросами (дефолт bybit ~20мс): на этом IP ещё три бота —
+            # общий лимит биржи выбирается залпами (аудит-2 ops [3])
+            "rateLimit": 200,
             # явный сетевой таймаут: дефолт ccxt (10с) неявен, а зависший запрос без
             # таймаута мог бы подвесить синхронный fetch в to_thread на минуты и заморозить
             # такт поллера — watchdog это заметит, но лучше не допускать
@@ -222,7 +233,8 @@ def fetch_closed_ohlcv(symbol: str, timeframe: str, limit: int = 200,
     last_err: Exception | None = None
     for attempt in range(retries):
         try:
-            raw = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            with _EXCHANGE_LOCK:                        # sync-ccxt не потокобезопасен
+                raw = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
             break
         except Exception as e:                          # noqa: BLE001 — ccxt Network/RateLimit/Exchange
             last_err = e
@@ -267,8 +279,9 @@ def fetch_history(symbol: str, timeframe: str, target_bars: int,
         batch = None
         for attempt in range(retries):
             try:
-                batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe,
-                                             since=since, limit=page_limit)
+                with _EXCHANGE_LOCK:                    # sync-ccxt не потокобезопасен
+                    batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe,
+                                                 since=since, limit=page_limit)
                 break
             except Exception as e:                      # noqa: BLE001 — ccxt Network/RateLimit
                 if attempt == retries - 1:
@@ -302,7 +315,8 @@ def top_liquid_symbols(n: int, blacklist: tuple = (), exchange_id: str | None = 
             from app.config import get_settings
             exchange_id = get_settings().exchange_id
         exchange = _exchange(exchange_id)
-    tickers = exchange.fetch_tickers()
+    with _EXCHANGE_LOCK:                                # sync-ccxt не потокобезопасен
+        tickers = exchange.fetch_tickers()
     ranked = []
     for sym, t in tickers.items():
         if not sym.endswith("/USDT:USDT") or sym in blacklist:

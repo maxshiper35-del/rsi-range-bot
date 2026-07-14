@@ -188,7 +188,12 @@ def set_last_board_update_at(iso: str) -> None:
 
 def live_board_message_id() -> int | None:
     v = _raw("live_board_message_id")
-    return int(v) if v else None            # "" тоже трактуем как «не установлено»
+    if not v:
+        return None                         # "" тоже трактуем как «не установлено»
+    try:
+        return int(v)
+    except (TypeError, ValueError):         # битое значение не должно ронять _maintenance
+        return None
 
 
 def set_live_board_message_id(message_id: int | None) -> None:
@@ -277,8 +282,7 @@ def watchlist_blacklist() -> tuple:
 
 def last_milestone() -> int:
     """Последняя опубликованная веха закрытых сделок (см. bot.MILESTONES)."""
-    v = _raw("last_milestone")
-    return int(v) if v is not None else 0
+    return _num("last_milestone", int, 0)   # битое значение -> 0, не краш _maintenance
 
 
 def last_watchlist_refresh_at() -> str | None:

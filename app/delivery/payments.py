@@ -270,6 +270,14 @@ def all_user_ids() -> list[int]:
     return [r["tg_id"] for r in db.query("SELECT tg_id FROM users WHERE is_active=1")]
 
 
+def mark_blocked(tg_id: int) -> None:
+    """403/«chat not found» при отправке: юзер недостижим — is_active=0, чтобы не слать
+    мёртвому получателю каждый сигнал (142 отказа за 500 строк лога, аудит-2 ops [8]).
+    Повторный /start снимает пометку (register_user ставит is_active=1)."""
+    db.execute("UPDATE users SET is_active=0, updated_at=? WHERE tg_id=?",
+               (clock.utcnow_iso(), tg_id))
+
+
 def delivered(tg_id: int, signal_id: int) -> bool:
     return db.query_one("SELECT 1 FROM deliveries WHERE tg_id=? AND signal_id=?",
                         (tg_id, signal_id)) is not None

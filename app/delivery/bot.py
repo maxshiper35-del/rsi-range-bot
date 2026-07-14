@@ -740,6 +740,7 @@ USER_COMMANDS = [
     ("promo", "применить промокод: /promo <код>"),
     ("referral", "пригласить друга и получить дни подписки"),
     ("notify", "уведомления: мьют и тихие часы"),
+    ("cancel", "отменить текущий пошаговый ввод"),
     ("about", "как устроен сервис, честный дисклеймер"),
     ("terms", "условия использования: риски, оплата, возврат, данные"),
     ("backtest", "честный итог бэктеста стратегии"),
@@ -1165,7 +1166,7 @@ def main() -> None:
         arg = parts[1] if len(parts) > 1 else ""
         if arg.startswith("src_") and len(arg) > 4:
             await asyncio.to_thread(payments.set_acquisition_source, m.from_user.id, arg[4:])
-        elif arg.startswith("ref_") and arg[4:].isdigit():
+        elif arg.startswith("ref_") and arg[4:].isdecimal():  # isdecimal: '²³' роняют int()
             await asyncio.to_thread(payments.set_referrer, m.from_user.id, int(arg[4:]))
             await asyncio.to_thread(payments.set_acquisition_source, m.from_user.id, "referral")
         trial_days = runtime.trial_days()
@@ -1301,6 +1302,8 @@ def main() -> None:
 
     @dp.message(PromoState.code, ~F.text.startswith("/"))
     async def _promo_step_code(m, state: FSMContext):
+        if await _fsm_menu_escape(m, state):
+            return
         await state.clear()
         await _apply_promo(m, (m.text or "").strip())
 
@@ -1428,16 +1431,18 @@ def main() -> None:
         sid, sig = await _load_signal_for_action(cq)
         if sig is None:
             return
+        # ack ДО рендера: биржа+Chromium занимают до десятков секунд, просроченный callback
+        # давал вечный спиннер и алерт админу на каждый повторный тап (аудит-2 UX [7])
+        await cq.answer("Готовлю график…")
         try:
             png = await asyncio.to_thread(_signal_chart_png, sig, sid)
         except Exception as e:                              # noqa: BLE001 — биржа/рендер
             log.warning("sigchart #%s: %s", sid, e)
-            await cq.answer("График сейчас недоступен — попробуйте позже.", show_alert=True)
+            await cq.message.answer("График сейчас недоступен — попробуйте позже.")
             return
         cap = f"📈 Сигнал #{sid}: {templates.esc(sig.symbol)} · {templates.esc(sig.timeframe)}"
         await cq.message.answer_photo(
             BufferedInputFile(png, filename=f"signal_{sid}.png"), caption=cap)
-        await cq.answer()
 
     @dp.callback_query(F.data.startswith("sigcalc:"))
     async def _sig_calc(cq):
@@ -1513,13 +1518,34 @@ def main() -> None:
     # ~F.text.startswith("/") на каждом шаге: если юзер вместо ответа набрал команду
     # (передумал/нажал другую кнопку) — состояние НЕ перехватывает её молча, команда
     # проходит в свой обычный хендлер (aiogram пробует следующий подходящий хендлер)
+    _MENU_TEXTS = frozenset(t for row in (main_menu_layout(False) + main_menu_layout(True))
+                            for t in row)
+
+    async def _fsm_menu_escape(m, state: FSMContext) -> bool:
+        """Кнопка меню посреди пошагового ввода — выход из состояния, а не «Не понял число»
+        (аудит-2 UX [6]: половина меню зарегистрирована ПОСЛЕ FSM-шагов и попадала в ловушку
+        «Статистика -> Не понял число» без выхода). -> True, если перехвачено."""
+        if (m.text or "") in _MENU_TEXTS:
+            await state.clear()
+            await m.answer("Ввод отменён — нажмите кнопку ещё раз.")
+            return True
+        return False
+
+    @dp.message(Command("cancel"))
+    async def _cancel(m, state: FSMContext):
+        await state.clear()
+        await m.answer("Ок, отменил.", reply_markup=_main_menu_kb(_is_admin(m)))
+
     @dp.message(F.text == "🧮 Калькулятор")
     async def _calc_btn_start(m, state: FSMContext):
         await state.set_state(CalcStates.deposit)
-        await m.answer("🧮 Калькулятор позиции\nДепозит в USD? Например: 1000")
+        await m.answer("🧮 Калькулятор позиции\nДепозит в USD? Например: 1000\n"
+                       "(передумали — /cancel)")
 
     @dp.message(CalcStates.deposit, ~F.text.startswith("/"))
     async def _calc_step_deposit(m, state: FSMContext):
+        if await _fsm_menu_escape(m, state):
+            return
         try:
             dep = float((m.text or "").replace(",", "."))
             assert dep > 0
@@ -1532,6 +1558,8 @@ def main() -> None:
 
     @dp.message(CalcStates.risk, ~F.text.startswith("/"))
     async def _calc_step_risk(m, state: FSMContext):
+        if await _fsm_menu_escape(m, state):
+            return
         try:
             risk = float((m.text or "").replace(",", "."))
             assert risk > 0
@@ -1544,6 +1572,8 @@ def main() -> None:
 
     @dp.message(CalcStates.entry, ~F.text.startswith("/"))
     async def _calc_step_entry(m, state: FSMContext):
+        if await _fsm_menu_escape(m, state):
+            return
         try:
             entry = float((m.text or "").replace(",", "."))
             assert entry > 0
@@ -1556,6 +1586,8 @@ def main() -> None:
 
     @dp.message(CalcStates.stop, ~F.text.startswith("/"))
     async def _calc_step_stop(m, state: FSMContext):
+        if await _fsm_menu_escape(m, state):
+            return
         try:
             stop = float((m.text or "").replace(",", "."))
             assert stop > 0
@@ -1584,7 +1616,7 @@ def main() -> None:
                 try:
                     await bot.send_message(
                         admin_id,
-                        f"📢 Бот стал админом канала «{chat.title}».\n"
+                        f"📢 Бот стал админом канала «{templates.esc(chat.title)}».\n"
                         f"ID канала: <code>{chat.id}</code>\n\n"
                         f"Чтобы постить сигналы сюда — пришли мне этот ID "
                         f"(или добавь в .env: SIGNALS_CHANNEL={chat.id}).",
@@ -2237,11 +2269,17 @@ def main() -> None:
                                     "0" if runtime.stream_enabled() else "1")
         elif data == "adm_poststats":
             ch = runtime.signals_channel()
+            posted = False
             if ch:
                 try:
-                    await bot.send_message(ch, format_channel_stats(journal.stats()))
+                    st = await asyncio.to_thread(journal.stats)
+                    await bot.send_message(ch, format_channel_stats(st))
+                    posted = True
                 except Exception as e:                 # noqa: BLE001
                     log.warning("poststats: %s", e)
+            if not posted:                             # честный ответ вместо ложного «Готово»
+                await cq.answer("⚠️ Не удалось отправить в канал.", show_alert=True)
+                return
         elif data == "adm_nav_strategy":
             screen = "strategy"
         elif data == "adm_nav_prices":
@@ -2291,6 +2329,8 @@ def main() -> None:
     @dp.message(AdminInput.numeric, ~F.text.startswith("/"))
     async def _admin_numeric_receive(m, state: FSMContext):
         if not _is_admin(m):
+            return
+        if await _fsm_menu_escape(m, state):            # заброшенный промпт не съедает число
             return
         data = await state.get_data()
         field, kind = str(data.get("field", "")), str(data.get("kind", ""))
@@ -2348,9 +2388,13 @@ def main() -> None:
         if photo is None:
             return await bot.send_message(channel, text, parse_mode="HTML")
         file = BufferedInputFile(photo, filename=f"signal_{sid}.png")
-        if caption_fits(text):
-            return await bot.send_photo(channel, file, caption=text, parse_mode="HTML")
-        await bot.send_photo(channel, file)            # подпись не влезла — фото отдельно
+        try:
+            if caption_fits(text):
+                return await bot.send_photo(channel, file, caption=text, parse_mode="HTML")
+            await bot.send_photo(channel, file)        # подпись не влезла — фото отдельно
+        except Exception as e:                         # noqa: BLE001 — сбой ОТПРАВКИ фото
+            # тоже откат на текст: раньше терялся весь пост (аудит-2 UX [10])
+            log.warning("фото поста #%s: %s", sid, e)
         return await bot.send_message(channel, text, parse_mode="HTML")
 
     def _watchlist_gate(symbol: str) -> tuple:
@@ -2375,14 +2419,24 @@ def main() -> None:
                 rep.expectancy_r, rep.trades)
 
     async def _broadcast(sig, sid):
+        # semiauto: КАНДИДАТ уходит ТОЛЬКО оператору — ни канала, ни подписчиков.
+        # Раньше _broadcast был слеп к режиму дальше выбора текста: неподтверждённый сетап
+        # публиковался в канал как сигнал, а платные получали операторский алерт с мёртвыми
+        # для них /confirm (аудит-2 UX [2]). Рассылка подтверждённого — после /confirm.
+        if runtime.signal_mode() != "auto":
+            try:
+                alert = templates.esc(format_candidate_alert(sig, sid))
+            except Exception:                          # noqa: BLE001 — формат не роняет цикл
+                log.exception("формат алерта кандидата #%s", sid)
+                alert = f"🕵️ Кандидат #{sid} (ошибка форматирования — детали в журнале)"
+            for admin_id in cfg.admin_ids:
+                try:
+                    await bot.send_message(admin_id, alert, parse_mode="HTML")
+                except Exception as e:                 # noqa: BLE001
+                    log.warning("candidate alert %s: %s", admin_id, e)
+            return
         try:
-            # runtime, не cfg: иначе смена режима из админки без рестарта не меняла
-            # бы тело рассылки (poller-то уже решает по runtime.signal_mode())
-            if runtime.signal_mode() == "auto":
-                full = templates.render_signal_dm(sig, sid)
-            else:
-                # алерт оператору — plain-шаблон, экранируем под parse_mode=HTML
-                full = templates.esc(format_candidate_alert(sig, sid))
+            full = templates.render_signal_dm(sig, sid)
         except Exception:                              # noqa: BLE001 — формат не роняет цикл
             log.exception("формат алерта #%s", sid)
             full = f"🔔 Сигнал #{sid} (ошибка форматирования — детали в журнале)"
@@ -2448,6 +2502,10 @@ def main() -> None:
                 sent += 1
             except Exception as e:                     # noqa: BLE001 — один получатель не роняет рассылку
                 log.warning("send %s: %s", uid, e)
+                low = str(e).lower()
+                if "blocked" in low or "chat not found" in low or "deactivated" in low:
+                    # мёртвый получатель — не слать каждый сигнал; /start вернёт (аудит-2 ops [8])
+                    await asyncio.to_thread(payments.mark_blocked, uid)
         log.info("сигнал #%s: отправлено %d из %d (план)", sid, sent, len(plan))
 
     async def _maintenance():
@@ -2705,29 +2763,33 @@ def main() -> None:
                     await asyncio.to_thread(journal.record_ledger_hash, len(rows), checksum)
                 except Exception as e:                      # noqa: BLE001
                     log.warning("еженедельный трек-рекорд: %s", e)
-            # недельный ЛИЧНЫЙ дайджест подписчикам (ретеншн) — отдельный маркер от карточки,
-            # чтобы card/CSV и рассылка не блокировали друг друга. Маркер ставим ДО рассылки:
-            # краш посреди рассылки не должен переслать дайджест всем заново.
-            if should_post_weekly(runtime.weekly_digest_last_week(), week_key):
-                await asyncio.to_thread(runtime.set_weekly_digest_last_week, week_key)
-                try:
-                    d_start, d_end = weekly_report_period(now_dt)
-                    d_wk = await asyncio.to_thread(
-                        journal.stats_for_period, d_start.isoformat(), d_end.isoformat())
-                    d_st = await asyncio.to_thread(journal.stats)
-                    d_label = (f"{d_start.strftime('%d.%m')}"
-                               f"–{(d_end - timedelta(days=1)).strftime('%d.%m')}")
-                    d_text = templates.render_weekly_digest(d_label, d_wk, d_st)
-                    sent = 0
-                    for uid in await asyncio.to_thread(payments.active_subscriber_ids):
-                        try:
-                            await bot.send_message(uid, d_text, parse_mode="HTML")
-                            sent += 1
-                        except Exception as e:              # noqa: BLE001 — заблокировал бота
-                            log.warning("дайджест -> %s: %s", uid, e)
-                    log.info("недельный дайджест разослан: %d подписчикам", sent)
-                except Exception as e:                      # noqa: BLE001
-                    log.warning("недельный дайджест: %s", e)
+        # недельный ЛИЧНЫЙ дайджест подписчикам (ретеншн) — ВНЕ гейта канала: выключение
+        # канала не должно молча убивать подписческую фичу (аудит-2 UX [4]). Отдельный
+        # маркер от карточки; маркер ставим ДО рассылки: краш посреди рассылки не должен
+        # переслать дайджест всем заново.
+        d_now = datetime.now(timezone.utc)
+        d_year, d_week, _ = d_now.isocalendar()
+        d_week_key = f"{d_year}-W{d_week:02d}"
+        if should_post_weekly(runtime.weekly_digest_last_week(), d_week_key):
+            await asyncio.to_thread(runtime.set_weekly_digest_last_week, d_week_key)
+            try:
+                d_start, d_end = weekly_report_period(d_now)
+                d_wk = await asyncio.to_thread(
+                    journal.stats_for_period, d_start.isoformat(), d_end.isoformat())
+                d_st = await asyncio.to_thread(journal.stats)
+                d_label = (f"{d_start.strftime('%d.%m')}"
+                           f"–{(d_end - timedelta(days=1)).strftime('%d.%m')}")
+                d_text = templates.render_weekly_digest(d_label, d_wk, d_st)
+                sent = 0
+                for uid in await asyncio.to_thread(payments.active_subscriber_ids):
+                    try:
+                        await bot.send_message(uid, d_text, parse_mode="HTML")
+                        sent += 1
+                    except Exception as e:                  # noqa: BLE001 — заблокировал бота
+                        log.warning("дайджест -> %s: %s", uid, e)
+                log.info("недельный дайджест разослан: %d подписчикам", sent)
+            except Exception as e:                          # noqa: BLE001
+                log.warning("недельный дайджест: %s", e)
 
     async def _on_close(closed):
         # мягкое уведомление АДМИНУ (не в канал): серия стопов подряд на ВКЛЮЧЁННОМ сетапе —
@@ -2864,16 +2926,43 @@ def main() -> None:
 
     async def _poller():
         from app.data.market_data import run_poller
-        # engine=None -> poller строит движок из runtime.min_confidence() каждый такт
-        await run_poller(_broadcast, engine=None, on_tick=_maintenance, on_close=_on_close)
+        # engine=None -> poller строит движок из runtime.min_confidence() каждый такт.
+        # on_tick=None: обслуживание вынесено в НЕЗАВИСИМУЮ таску _maintenance_loop —
+        # watchdog поллера не может жить внутри наблюдаемой таски (аудит-2 ops [1]:
+        # зависший поллер отключал и watchdog, и весь жизненный цикл подписок)
+        await run_poller(_broadcast, engine=None, on_tick=None, on_close=_on_close)
 
-    def _poller_done(task) -> None:
-        # наблюдаем судьбу фоновой таски: смерть poller не должна быть молчаливой
+    async def _maintenance_loop():
+        # 60с вместо часового такта поллера: USDT-активация/алерты не ждут закрытия свечи,
+        # watchdog реально ловит зависший поллер. Все блоки идемпотентны или за маркерами
+        # (карточка/дайджест/табло — раз в сутки/неделю независимо от частоты цикла).
+        while True:
+            try:
+                await _maintenance()
+            except Exception:                          # noqa: BLE001 — цикл живёт всегда
+                log.exception("maintenance-цикл")
+            await asyncio.sleep(60)
+
+    def _task_died(task) -> None:
+        # смерть фоновой таски не должна быть молчаливой: лог + ПРЯМОЙ HTTP-алерт админам
+        # (не aiogram — вдруг сломан именно он). Процесс жив (KeepAlive не поможет),
+        # но сигналы/обслуживание встали — оператору нужен рестарт.
         if task.cancelled():
             return
         exc = task.exception()
-        if exc is not None:
-            log.error("poller умер: %r", exc)
+        if exc is None:
+            return
+        name = task.get_name()
+        log.error("фоновая таска %s умерла: %r", name, exc)
+        for admin_id in cfg.admin_ids:
+            try:
+                _send_raw_telegram_message(
+                    cfg.tg_bot_token, admin_id,
+                    f"🔥 Фоновая таска «{name}» умерла: {exc!r}\n"
+                    f"Процесс жив, но «{name}» не работает — нужен рестарт "
+                    "(launchctl kickstart -k gui/$UID/com.rsirange.bot).")
+            except Exception:                          # noqa: BLE001 — алерт не роняет колбэк
+                log.exception("не удалось отправить алерт о смерти таски %s", name)
 
     async def _main():
         try:
@@ -2881,16 +2970,19 @@ def main() -> None:
             await register_bot_profile(bot)
         except Exception as e:                         # noqa: BLE001 — меню не критично для работы
             log.warning("register_bot_commands: %s", e)
-        poller = asyncio.create_task(_poller())
-        poller.add_done_callback(_poller_done)
+        poller = asyncio.create_task(_poller(), name="poller")
+        poller.add_done_callback(_task_died)
         # реалтайм-стрим (за флагом stream_enabled; при выключенном флаге тихо спит)
-        stream_task = asyncio.create_task(_stream())
-        stream_task.add_done_callback(_poller_done)     # смерть стрима тоже не молчит
+        stream_task = asyncio.create_task(_stream(), name="stream")
+        stream_task.add_done_callback(_task_died)
+        maint_task = asyncio.create_task(_maintenance_loop(), name="maintenance")
+        maint_task.add_done_callback(_task_died)
         try:
             await dp.start_polling(bot)
         finally:
             poller.cancel()
             stream_task.cancel()
+            maint_task.cancel()
 
     # TODO: /calc интерактивный (пока формат через format_calc); USDT через CryptoBot.
     log.info("bot запущен, engine=SMC, polling+poller, платежи=Stars")
