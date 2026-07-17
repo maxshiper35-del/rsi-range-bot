@@ -586,3 +586,25 @@ def test_stats_since_created_epoch_split(fresh_db):
     assert fresh["total_r"] == 2.0 and fresh["wins"] == 1
     by_setup_fresh = journal.stats_by_setup(since_created="2026-01-15T00:00:00+00:00")
     assert by_setup_fresh["6226"]["trades"] == 1
+
+
+def test_recent_side_stops_window(fresh_db):
+    """Анти-кластерный тормоз: стопы стороны считаются в СКОЛЬЗЯЩЕМ окне по closed_at;
+    тейки, другая сторона и стопы старше окна не считаются."""
+    from app import db
+    from app.brain import journal
+    journal.record_signal(_sig(symbol="BTC/USDT:USDT"))                    # SHORT -> стоп
+    journal.record_signal(_sig(symbol="ETH/USDT:USDT", entry=200.0, stop=210.0, tp=180.0,
+                               created_at="2026-01-01T00:15:00+00:00"))    # SHORT -> тейк
+    journal.record_signal(_sig(symbol="SOL/USDT:USDT", side=Side.LONG,
+                               entry=50.0, stop=45.0, tp=60.0,
+                               created_at="2026-01-01T00:30:00+00:00"))    # LONG -> стоп
+    journal.update_outcomes({"BTC/USDT:USDT": 111.0,                       # SHORT стоп
+                             "ETH/USDT:USDT": 179.0,                       # SHORT тейк
+                             "SOL/USDT:USDT": 44.0})                       # LONG стоп
+    assert journal.recent_side_stops("SHORT", 6.0) == 1                    # тейк не считается
+    assert journal.recent_side_stops("LONG", 6.0) == 1
+    # стоп старше окна выпадает
+    db.execute("UPDATE signals SET closed_at=? WHERE symbol='BTC/USDT:USDT'",
+               ("2026-01-01T01:00:00+00:00",))
+    assert journal.recent_side_stops("SHORT", 6.0) == 0

@@ -147,7 +147,8 @@ async def run_poller(on_candidate, engine=None, on_tick=None, on_close=None) -> 
                     min_confidence=runtime.min_confidence(),
                     min_impulse_atr=runtime.min_impulse_atr(),
                     min_rr_open_model=runtime.min_rr_open_model(),
-                    enabled_setups=runtime.enabled_setups()))
+                    enabled_setups=runtime.enabled_setups(),
+                    htf_block_countertrend=runtime.htf_block_countertrend()))
                 found, closed = await asyncio.to_thread(
                     poll_once, runtime.symbols(), tfs, eng, None, 1.5)
             for sig, sid in found:

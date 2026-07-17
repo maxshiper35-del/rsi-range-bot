@@ -331,3 +331,56 @@ def test_confidence_gate_discriminates_weak_setups():
     assert loose is not None                          # сетап конструктивно существует
     assert loose.confidence < 0.5                     # ...но уверенность честно низкая
     assert strict is None                             # дефолтный гейт его режет
+
+
+# --- HTF-блок контртренда --------------------------------------------------
+# Бычий зигзаг с ПОДТВЕРЖДЁННОЙ структурой: HIGH 105@2 -> LOW 100.5@5 ->
+# HIGH 110@8 (HH) -> LOW 103@11 (HL) + хвост для подтверждения правого плеча.
+_BARS_HTF_BULL = [
+    (100, 101, 99, 100),
+    (100, 102, 100, 101),
+    (101, 105, 101, 104),       # swing HIGH 105
+    (104, 104.5, 102, 103),
+    (103, 103.5, 101, 102),
+    (102, 102.5, 100.5, 101),   # swing LOW 100.5
+    (101, 104, 101, 103),
+    (103, 106, 102.5, 105),
+    (105, 110, 104, 109),       # swing HIGH 110 (HH)
+    (109, 109.5, 105, 106),
+    (106, 107, 104, 105),
+    (105, 105.5, 103, 104),     # swing LOW 103 (HL)
+    (104, 106, 103.5, 105),
+    (105, 107, 104, 106),
+]
+# Зеркало (отражение цен вокруг 200): LH+LL — подтверждённый медвежий тренд.
+_BARS_HTF_BEAR = [(200 - o, 200 - lo, 200 - h, 200 - c) for o, h, lo, c in _BARS_HTF_BULL]
+
+
+def test_htf_confirmed_trend_detects_structure():
+    from app.brain.smc_detectors import Bias
+    from app.brain.smc_setups import htf_confirmed_trend
+    cfg = SMCConfig()
+    assert htf_confirmed_trend(_df(_BARS_HTF_BULL), cfg) == Bias.BULL
+    assert htf_confirmed_trend(_df(_BARS_HTF_BEAR), cfg) == Bias.BEAR
+    # расширяющийся диапазон (HH, но LL) — структура НЕ подтверждена -> None (блока нет);
+    # фолбэк market_structure по наклону сюда сознательно не входит
+    expanding = list(_BARS_HTF_BULL)
+    expanding[11] = (105, 105.5, 98, 104)      # LOW2 98 < LOW1 100.5 при HH
+    assert htf_confirmed_trend(_df(expanding), cfg) is None
+
+
+def test_htf_block_countertrend_filters_signal():
+    """SHORT-сетап против подтверждённого БЫЧЬЕГО HTF: с флагом — блок, без флага —
+    проходит (раньше был лишь штраф −0.25 в confidence — 17.07 пропускал контртренд)."""
+    df = _df(_BARS_SHORT)
+    on = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0,
+                             htf_block_countertrend=True))
+    off = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0))
+    assert on.analyze_single(df, "T", "m15", htf_df=_df(_BARS_HTF_BULL)) is None
+    # по тренду (медвежий HTF) — SHORT проходит
+    sig = on.analyze_single(df, "T", "m15", htf_df=_df(_BARS_HTF_BEAR))
+    assert sig is not None and sig.side == Side.SHORT
+    # неподтверждённая структура HTF — блока нет
+    assert on.analyze_single(df, "T", "m15", htf_df=None) is not None
+    # флаг выключен — контртренд проходит (со штрафом в confidence)
+    assert off.analyze_single(df, "T", "m15", htf_df=_df(_BARS_HTF_BULL)) is not None

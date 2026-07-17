@@ -68,6 +68,12 @@ class SMCConfig(StrategyConfig):
     # какие сетапы включены; "LTF" покрывает LTF-BB и LTF-OB (матч по префиксу)
     enabled_setups: tuple = ("6226", "1:1", "open-SMC", "LTF")
 
+    # жёсткий блок контртренда от ПОДТВЕРЖДЁННОЙ структуры HTF (две пары свингов
+    # HH+HL / LH+LL, фолбэк по наклону не считается). Урок 17.07: штраф −0.25 в
+    # confidence пропускал лонги в сползании (8 стопов LONG за 6ч); 12-мес бэктест —
+    # весь эдж в SHORT, LONG ≈ 0 или минус на всех трёх символах.
+    htf_block_countertrend: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Время бара
@@ -99,6 +105,24 @@ def dealing_range(swings: list[det.Swing]) -> tuple[float, float] | None:
     if not highs or not lows:
         return None
     return min(lows), max(highs)
+
+
+def htf_confirmed_trend(htf_df: pd.DataFrame, cfg: SMCConfig) -> Bias | None:
+    """Подтверждённый СТРУКТУРНЫЙ тренд HTF: две пары однотипных свингов (HH+HL -> BULL,
+    LH+LL -> BEAR), иначе None. Фолбэк market_structure по наклону закрытий сюда
+    сознательно НЕ входит: жёсткий блок контртренда допустим только от подтверждённой
+    структуры — наклон во флэте резал бы половину валидных сигналов."""
+    swings = det.find_swings(htf_df, cfg.swing_left, cfg.swing_right)
+    highs = [s for s in swings if s.kind == Kind.HIGH]
+    lows = [s for s in swings if s.kind == Kind.LOW]
+    if len(highs) >= 2 and len(lows) >= 2:
+        hh = highs[-1].price > highs[-2].price
+        hl = lows[-1].price > lows[-2].price
+        if hh and hl:
+            return Bias.BULL
+        if not hh and not hl:
+            return Bias.BEAR
+    return None
 
 
 def _bias_score(df: pd.DataFrame, side: Side, htf_df: pd.DataFrame | None,
@@ -539,6 +563,14 @@ class SMCEngine:
         signals = [c for c in candidates if c is not None]
         signals = [c for c in signals
                   if self._setup_enabled((c.indicators_snapshot or {}).get("setup", ""))]
+        # жёсткий блок контртренда: подтверждённая структура HTF против стороны сигнала ->
+        # сигнал не выдаётся (штраф −0.25 в confidence пропускал лонги в сползании 17.07).
+        # htf_df=None (старший ТФ набора) и неподтверждённая структура — блока нет.
+        if signals and self.cfg.htf_block_countertrend and htf_df is not None:
+            trend = htf_confirmed_trend(htf_df, self.cfg)
+            if trend is not None:
+                want = {Bias.BULL: Side.LONG, Bias.BEAR: Side.SHORT}[trend]
+                signals = [c for c in signals if c.side == want]
         if not signals:
             return None
         return max(signals, key=lambda s: s.confidence)

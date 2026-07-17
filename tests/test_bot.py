@@ -810,3 +810,44 @@ def test_format_stats_move_and_epoch_blocks():
     st0 = {**st, "avg_tp_move_pct": 0.0, "avg_stop_move_pct": 0.0, "total_move_pct": 0.0}
     txt0 = bot.format_stats(st0)
     assert "Ход цены" not in txt0 and "Новый код" not in txt0
+
+
+def test_scan_auto_respects_side_cooldown(fresh_db):
+    """Анти-кластерный тормоз: серия стопов стороны за окно -> новые сигналы этой стороны
+    не создаются (урок 17.07: 8 последовательных стопов LONG за 6ч — лимит/сторону
+    не мешал перезаходу, стопы освобождали слоты)."""
+    from app import clock, db, runtime
+    from app.brain import journal
+    runtime.set_value("side_cooldown_stops", "2")
+    runtime.set_value("side_cooldown_hours", "6")
+    runtime.set_value("max_open_per_side", "0")       # изолируем тормоз от лимита
+    eng = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0))
+    df = _df()
+    assert len(bot.scan_auto("AAA/USDT:USDT", {"1h": df}, eng)) == 1     # SHORT #1
+    assert len(bot.scan_auto("BBB/USDT:USDT", {"1h": df}, eng)) == 1     # SHORT #2
+    now = clock.utcnow_iso()
+    db.execute("UPDATE signals SET status='stopped', result_r=-1.0, closed_at=?", (now,))
+    # 2 стопа SHORT в окне -> сторона на тормозе
+    assert bot.scan_auto("CCC/USDT:USDT", {"1h": df}, eng) == []
+    assert bot._active_cooldowns() == {"SHORT": 2}
+    assert journal.recent_side_stops("SHORT", 6.0) == 2
+    # стопы старше окна -> тормоз снят
+    db.execute("UPDATE signals SET closed_at='2026-01-01T00:00:00+00:00'")
+    assert bot._active_cooldowns() == {}
+    assert len(bot.scan_auto("CCC/USDT:USDT", {"1h": df}, eng)) == 1
+    # 0 = тормоз выключен даже при свежих стопах
+    db.execute("UPDATE signals SET status='stopped', result_r=-1.0, closed_at=?", (now,))
+    runtime.set_value("side_cooldown_stops", "0")
+    assert bot._active_cooldowns() == {}
+    assert len(bot.scan_auto("DDD/USDT:USDT", {"1h": df}, eng)) == 1
+
+
+def test_format_admin_status_cooldown_line(fresh_db):
+    """Строка тормоза в /admin и /status: видна только когда сторона на паузе."""
+    from app import runtime
+    eff = runtime.effective()
+    users = {"total": 1, "paid": 0}
+    assert "Тормоз стороны" not in bot.format_admin_status(eff, users, {})
+    txt = bot.format_admin_status(eff, users, {"LONG": 2, "SHORT": 1},
+                                  cooldowns={"LONG": 4})
+    assert "⛔ Тормоз стороны: LONG (4 стопов)" in txt

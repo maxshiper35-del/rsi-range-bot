@@ -47,6 +47,12 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="стоп в безубыток после N закрытых траншей лесенки")
     p.add_argument("--time-filter", action="store_true",
                    help="включить окно времени NY (дефолт: выключено)")
+    p.add_argument("--htf", default=None,
+                   help="старший ТФ контекста (напр. 4h при --tf 1h): ресемпл окна, "
+                        "как вживую поллер отдаёт движку ближайший старший фрейм")
+    p.add_argument("--htf-block", action="store_true",
+                   help="жёсткий блок контртренда от подтверждённой структуры HTF "
+                        "(требует --htf)")
     return p.parse_args(argv)
 
 
@@ -73,10 +79,13 @@ def main() -> None:
     cfg_kwargs: dict = {"use_time_filter": args.time_filter}
     if args.setups:
         cfg_kwargs["enabled_setups"] = tuple(s.strip() for s in args.setups.split(","))
+    if args.htf_block:
+        cfg_kwargs["htf_block_countertrend"] = True
     rep = run_backtest(
         df, symbol, tf, cfg=SMCConfig(**cfg_kwargs),
         tp_ladder=parse_ladder(args.ladder) if args.ladder else None,
         move_be_after=args.be,
+        htf_tf=args.htf,
     )
     print(rep.summary())
     print("по сторонам:", rep.by_side)

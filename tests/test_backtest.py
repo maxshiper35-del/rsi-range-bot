@@ -106,3 +106,33 @@ def test_max_wait_bars_single_source():
     assert _max_wait_bars("m15") == 200
     assert _max_wait_bars("15m") == 200
     assert _max_wait_bars("4h") == 13                   # ceil(50/4)
+
+
+def test_resample_htf_no_lookahead_and_aggregation():
+    """Ресемпл окна 1h -> 4h: честная агрегация OHLC, последняя HTF-свеча частичная
+    (как вживую формирующаяся), будущих данных нет."""
+    from datetime import datetime, timedelta, timezone
+
+    import pandas as pd
+
+    from app.sim.backtest import _resample_htf
+    start = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+    n = 6                                    # 6 часовых баров: полный 4h-бин + частичный
+    df = pd.DataFrame({
+        "dt": [start + timedelta(hours=i) for i in range(n)],
+        "open": [100.0 + i for i in range(n)],
+        "high": [110.0 + i for i in range(n)],
+        "low": [90.0 + i for i in range(n)],
+        "close": [105.0 + i for i in range(n)],
+        "volume": [1.0] * n,
+    })
+    htf = _resample_htf(df, 240)
+    assert len(htf) == 2
+    # бин 00:00-04:00: open первого, high max, low min, close последнего часа бина
+    assert htf["open"].iloc[0] == 100.0 and htf["close"].iloc[0] == 108.0
+    assert htf["high"].iloc[0] == 113.0 and htf["low"].iloc[0] == 90.0
+    assert htf["volume"].iloc[0] == 4.0
+    # частичный бин 04:00-…: только бары 4-5, ничего из будущего
+    assert htf["open"].iloc[1] == 104.0 and htf["close"].iloc[1] == 110.0
+    assert htf["high"].iloc[1] == 115.0 and htf["low"].iloc[1] == 94.0
+    assert pd.to_datetime(htf["dt"].iloc[-1]).hour == 4

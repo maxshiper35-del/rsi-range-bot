@@ -48,6 +48,43 @@ def _side_capacity_ok(side_value: str, symbol: str) -> bool:
     return False
 
 
+def _side_cooldown_ok(side_value: str, symbol: str) -> bool:
+    """Анти-кластерный тормоз: лимит/сторону режет одновременную экспозицию, но не
+    последовательный перезаход — 17.07.2026 каждый стоп освобождал слот, и движок тут же
+    выдавал новый LONG в то же сползание BTC (8 стопов за 6ч, −8R). Серия стопов стороны =
+    рынок гонит тренд против ретрейсмент-входов; пауза стороны, пока окно не очистится."""
+    from app import runtime
+    from app.logging_conf import get_logger
+
+    n = runtime.side_cooldown_stops()
+    if n <= 0:
+        return True
+    hours = runtime.side_cooldown_hours()
+    stops = journal.recent_side_stops(side_value, hours)
+    if stops < n:
+        return True
+    get_logger("scan").info("тормоз стороны: %s %s пропущен (%d стопов за %.0fч, порог %d)",
+                            side_value, symbol, stops, hours, n)
+    return False
+
+
+def _active_cooldowns() -> dict:
+    """Стороны, стоящие сейчас на анти-кластерном тормозе -> {side: стопов_в_окне}.
+    Для отображения в /admin и /status (sync, дёргать через to_thread)."""
+    from app import runtime
+
+    n = runtime.side_cooldown_stops()
+    if n <= 0:
+        return {}
+    hours = runtime.side_cooldown_hours()
+    out = {}
+    for side in ("LONG", "SHORT"):
+        stops = journal.recent_side_stops(side, hours)
+        if stops >= n:
+            out[side] = stops
+    return out
+
+
 def scan_auto(symbol: str, frames: dict[str, pd.DataFrame],
               engine: SMCEngine) -> list[tuple]:
     """Авто-режим: сетапы на КАЖДОМ входном ТФ -> сразу АКТИВНЫЕ сигналы (status=open).
@@ -60,6 +97,8 @@ def scan_auto(symbol: str, frames: dict[str, pd.DataFrame],
         if journal.find_duplicate_setup(sig) is not None:
             continue
         if not _side_capacity_ok(sig.side.value, symbol):
+            continue
+        if not _side_cooldown_ok(sig.side.value, symbol):
             continue
         sid = journal.record_signal(sig)
         out.append((sig, sid))
@@ -79,6 +118,8 @@ def scan_semiauto(symbol: str, frames: dict[str, pd.DataFrame],
         if journal.find_duplicate_setup(sig) is not None:
             continue
         if not _side_capacity_ok(sig.side.value, symbol):
+            continue
+        if not _side_cooldown_ok(sig.side.value, symbol):
             continue
         sid = journal.record_candidate(sig)
         out.append((sig, sid))
@@ -294,6 +335,8 @@ _ADMIN_NUMERIC_FIELDS = {
     "min_impulse_atr": ("Мин. размер импульса в ATR", "float"),
     "min_rr_open_model": ("Мин. reward/risk для сетапа open-SMC", "float"),
     "max_open_per_side": ("Макс. активных сигналов в одну сторону, 0 = без лимита", "int"),
+    "side_cooldown_stops": ("Тормоз стороны: стопов за окно для паузы, 0 = выкл", "int"),
+    "side_cooldown_hours": ("Тормоз стороны: окно в часах", "float"),
     "display_leverage": ("Плечо для показа результата в постах, ×N (0 — выключить строку)",
                          "float"),
     "intro_price_stars": ("Цена пробного тарифа в Stars (0 — выключить пробный)", "int"),
@@ -905,9 +948,16 @@ def format_help(is_admin: bool) -> str:
     return text
 
 
-def format_admin_status(eff: dict, users: dict, exposure: dict | None = None) -> str:
-    """Статус управления для /admin и /status. exposure — journal.open_side_counts()."""
+def format_admin_status(eff: dict, users: dict, exposure: dict | None = None,
+                        cooldowns: dict | None = None) -> str:
+    """Статус управления для /admin и /status. exposure — journal.open_side_counts();
+    cooldowns — {side: стопов_в_окне} по сторонам, стоящим на анти-кластерном тормозе."""
     exposure = exposure or {}
+    cd_line = ""
+    if cooldowns:
+        parts = ", ".join(f"{s} ({n} стопов)" for s, n in sorted(cooldowns.items()))
+        cd_line = (f"⛔ Тормоз стороны: {parts} — пауза "
+                   f"{eff.get('side_cooldown_hours', 0):.0f}ч-окна\n")
     return (
         "🛠 Управление RSI Range\n"
         f"{'⏸ НА ПАУЗЕ' if eff['paused'] else '▶️ РАБОТАЕТ'}\n"
@@ -921,6 +971,7 @@ def format_admin_status(eff: dict, users: dict, exposure: dict | None = None) ->
         f"мин. RR open-SMC: {eff['min_rr_open_model']:.2f}\n"
         f"Экспозиция: LONG {exposure.get('LONG', 0)} / SHORT {exposure.get('SHORT', 0)} "
         f"(лимит {eff['max_open_per_side']}/сторону)\n"
+        f"{cd_line}"
         f"Канал: {eff['channel']} "
         f"({'вкл' if eff['channel_enabled'] else 'выкл'} · {eff['channel_mode']})\n"
         f"Цена: {eff['price_stars']}⭐ / {eff['price_usdt']:g} USDT / {eff['sub_days']} дн\n"
@@ -1823,6 +1874,15 @@ def main() -> None:
                callback_data="adm_prompt_min_rr_open_model")],
             [b(text=f"⚖️ Лимит/сторону: {eff['max_open_per_side']}",
                callback_data="adm_prompt_max_open_per_side")],
+            [b(text=(f"⛔ Тормоз: {eff['side_cooldown_stops']} стопов"
+                     f"/{eff['side_cooldown_hours']:g}ч"
+                     if eff['side_cooldown_stops'] else "⛔ Тормоз стороны: выкл"),
+               callback_data="adm_prompt_side_cooldown_stops"),
+             b(text=f"🕐 Окно: {eff['side_cooldown_hours']:g}ч",
+               callback_data="adm_prompt_side_cooldown_hours")],
+            [b(text=("🧭 HTF-блок контртренда: вкл" if eff['htf_block_countertrend']
+                     else "🧭 HTF-блок контртренда: выкл"),
+               callback_data="adm_htfblocktoggle")],
             [b(text="◀️ Назад", callback_data="adm_nav_main")],
         ])
 
@@ -1871,7 +1931,8 @@ def main() -> None:
         eff = await asyncio.to_thread(runtime.effective)
         users = await asyncio.to_thread(payments.user_counts)
         exposure = await asyncio.to_thread(journal.open_side_counts)
-        await bot.send_message(chat_id, format_admin_status(eff, users, exposure),
+        cooldowns = await asyncio.to_thread(_active_cooldowns)
+        await bot.send_message(chat_id, format_admin_status(eff, users, exposure, cooldowns),
                                reply_markup=_admin_kb(eff))
 
     async def _set(m, key, value, reply):
@@ -1892,7 +1953,8 @@ def main() -> None:
         eff = await asyncio.to_thread(runtime.effective)
         users = await asyncio.to_thread(payments.user_counts)
         exposure = await asyncio.to_thread(journal.open_side_counts)
-        await m.answer(format_admin_status(eff, users, exposure))
+        cooldowns = await asyncio.to_thread(_active_cooldowns)
+        await m.answer(format_admin_status(eff, users, exposure, cooldowns))
 
     @dp.message(Command("health"))
     @dp.message(F.text == "🩺 Health")
@@ -2330,6 +2392,10 @@ def main() -> None:
         elif data == "adm_streamtoggle":
             await asyncio.to_thread(runtime.set_value, "stream_enabled",
                                     "0" if runtime.stream_enabled() else "1")
+        elif data == "adm_htfblocktoggle":
+            await asyncio.to_thread(runtime.set_value, "htf_block_countertrend",
+                                    "0" if runtime.htf_block_countertrend() else "1")
+            screen = "strategy"
         elif data == "adm_poststats":
             ch = runtime.signals_channel()
             posted = False
@@ -2385,7 +2451,8 @@ def main() -> None:
              "prices": _prices_kb, "symbols": _symbols_kb}[screen](eff)
         try:
             exposure = await asyncio.to_thread(journal.open_side_counts)
-            await cq.message.edit_text(format_admin_status(eff, users, exposure),
+            cooldowns = await asyncio.to_thread(_active_cooldowns)
+            await cq.message.edit_text(format_admin_status(eff, users, exposure, cooldowns),
                                        reply_markup=kb)
         except Exception:                              # noqa: BLE001 — «message not modified» и т.п.
             pass
@@ -2479,7 +2546,10 @@ def main() -> None:
                            cfg=SMCConfig(min_confidence=runtime.min_confidence(),
                                          min_impulse_atr=runtime.min_impulse_atr(),
                                          min_rr_open_model=runtime.min_rr_open_model(),
-                                         enabled_setups=tuple(runtime.enabled_setups())))
+                                         enabled_setups=tuple(runtime.enabled_setups()),
+                                         htf_block_countertrend=(
+                                             runtime.htf_block_countertrend())),
+                           htf_tf="4h")
         return (watchlist_gate_decision(rep.expectancy_r, rep.trades),
                 rep.expectancy_r, rep.trades)
 
@@ -2602,6 +2672,33 @@ def main() -> None:
                 except Exception as e:                     # noqa: BLE001
                     log.warning("poller stale алерт админу %s: %s", admin_id, e)
             await asyncio.to_thread(runtime.set_last_poller_alert_at, now_)
+        # анти-кластерный тормоз: алерт админу ОДИН раз на вход стороны в кулдаун
+        # (транзишен-детект через settings; при выходе из окна метка снимается)
+        try:
+            cd_n = runtime.side_cooldown_stops()
+            if cd_n > 0:
+                cd_h = runtime.side_cooldown_hours()
+                alerted = set(s for s in runtime.side_cooldown_alerted().split(",") if s)
+                now_in = set()
+                for side_ in ("LONG", "SHORT"):
+                    stops_ = await asyncio.to_thread(journal.recent_side_stops, side_, cd_h)
+                    if stops_ >= cd_n:
+                        now_in.add(side_)
+                        if side_ not in alerted:
+                            text = (f"⛔ Тормоз стороны {side_}: {stops_} стопов за "
+                                    f"{cd_h:.0f}ч — новые {side_}-сигналы на паузе, пока "
+                                    "окно не очистится. /bysetup — картина по сетапам; "
+                                    "выключается в /admin → Стратегия.")
+                            for admin_id in cfg.admin_ids:
+                                try:
+                                    await bot.send_message(admin_id, text)
+                                except Exception as e:     # noqa: BLE001
+                                    log.warning("cooldown алерт %s: %s", admin_id, e)
+                if now_in != alerted:
+                    await asyncio.to_thread(
+                        runtime.set_side_cooldown_alerted, ",".join(sorted(now_in)))
+        except Exception as e:                             # noqa: BLE001
+            log.warning("side cooldown check: %s", e)
         # TTL просроченных semiauto-кандидатов (готовим впрок — сейчас signal_mode=auto)
         try:
             expired_ids = await asyncio.to_thread(journal.expire_stale_candidates)

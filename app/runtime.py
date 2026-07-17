@@ -338,6 +338,36 @@ def max_open_per_side() -> int:
     return _num("max_open_per_side", int, 6)
 
 
+def htf_block_countertrend() -> bool:
+    """Жёсткий блок сигналов против ПОДТВЕРЖДЁННОЙ структуры HTF (HH+HL / LH+LL).
+    Дефолт задаётся по результату бэктест-гейта (см. коммит с прогоном A/B)."""
+    return (_raw("htf_block_countertrend") or "1").lower() in _TRUE
+
+
+def side_cooldown_stops() -> int:
+    """Анти-кластерный тормоз направления: при ≥N стопах одной стороны за окно
+    side_cooldown_hours новые сигналы этой стороны не создаются, пока окно не очистится.
+    Урок 17.07.2026: max_open_per_side режет одновременную экспозицию, но не
+    последовательный перезаход — стопы освобождали слоты, и движок тут же выдавал новые
+    LONG в то же сползание BTC (8 стопов за 6 часов, −8R). 0 = выкл."""
+    return _num("side_cooldown_stops", int, 3)
+
+
+def side_cooldown_hours() -> float:
+    """Окно анти-кластерного тормоза в часах (скользящее, по closed_at стопов)."""
+    return _num("side_cooldown_hours", float, 6.0)
+
+
+def side_cooldown_alerted() -> str:
+    """Стороны, по которым админу уже отправлен алерт о входе в тормоз (CSV LONG,SHORT) —
+    алертим один раз на вход в кулдаун, сбрасываем при выходе."""
+    return _raw("side_cooldown_alerted") or ""
+
+
+def set_side_cooldown_alerted(csv_sides: str) -> None:
+    set_value("side_cooldown_alerted", csv_sides)
+
+
 def strategy_epoch() -> str | None:
     """ISO-момент последнего КРУПНОГО обновления стратегии — /stats и /bysetup показывают
     отдельную стату «нового кода», не смешивая её с легаси-бэклогом старых сигналов."""
@@ -392,6 +422,9 @@ def effective() -> dict:
         "min_impulse_atr": min_impulse_atr(),
         "min_rr_open_model": min_rr_open_model(),
         "max_open_per_side": max_open_per_side(),
+        "side_cooldown_stops": side_cooldown_stops(),
+        "side_cooldown_hours": side_cooldown_hours(),
+        "htf_block_countertrend": htf_block_countertrend(),
         "enabled_setups": enabled_setups(),
         "price_stars": price_stars(),
         "price_usdt": price_usdt(),

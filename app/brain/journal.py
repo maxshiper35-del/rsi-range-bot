@@ -228,6 +228,18 @@ def open_side_counts() -> dict:
     return out
 
 
+def recent_side_stops(side: str, hours: float) -> int:
+    """Стопы направления за скользящее окно N часов (по closed_at, все символы) — для
+    анти-кластерного тормоза. Серия стопов одной стороны = рынок гонит тренд против
+    ретрейсмент-входов (17.07: 8 стопов LONG за 6ч на сползании BTC −3.5%).
+    Теневые исходы semiauto-rejected не считаются: их статус остаётся 'rejected'."""
+    cutoff = (clock.utcnow() - timedelta(hours=hours)).isoformat()
+    row = db.query_one(
+        "SELECT COUNT(*) AS n FROM signals WHERE side=? AND status='stopped' "
+        "AND closed_at >= ?", (side, cutoff))
+    return int(row["n"]) if row else 0
+
+
 def oldest_open_anchor(symbol: str) -> str | None:
     """Самая старая точка (филл или создание) нескорённых сигналов символа — поллер по ней
     выбирает ГЛУБИНУ фетча баров: обрезанное окно даёт слепые зоны, где пропущенный стоп

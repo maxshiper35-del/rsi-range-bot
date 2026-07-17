@@ -147,17 +147,38 @@ def _max_wait_bars(timeframe: str) -> int:
     return ceil(MAX_WAIT_HOURS * 60 / SMCEngine.TF_MINUTES.get(timeframe, 60))
 
 
+def _resample_htf(win: pd.DataFrame, htf_minutes: int) -> pd.DataFrame:
+    """Собрать HTF-фрейм из окна входного ТФ ресемплом OHLC — БЕЗ лукахеда: окно
+    оканчивается текущим баром, последняя HTF-свеча может быть частичной (как и вживую,
+    где текущая 4h-свеча ещё формируется). Нужен для паритета гейта с живым движком:
+    analyze_single без htf_df вообще не исполняет HTF-компоненты (bias ±0.25, блок
+    контртренда) — гейт мерил другую стратегию."""
+    idx = pd.to_datetime(win["dt"], utc=True)
+    g = win.set_index(idx).resample(f"{htf_minutes}min", label="left", closed="left")
+    out = pd.DataFrame({"open": g["open"].first(), "high": g["high"].max(),
+                        "low": g["low"].min(), "close": g["close"].last()})
+    if "volume" in win.columns:
+        out["volume"] = g["volume"].sum()
+    out = out.dropna(subset=["open"])
+    out["dt"] = out.index
+    return out.reset_index(drop=True)
+
+
 def run_backtest(df: pd.DataFrame, symbol: str, timeframe: str = "m15",
                  engine: SMCEngine | None = None, cfg: SMCConfig | None = None,
                  window: int = 300, min_bars: int = 20, max_wait: int | None = None,
                  fee_pct: float = 0.055, slippage_pct: float = 0.02,
                  tp_ladder: list | None = None, move_be_after: int | None = None,
-                 funding_bps_per_bar: float = 0.0) -> BacktestReport:
+                 funding_bps_per_bar: float = 0.0,
+                 htf_tf: str | None = None) -> BacktestReport:
     """tp_ladder: список (R_множитель, доля), напр. [(1.0,0.5),(2.0,0.3),(3.0,0.2)].
     None -> один тейк = take_profits[0] с result = risk_reward (совместимо со старым поведением).
-    max_wait: None -> journal.MAX_WAIT_HOURS в барах ЭТОГО ТФ (единое окно с живым судьёй)."""
+    max_wait: None -> journal.MAX_WAIT_HOURS в барах ЭТОГО ТФ (единое окно с живым судьёй).
+    htf_tf: старший ТФ контекста (напр. "4h" при timeframe="1h") — ресемпл окна, как
+    вживую поллер отдаёт движку ближайший старший фрейм; None — без HTF (как раньше)."""
     if max_wait is None:
         max_wait = _max_wait_bars(timeframe)
+    htf_minutes = SMCEngine.TF_MINUTES.get(htf_tf, 0) if htf_tf else 0
     engine = engine or SMCEngine(cfg or SMCConfig(use_time_filter=False))
     high = df["high"].to_numpy()
     low = df["low"].to_numpy()
@@ -168,7 +189,8 @@ def run_backtest(df: pd.DataFrame, symbol: str, timeframe: str = "m15",
     i = min_bars
     while i < n:
         win = df.iloc[max(0, i - window + 1):i + 1].reset_index(drop=True)
-        sig = engine.analyze_single(win, symbol, timeframe)
+        htf_win = _resample_htf(win, htf_minutes) if htf_minutes else None
+        sig = engine.analyze_single(win, symbol, timeframe, htf_df=htf_win)
         if sig is None:
             i += 1
             continue
