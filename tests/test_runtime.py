@@ -212,3 +212,19 @@ def test_min_rr_open_model_flag(fresh_db):
     runtime.set_value("min_rr_open_model", "0.8")
     assert runtime.min_rr_open_model() == 0.8
     assert runtime.effective()["min_rr_open_model"] == 0.8
+
+
+def test_min_stop_pct_and_time_filter_defaults(fresh_db):
+    """Костовый гейт включён по умолчанию (1.3% — бюджет издержек ≈6% риска сделки),
+    NY-окно остаётся статус-кво ВКЛ: портфельный OOS его пользу не подтвердил."""
+    from app import runtime
+    assert runtime.min_stop_pct() == 1.3
+    assert runtime.time_filter_enabled() is True
+    runtime.set_value("min_stop_pct", "0")
+    assert runtime.min_stop_pct() == 0.0            # 0 = гейт выключается из админки
+    runtime.set_value("time_filter_enabled", "0")
+    assert runtime.time_filter_enabled() is False
+    runtime.set_value("min_stop_pct", "мусор")      # битое значение -> дефолт, не краш
+    assert runtime.min_stop_pct() == 1.3
+    eff = runtime.effective()
+    assert eff["min_stop_pct"] == 1.3 and eff["time_filter_enabled"] is False

@@ -136,3 +136,39 @@ def test_resample_htf_no_lookahead_and_aggregation():
     assert htf["open"].iloc[1] == 104.0 and htf["close"].iloc[1] == 110.0
     assert htf["high"].iloc[1] == 115.0 and htf["low"].iloc[1] == 94.0
     assert pd.to_datetime(htf["dt"].iloc[-1]).hour == 4
+
+
+def test_backtest_cli_experiment_flags(tmp_path):
+    """Флаги серии экспериментов: кэш-CSV, рантайм-пороги (паритет с продом), срез истории."""
+    from scripts.run_backtest import parse_args
+    a = parse_args(["--csv", "x.csv", "--min-conf", "0.65", "--min-impulse", "1.5",
+                    "--window", "200", "--bars-from", "100", "--bars-to", "500",
+                    "--htf", "4h", "--htf-block", "--json", "--label", "exp1"])
+    assert a.csv == "x.csv" and a.min_conf == 0.65 and a.min_impulse == 1.5
+    assert a.window == 200 and a.bars_from == 100 and a.bars_to == 500
+    assert a.htf == "4h" and a.htf_block is True and a.json is True and a.label == "exp1"
+    d = parse_args([])                                   # дефолты не поехали
+    assert d.csv is None and d.min_conf is None and d.window == 300 and d.json is False
+
+
+def test_dump_history_cache_name():
+    """Имя файла кэша безопасно для ФС и однозначно отображается обратно на символ+ТФ."""
+    from scripts.dump_history import cache_name
+    assert cache_name("BTC/USDT:USDT", "1h") == "BTC-USDT-USDT_1h.csv"
+    assert cache_name("1000PEPE/USDT:USDT", "4h") == "1000PEPE-USDT-USDT_4h.csv"
+
+
+def test_backtest_csv_roundtrip_matches_live_df(tmp_path):
+    """CSV-кэш даёт движку ТЕ ЖЕ бары, что и df в памяти — иначе эксперименты на кэше
+    мерили бы другую популяцию сигналов, чем прогоны по сети."""
+    import pandas as pd
+
+    from app.core.signal_engine import _synthetic_uptrend
+    from app.sim.backtest import run_backtest
+    df = _synthetic_uptrend()
+    path = tmp_path / "cache.csv"
+    df.to_csv(path, index=False)
+    back = pd.read_csv(path, parse_dates=["dt"] if "dt" in df.columns else None)
+    a = run_backtest(df, "T", "m15", cfg=SMCConfig(use_time_filter=False), min_bars=16)
+    b = run_backtest(back, "T", "m15", cfg=SMCConfig(use_time_filter=False), min_bars=16)
+    assert (a.trades, a.total_r, a.signals) == (b.trades, b.total_r, b.signals)

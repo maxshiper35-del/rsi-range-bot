@@ -338,6 +338,30 @@ def max_open_per_side() -> int:
     return _num("max_open_per_side", int, 6)
 
 
+def min_stop_pct() -> float:
+    """Мин. дистанция стопа в % от входа — костовый гейт (см. SMCConfig.min_stop_pct).
+
+    Дефолт 1.3 выбран ПО СТОИМОСТИ, а не подгонкой: round-trip (лимитный вход maker +
+    стоп taker + проскальзывание) ≈ 0.076% цены, при стопе 1.3% это ≈6% риска сделки.
+    Портфельная симуляция 25.07.2026 (9 символов, 1h+4h, живые правила, честная
+    OOS-половина янв–июл 2026): без гейта −67.6R (exp −0.051), с гейтом 1.3% +4.8R
+    (exp +0.006). Эффект направленно одинаков на всех проверенных срезах.
+    0 = выключен."""
+    return _num("min_stop_pct", float, 1.3)
+
+
+def time_filter_enabled() -> bool:
+    """NY-окно входа для сетапа 6226 (SMCConfig.use_time_filter). Дефолт ВКЛ = статус-кво.
+
+    Посимвольный бэктест говорит «выключить» (6 сравнений из 6, BTC +0.0099 -> +0.2034R),
+    НО портфельная симуляция с живыми правилами на OOS-половине этого не подтвердила
+    (6 символов: −0.033 против −0.063 без гейта, но +0.013 против +0.028 с костовым
+    гейтом — знак эффекта плавает). Посимвольный прогон держит одну позицию за раз и
+    поведение живого бота не описывает, поэтому решает портфельный: эффект НЕ доказан,
+    статус-кво не меняем. Тумблер оставлен для будущей проверки на живых данных."""
+    return (_raw("time_filter_enabled") or "1").lower() in _TRUE
+
+
 def htf_block_countertrend() -> bool:
     """Жёсткий блок сигналов против ПОДТВЕРЖДЁННОЙ структуры HTF (HH+HL / LH+LL).
     Дефолт задаётся по результату бэктест-гейта (см. коммит с прогоном A/B)."""
@@ -425,6 +449,8 @@ def effective() -> dict:
         "side_cooldown_stops": side_cooldown_stops(),
         "side_cooldown_hours": side_cooldown_hours(),
         "htf_block_countertrend": htf_block_countertrend(),
+        "min_stop_pct": min_stop_pct(),
+        "time_filter_enabled": time_filter_enabled(),
         "enabled_setups": enabled_setups(),
         "price_stars": price_stars(),
         "price_usdt": price_usdt(),

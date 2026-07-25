@@ -384,3 +384,35 @@ def test_htf_block_countertrend_filters_signal():
     assert on.analyze_single(df, "T", "m15", htf_df=None) is not None
     # флаг выключен — контртренд проходит (со штрафом в confidence)
     assert off.analyze_single(df, "T", "m15", htf_df=_df(_BARS_HTF_BULL)) is not None
+
+
+def test_min_stop_pct_cost_gate():
+    """Костовый гейт: сигналы со слишком тесным стопом не выдаются — издержки
+    round-trip фиксированы в % цены, а R = дистанция стопа (живой замер 25.07.2026:
+    стоп 0.63% -> 0.21R издержек; стоп 0.13% -> 1.0R, сделка мертва в момент рождения)."""
+    df = _df(_BARS_SHORT)
+    base = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0))
+    sig = base.analyze_single(df, "T", "m15")
+    assert sig is not None
+    stop_pct = abs(sig.entry - sig.stop) / sig.entry * 100.0
+    # порог ниже фактической дистанции — победитель не меняется
+    loose = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0,
+                                min_stop_pct=stop_pct - 0.01))
+    keep = loose.analyze_single(df, "T", "m15")
+    assert keep is not None and keep.entry == sig.entry
+
+    # порог выше — этот кандидат выбывает, но гейт применяется К КАЖДОМУ кандидату:
+    # побеждает сетап с более широким стопом, а не «сигнала нет» (важная семантика —
+    # костовый гейт не глушит символ, он сдвигает выбор к более дешёвой по издержкам структуре)
+    tight = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0,
+                                min_stop_pct=stop_pct + 0.01))
+    alt = tight.analyze_single(df, "T", "m15")
+    assert alt is not None
+    assert abs(alt.entry - alt.stop) / alt.entry * 100.0 > stop_pct
+
+    # порог выше ВСЕХ кандидатов — сигнала нет
+    none_cfg = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0,
+                                   min_stop_pct=99.0))
+    assert none_cfg.analyze_single(df, "T", "m15") is None
+    # 0 = гейт выключен (дефолт), поведение не меняется
+    assert SMCConfig().min_stop_pct == 0.0

@@ -335,6 +335,7 @@ _ADMIN_NUMERIC_FIELDS = {
     "min_impulse_atr": ("Мин. размер импульса в ATR", "float"),
     "min_rr_open_model": ("Мин. reward/risk для сетапа open-SMC", "float"),
     "max_open_per_side": ("Макс. активных сигналов в одну сторону, 0 = без лимита", "int"),
+    "min_stop_pct": ("Мин. дистанция стопа, % от входа (костовый гейт, 0 = выкл)", "float"),
     "side_cooldown_stops": ("Тормоз стороны: стопов за окно для паузы, 0 = выкл", "int"),
     "side_cooldown_hours": ("Тормоз стороны: окно в часах", "float"),
     "display_leverage": ("Плечо для показа результата в постах, ×N (0 — выключить строку)",
@@ -1872,6 +1873,11 @@ def main() -> None:
                callback_data="adm_prompt_min_impulse_atr")],
             [b(text=f"🎚 Мин. RR open-SMC: {eff['min_rr_open_model']:.2f}",
                callback_data="adm_prompt_min_rr_open_model")],
+            [b(text=(f"💸 Мин. стоп: {eff['min_stop_pct']:.2f}%"
+                     if eff['min_stop_pct'] else "💸 Мин. стоп: выкл"),
+               callback_data="adm_prompt_min_stop_pct"),
+             b(text=("🕐 NY-окно: вкл" if eff['time_filter_enabled'] else "🕐 NY-окно: выкл"),
+               callback_data="adm_timefiltertoggle")],
             [b(text=f"⚖️ Лимит/сторону: {eff['max_open_per_side']}",
                callback_data="adm_prompt_max_open_per_side")],
             [b(text=(f"⛔ Тормоз: {eff['side_cooldown_stops']} стопов"
@@ -2392,6 +2398,10 @@ def main() -> None:
         elif data == "adm_streamtoggle":
             await asyncio.to_thread(runtime.set_value, "stream_enabled",
                                     "0" if runtime.stream_enabled() else "1")
+        elif data == "adm_timefiltertoggle":
+            await asyncio.to_thread(runtime.set_value, "time_filter_enabled",
+                                    "0" if runtime.time_filter_enabled() else "1")
+            screen = "strategy"
         elif data == "adm_htfblocktoggle":
             await asyncio.to_thread(runtime.set_value, "htf_block_countertrend",
                                     "0" if runtime.htf_block_countertrend() else "1")
@@ -2548,7 +2558,9 @@ def main() -> None:
                                          min_rr_open_model=runtime.min_rr_open_model(),
                                          enabled_setups=tuple(runtime.enabled_setups()),
                                          htf_block_countertrend=(
-                                             runtime.htf_block_countertrend())),
+                                             runtime.htf_block_countertrend()),
+                                         min_stop_pct=runtime.min_stop_pct(),
+                                         use_time_filter=runtime.time_filter_enabled()),
                            htf_tf="4h")
         return (watchlist_gate_decision(rep.expectancy_r, rep.trades),
                 rep.expectancy_r, rep.trades)
