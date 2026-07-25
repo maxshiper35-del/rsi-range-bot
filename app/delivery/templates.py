@@ -76,8 +76,14 @@ def trail_line(sig: Signal, entry_prefix: str = "🔁 Трейлинг:") -> str
         return ""
     risk = abs(sig.entry - sig.stop)
     trigger = (sig.entry + act * risk) if sig.side.value == "LONG" else (sig.entry - act * risk)
-    return (f"{entry_prefix} после <code>{_price(trigger)}</code> (+{act:g}R) "
+    line = (f"{entry_prefix} после <code>{_price(trigger)}</code> (+{act:g}R) "
             f"двигать стоп на {dist:g}R от максимума хода\n")
+    if not t.get("tp_exit", True):
+        hold = t.get("max_hold_hours") or 0
+        hold_txt = f", но не дольше {int(float(hold) / 24)} дн" if float(hold) >= 24 else ""
+        line += (f"🏁 Выход: по трейлинг-стопу (цель ниже — ориентир, "
+                 f"по ней НЕ закрываем{hold_txt})\n")
+    return line
 
 
 def render_signal_channel(sig: Signal, signal_id: int) -> str:

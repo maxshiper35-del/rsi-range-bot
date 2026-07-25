@@ -621,10 +621,12 @@ def test_trailing_stop_scored_from_snapshot_rule(fresh_db):
     from app.brain import journal
     runtime.set_value("trail_activate_r", "1.5")
     runtime.set_value("trail_distance_r", "0.5")
+    runtime.set_value("trail_only_exit", "0")      # классический режим: тейк закрывает
     journal.record_signal(_sig())
     snap = json.loads(fresh_db.query_one(
         "SELECT snapshot_json FROM signals WHERE id=1")["snapshot_json"])
-    assert snap["trail"] == {"activate_r": 1.5, "distance_r": 0.5}
+    assert snap["trail"]["activate_r"] == 1.5 and snap["trail"]["distance_r"] == 0.5
+    assert snap["trail"]["tp_exit"] is True
 
     bars = [
         (100, 101, 99, 100),      # филл (касание entry=100), трейлинг на этом баре не считаем
@@ -662,3 +664,54 @@ def test_legacy_signal_without_trail_scored_as_before(fresh_db):
     assert len(closed) == 1
     assert closed[0]["status"] == "stopped" and closed[0]["result_r"] == -1.0
     assert db.query_one("SELECT exit_price FROM signals WHERE id=1")["exit_price"] == 110.0
+
+
+def test_trail_only_exit_ignores_take_profit(fresh_db):
+    """Режим «выход только по трейлингу»: опубликованный тейк — ОРИЕНТИР и позицию не
+    закрывает. Механизм находки: до растянутых целей цена доходит в единицах процентов
+    случаев, а фиксированный тейк режет тех редких победителей, что идут дальше."""
+    from app import runtime
+    from app.brain import journal
+    runtime.set_value("trail_activate_r", "1.5")
+    runtime.set_value("trail_distance_r", "0.3")
+    runtime.set_value("trail_only_exit", "1")
+    journal.record_signal(_sig())                    # SHORT 100 / stop 110 / tp 80
+    snap = json.loads(fresh_db.query_one(
+        "SELECT snapshot_json FROM signals WHERE id=1")["snapshot_json"])
+    assert snap["trail"]["tp_exit"] is False
+
+    bars = [
+        (100, 101, 99, 100),      # филл
+        (100, 100, 79, 80),       # прошли ЧЕРЕЗ тейк 80 -> в классике был бы tp1 (+2R)
+        (80, 81, 70, 71),         # идём дальше: пик 70, стоп подтянут на 70+3 = 73
+        (71, 74, 71, 73),         # откат до 74 -> выход по подтянутому 73
+    ]
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(bars, start="2026-01-01T00:15:00+00:00")})
+    closed = [c for c in res if c["status"] != "filled"]
+    assert len(closed) == 1
+    assert closed[0]["result_r"] == 2.7             # выход по 73: (100-73)/10 — больше тейка
+    assert closed[0]["exit_price"] == 73.0
+    ev = fresh_db.query_one(
+        "SELECT event FROM signal_events WHERE signal_id=1 ORDER BY id DESC LIMIT 1")
+    assert ev["event"] == "trail"
+
+
+def test_trail_max_hold_closes_by_timeout(fresh_db):
+    """Потолок удержания: без фиксированного тейка сделка иначе висит неделями, занимая
+    слот направления. Выход по ЗАКРЫТИЮ бара — цена, доступная рыночным ордером."""
+    from app import runtime
+    from app.brain import journal
+    runtime.set_value("trail_activate_r", "1.5")
+    runtime.set_value("trail_only_exit", "1")
+    runtime.set_value("trail_max_hold_hours", "1")   # 1 час = 4 бара по 15 мин
+    journal.record_signal(_sig())
+    bars = [(100, 101, 99, 100)] + [(100, 100.5, 99.5, 100)] * 6   # филл, дальше флэт
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(bars, start="2026-01-01T00:15:00+00:00")})
+    closed = [c for c in res if c["status"] != "filled"]
+    assert len(closed) == 1 and closed[0]["status"] == "stopped"
+    assert closed[0]["result_r"] == 0.0              # закрылись по 100 = вход
+    ev = fresh_db.query_one(
+        "SELECT event FROM signal_events WHERE signal_id=1 ORDER BY id DESC LIMIT 1")
+    assert ev["event"] == "timeout"

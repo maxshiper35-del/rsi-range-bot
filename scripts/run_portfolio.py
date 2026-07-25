@@ -53,6 +53,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--fee", type=float, default=0.055,
                    help="комиссия за сторону, %% (Bybit taker 0.055, maker 0.02)")
     p.add_argument("--slip", type=float, default=0.02, help="проскальзывание, %%")
+    p.add_argument("--funding", type=float, default=0.0,
+                   help="фандинг в bps на бар (Bybit ~0.01%%/8ч = 0.125 bps на 1h-бар); "
+                        "критично для схем без фиксированного тейка — позиция висит долго")
     p.add_argument("--label", default=None)
     p.add_argument("--json", action="store_true")
     return p.parse_args(argv)
@@ -101,6 +104,7 @@ def main() -> None:
         cooldown_hours=args.cooldown_hours,
         dedup=not args.no_dedup,
         fee_pct=args.fee, slippage_pct=args.slip,
+        funding_bps_per_bar=args.funding,
         tp_ladder=parse_ladder(args.ladder) if args.ladder else None,
         move_be_after=args.be,
         trail_activate_r=args.trail_activate,
@@ -118,6 +122,7 @@ def main() -> None:
             "profit_factor": rep.profit_factor, "max_drawdown_r": rep.max_drawdown_r,
             "max_concurrent": rep.max_concurrent,
             "max_concurrent_side": rep.max_concurrent_side,
+            "avg_hold_hours": rep.avg_hold_hours, "max_hold_hours": rep.max_hold_hours,
             "by_symbol": rep.by_symbol, "by_setup": rep.by_setup, "by_side": rep.by_side,
         }, ensure_ascii=False))
         return

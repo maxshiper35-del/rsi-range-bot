@@ -62,6 +62,8 @@ class PortfolioReport:
     max_drawdown_r: float
     max_concurrent: int
     max_concurrent_side: int
+    avg_hold_hours: float
+    max_hold_hours: float
     by_symbol: dict
     by_setup: dict
     by_side: dict
@@ -204,6 +206,9 @@ def simulate_portfolio(bars: dict, signals: list, *,
         equity.append(round(run, 4))
         peak = max(peak, run)
         max_dd = max(max_dd, peak - run)
+    # время удержания: без фиксированного тейка позиция живёт до трейлинг-стопа — надо
+    # видеть, не превращается ли «дать прибыли течь» в недельное зависание слота
+    holds = [(t.exit_dt - t.fill_dt).total_seconds() / 3600.0 for t in trades]
     wins = [t for t in trades if t.result_r > 0]
     gross_win = sum(t.result_r for t in wins)
     gross_loss = abs(sum(t.result_r for t in trades if t.result_r <= 0))
@@ -230,6 +235,8 @@ def simulate_portfolio(bars: dict, signals: list, *,
         profit_factor=_pf(gross_win, gross_loss),
         max_drawdown_r=round(max_dd, 3),
         max_concurrent=max_concurrent, max_concurrent_side=max_concurrent_side,
+        avg_hold_hours=round(sum(holds) / len(holds), 1) if holds else 0.0,
+        max_hold_hours=round(max(holds), 1) if holds else 0.0,
         by_symbol=group("symbol"), by_setup=group("setup"), by_side=group("side"),
         equity_curve=equity, detail=trades,
     )

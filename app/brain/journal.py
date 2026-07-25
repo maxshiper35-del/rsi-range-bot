@@ -83,7 +83,9 @@ def _trail_rule() -> dict | None:
     act = runtime.trail_activate_r()
     if act <= 0:
         return None
-    return {"activate_r": act, "distance_r": runtime.trail_distance_r()}
+    return {"activate_r": act, "distance_r": runtime.trail_distance_r(),
+            "tp_exit": not runtime.trail_only_exit(),
+            "max_hold_hours": runtime.trail_max_hold_hours()}
 
 
 def _insert(signal: Signal, status: str, event: str) -> int:
@@ -356,6 +358,10 @@ def _outcome_from_bars(row, df) -> tuple | None:
     tps = [(c, row[c]) for c in _TP_COLS if row[c] is not None]
     # правило трейлинга — из СНАПШОТА сигнала (что видел подписчик), не из текущих настроек
     trail = _trail_of(row)
+    # tp_exit=False -> тейк опубликован как ОРИЕНТИР и позицию не закрывает: выход только
+    # по стопу/трейлингу/потолку удержания. Нет правила трейлинга -> прежняя семантика.
+    tp_exits = trail is None or trail["tp_exit"]
+    max_hold_h = trail["max_hold_hours"] if trail else 0.0
     cur_stop = stop
     peak = entry
     dts = pd.to_datetime(df["dt"], utc=True)
@@ -408,13 +414,15 @@ def _outcome_from_bars(row, df) -> tuple | None:
                 r_stop = (cur_stop - entry) / risk           # −1.0 либо плюс, если подтянут
                 event = "stopped" if cur_stop == stop else "trail"
                 return ("stopped", event, round(r_stop, 4), cur_stop, fill_dt)
-            hit = [] if bar_dt == tp_block_dt else [(c, tp) for c, tp in tps if hi >= tp]
+            hit = ([] if bar_dt == tp_block_dt or not tp_exits
+                   else [(c, tp) for c, tp in tps if hi >= tp])
         else:
             if hi >= cur_stop:
                 r_stop = (entry - cur_stop) / risk
                 event = "stopped" if cur_stop == stop else "trail"
                 return ("stopped", event, round(r_stop, 4), cur_stop, fill_dt)
-            hit = [] if bar_dt == tp_block_dt else [(c, tp) for c, tp in tps if lo <= tp]
+            hit = ([] if bar_dt == tp_block_dt or not tp_exits
+                   else [(c, tp) for c, tp in tps if lo <= tp])
         if trail is not None and bar_dt != tp_block_dt:
             # подтяжка ПОСЛЕ проверки стопа этого бара: внутри бара порядок хай/лоу
             # неизвестен, поэтому новый уровень действует со СЛЕДУЮЩЕГО бара (тот же
@@ -436,6 +444,16 @@ def _outcome_from_bars(row, df) -> tuple | None:
             col, tp = hit[-1]                        # лучший достигнутый в этом баре тейк
             r = (tp - entry) / risk if side == "LONG" else (entry - tp) / risk
             return (col, col, r, tp, fill_dt)
+        if filled and max_hold_h > 0 and fill_dt is not None:
+            held_h = (bar_dt - pd.to_datetime(fill_dt, utc=True)).total_seconds() / 3600.0
+            if held_h >= max_hold_h:
+                # потолок удержания: без фиксированного тейка позиция иначе висит неделями,
+                # занимая слот направления и накапливая фандинг. Выход по ЗАКРЫТИЮ бара —
+                # цена, которую подписчик реально мог получить рыночным ордером
+                close_p = float(b["close"])
+                r_now = ((close_p - entry) / risk if side == "LONG"
+                         else (entry - close_p) / risk)
+                return ("stopped", "timeout", round(r_now, 4), close_p, fill_dt)
     if filled:
         return ("open", None, None, None, fill_dt)   # вход есть, развязки нет — сообщить о филле
     return None                                      # всё ещё ждём fill
@@ -454,7 +472,15 @@ def _trail_of(row) -> dict | None:
         act, dist = float(t["activate_r"]), float(t["distance_r"])
     except (KeyError, TypeError, ValueError):
         return None
-    return {"activate_r": act, "distance_r": dist} if act > 0 else None
+    if act <= 0:
+        return None
+    try:
+        max_hold = float(t.get("max_hold_hours") or 0.0)
+    except (TypeError, ValueError):
+        max_hold = 0.0
+    # tp_exit отсутствует в снапшотах первой версии трейлинга -> True (тейк закрывал сделку)
+    return {"activate_r": act, "distance_r": dist,
+            "tp_exit": bool(t.get("tp_exit", True)), "max_hold_hours": max_hold}
 
 
 def _setup_of(row) -> str:

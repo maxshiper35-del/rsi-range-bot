@@ -193,3 +193,21 @@ def test_trail_line_published_matches_scoring_rule():
     assert "Трейлинг" in templates.render_signal_channel(_sig(snap=trail), 1)
     assert "Трейлинг" in templates.render_signal_dm(_sig(snap=trail), 1)
     assert "Трейлинг" not in templates.render_signal_dm(_sig(), 1)
+
+
+def test_trail_only_exit_line_states_tp_is_reference():
+    """В режиме «выход только по трейлингу» пост обязан сказать, что цель — ОРИЕНТИР:
+    иначе подписчик закроется по тейку, а журнал оценит сделку по трейлингу."""
+    from app.core.signal_engine import Side, Signal
+    from app.delivery import templates
+    sig = Signal(symbol="BTC/USDT:USDT", side=Side.LONG, timeframe="1h",
+                 entry=100.0, stop=90.0, take_profits=[130.0], risk_reward=3.0,
+                 confidence=0.7, reasons=["тест"], created_at="2026-01-01T00:00:00+00:00",
+                 indicators_snapshot={"setup": "6226", "trail": {
+                     "activate_r": 1.5, "distance_r": 0.3,
+                     "tp_exit": False, "max_hold_hours": 168.0}})
+    line = templates.trail_line(sig)
+    assert "ориентир" in line and "НЕ закрываем" in line and "7 дн" in line
+    # классический режим — строки про ориентир нет
+    sig.indicators_snapshot["trail"]["tp_exit"] = True
+    assert "ориентир" not in templates.trail_line(sig)
