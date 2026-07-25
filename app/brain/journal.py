@@ -71,12 +71,31 @@ def row_to_signal(row) -> Signal:
     )
 
 
+def _trail_rule() -> dict | None:
+    """Правило трейлинга на МОМЕНТ СОЗДАНИЯ сигнала -> {'activate_r','distance_r'} | None.
+
+    Пишется в snapshot сигнала и оттуда же читается судьёй. Так смена настройки НИКОГДА
+    не переоценивает уже опубликованные сделки: старые сигналы (без ключа 'trail')
+    судятся ровно так, как их видел подписчик — фиксированный тейк и неподвижный стоп.
+    Это прямое требование контракта честности: журнал неизменяем."""
+    from app import runtime
+
+    act = runtime.trail_activate_r()
+    if act <= 0:
+        return None
+    return {"activate_r": act, "distance_r": runtime.trail_distance_r()}
+
+
 def _insert(signal: Signal, status: str, event: str) -> int:
     """Общая вставка сигнала в заданном статусе + начальное событие. -> signal_id."""
     tps = list(signal.take_profits) + [None, None, None]
     now = clock.utcnow_iso()
-    exchange = signal.indicators_snapshot.get("exchange", "bybit") \
-        if isinstance(signal.indicators_snapshot, dict) else "bybit"
+    snapshot = dict(signal.indicators_snapshot) \
+        if isinstance(signal.indicators_snapshot, dict) else {}
+    trail = _trail_rule()
+    if trail is not None:
+        snapshot["trail"] = trail
+    exchange = snapshot.get("exchange", "bybit")
     with db.transaction() as conn:
         cur = conn.execute(
             "INSERT INTO signals(symbol, side, timeframe, entry, stop, tp1, tp2, tp3, "
@@ -85,7 +104,7 @@ def _insert(signal: Signal, status: str, event: str) -> int:
             (signal.symbol, signal.side.value, signal.timeframe, signal.entry, signal.stop,
              tps[0], tps[1], tps[2], signal.risk_reward, signal.confidence,
              json.dumps(signal.reasons, ensure_ascii=False),
-             json.dumps(signal.indicators_snapshot, ensure_ascii=False),
+             json.dumps(snapshot, ensure_ascii=False),
              exchange, status, signal.created_at, now),
         )
         sid = cur.lastrowid
@@ -335,6 +354,10 @@ def _outcome_from_bars(row, df) -> tuple | None:
     if risk <= 0 or "dt" not in df.columns:
         return None
     tps = [(c, row[c]) for c in _TP_COLS if row[c] is not None]
+    # правило трейлинга — из СНАПШОТА сигнала (что видел подписчик), не из текущих настроек
+    trail = _trail_of(row)
+    cur_stop = stop
+    peak = entry
     dts = pd.to_datetime(df["dt"], utc=True)
     created = pd.to_datetime(row["created_at"], utc=True)
     # created_at хранит ОТКРЫТИЕ решающего бара (метка ccxt); сигнал реально существует с
@@ -381,13 +404,34 @@ def _outcome_from_bars(row, df) -> tuple | None:
             fill_dt = bar_dt.isoformat()
             tp_block_dt = bar_dt
         if side == "LONG":
-            if lo <= stop:
-                return ("stopped", "stopped", -1.0, stop, fill_dt)  # стоп-первым (консервативно)
+            if lo <= cur_stop:
+                r_stop = (cur_stop - entry) / risk           # −1.0 либо плюс, если подтянут
+                event = "stopped" if cur_stop == stop else "trail"
+                return ("stopped", event, round(r_stop, 4), cur_stop, fill_dt)
             hit = [] if bar_dt == tp_block_dt else [(c, tp) for c, tp in tps if hi >= tp]
         else:
-            if hi >= stop:
-                return ("stopped", "stopped", -1.0, stop, fill_dt)
+            if hi >= cur_stop:
+                r_stop = (entry - cur_stop) / risk
+                event = "stopped" if cur_stop == stop else "trail"
+                return ("stopped", event, round(r_stop, 4), cur_stop, fill_dt)
             hit = [] if bar_dt == tp_block_dt else [(c, tp) for c, tp in tps if lo <= tp]
+        if trail is not None and bar_dt != tp_block_dt:
+            # подтяжка ПОСЛЕ проверки стопа этого бара: внутри бара порядок хай/лоу
+            # неизвестен, поэтому новый уровень действует со СЛЕДУЮЩЕГО бара (тот же
+            # принцип без-лукахеда, что и во всём скоринге).
+            # На баре ФИЛЛА трейлинг не активируем по той же причине, по которой не
+            # присуждаем на нём тейк: выгодный ход мог случиться ДО исполнения лимитки,
+            # и подписчик его не получил бы.
+            if side == "LONG":
+                mfe_r = (hi - entry) / risk
+                if mfe_r >= trail["activate_r"]:
+                    peak = max(peak, hi)
+                    cur_stop = max(cur_stop, peak - trail["distance_r"] * risk)
+            else:
+                mfe_r = (entry - lo) / risk
+                if mfe_r >= trail["activate_r"]:
+                    peak = min(peak, lo)
+                    cur_stop = min(cur_stop, peak + trail["distance_r"] * risk)
         if hit:
             col, tp = hit[-1]                        # лучший достигнутый в этом баре тейк
             r = (tp - entry) / risk if side == "LONG" else (entry - tp) / risk
@@ -395,6 +439,22 @@ def _outcome_from_bars(row, df) -> tuple | None:
     if filled:
         return ("open", None, None, None, fill_dt)   # вход есть, развязки нет — сообщить о филле
     return None                                      # всё ещё ждём fill
+
+
+def _trail_of(row) -> dict | None:
+    """Правило трейлинга из snapshot_json сигнала (как он был опубликован) | None.
+    Битый/старый снапшот -> None = прежняя семантика неподвижного стопа."""
+    try:
+        t = json.loads(row["snapshot_json"] or "{}").get("trail")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(t, dict):
+        return None
+    try:
+        act, dist = float(t["activate_r"]), float(t["distance_r"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {"activate_r": act, "distance_r": dist} if act > 0 else None
 
 
 def _setup_of(row) -> str:
@@ -458,8 +518,9 @@ def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
         r_val = round(result_r, 4) if result_r is not None else None
         with db.transaction() as conn:
             conn.execute(
-                "UPDATE signals SET status=?, result_r=?, closed_at=?, updated_at=? WHERE id=?",
-                (row["status"] if shadow else status, r_val, now, now, row["id"]),
+                "UPDATE signals SET status=?, result_r=?, closed_at=?, updated_at=?, "
+                "exit_price=? WHERE id=?",
+                (row["status"] if shadow else status, r_val, now, now, exit_price, row["id"]),
             )
             conn.execute(
                 "INSERT INTO signal_events(signal_id, event, price, r_at_event, created_at) "
@@ -514,7 +575,7 @@ def stats() -> dict:
     чтобы R-результат читался и в процентах рынка («+1R ≈ +N% хода»)."""
     # только реально закрытые активные сделки; candidate/rejected (теневые) — не публичная стата
     rows = db.query(
-        "SELECT side, entry, stop, tp1, tp2, tp3, status, result_r FROM signals "
+        "SELECT side, entry, stop, tp1, tp2, tp3, status, result_r, exit_price FROM signals "
         "WHERE status IN ('tp1','tp2','tp3','stopped') AND result_r IS NOT NULL")
     rs = [r["result_r"] for r in rows]
     n = len(rs)
@@ -525,11 +586,17 @@ def stats() -> dict:
     for r in rows:
         # выход по уровням сигнала (та же математика, что скоринг): tpX -> его уровень,
         # stopped -> стоп; ход считается «в пользу сделки» (SHORT инвертирован)
-        exit_price = r["stop"] if r["status"] == "stopped" else r[r["status"]]
+        # exit_price заполняется скорингом с миграции 014 (нужен для трейлинга: выход по
+        # подтянутому стопу происходит по цене, которой в исходных уровнях сигнала нет).
+        # NULL (вся история до миграции) -> прежний расчёт по уровню, история не меняется.
+        exit_price = r["exit_price"] if r["exit_price"] is not None else (
+            r["stop"] if r["status"] == "stopped" else r[r["status"]])
         mv = _price_move_pct(r["side"], r["entry"], exit_price)
         if mv is None:
             continue
-        (stop_moves if r["status"] == "stopped" else tp_moves).append(mv)
+        # трейлинг может закрыть сделку выше входа со статусом 'stopped' — такой выход
+        # логически в группе прибыльных, иначе средний «ход в стопах» врал бы
+        (tp_moves if (r["result_r"] or 0) > 0 else stop_moves).append(mv)
     open_n = db.query_one(
         "SELECT COUNT(*) AS c FROM signals WHERE status='open'")["c"]  # type: ignore[index]
     return {

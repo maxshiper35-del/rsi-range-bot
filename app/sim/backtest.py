@@ -82,8 +82,16 @@ def _cost_r(entry: float, stop: float, fee_pct: float, slippage_pct: float) -> f
 
 def _simulate_open(df: pd.DataFrame, side: Side, entry: float, stop: float,
                    tranches: list, fill_index: int, move_be_after: int | None,
-                   fee_pct: float, slippage_pct: float, funding_bps: float):
-    """Симуляция позиции от fill до выхода. -> (outcome, result_r, mfe, mae, exit_index) | None."""
+                   fee_pct: float, slippage_pct: float, funding_bps: float,
+                   trail_activate_r: float | None = None, trail_distance_r: float = 1.0,
+                   max_hold_bars: int | None = None):
+    """Симуляция позиции от fill до выхода. -> (outcome, result_r, mfe, mae, exit_index) | None.
+
+    trail_activate_r: после достижения хода в +N·R стоп подтягивается на trail_distance_r·R
+    от достигнутого пика (chandelier-подобный трейлинг). Подтяжка применяется ПОСЛЕ проверки
+    стопа текущего бара — внутри бара порядок хай/лоу неизвестен, поэтому трейлинг вступает
+    в силу со следующего бара (без лукахеда, как и весь остальной скоринг).
+    max_hold_bars: принудительный выход по close, если позиция висит дольше N баров."""
     high = df["high"].to_numpy()
     low = df["low"].to_numpy()
     close = df["close"].to_numpy()
@@ -93,6 +101,7 @@ def _simulate_open(df: pd.DataFrame, side: Side, entry: float, stop: float,
         return None
     is_long = side == Side.LONG
     cur_stop = stop
+    peak = entry
     remaining, realized, filled = 1.0, 0.0, 0
     mfe = mae = 0.0
 
@@ -128,6 +137,15 @@ def _simulate_open(df: pd.DataFrame, side: Side, entry: float, stop: float,
                     cur_stop = entry                      # стоп в безубыток
         if remaining <= 1e-9:
             return close_out("tp" if len(tranches) == 1 else f"tp{filled}", i)
+        if trail_activate_r is not None and mfe >= trail_activate_r:
+            peak = max(peak, high[i]) if is_long else min(peak, low[i])
+            trailed = (peak - trail_distance_r * risk if is_long
+                       else peak + trail_distance_r * risk)
+            cur_stop = max(cur_stop, trailed) if is_long else min(cur_stop, trailed)
+        if max_hold_bars is not None and i - fill_index >= max_hold_bars:
+            r_now = ((close[i] - entry) / risk if is_long else (entry - close[i]) / risk)
+            realized += remaining * r_now
+            return close_out("timeout", i)
 
     if filled > 0:                                        # конец данных — остаток по close
         r_eod = (close[-1] - entry) / risk if is_long else (entry - close[-1]) / risk

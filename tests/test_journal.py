@@ -1,6 +1,8 @@
 """Тесты журнала: запись сигнала, автофиксация исхода по цене, статистика."""
 from __future__ import annotations
 
+import json
+
 from app.core.signal_engine import Side, Signal
 
 
@@ -608,3 +610,55 @@ def test_recent_side_stops_window(fresh_db):
     db.execute("UPDATE signals SET closed_at=? WHERE symbol='BTC/USDT:USDT'",
                ("2026-01-01T01:00:00+00:00",))
     assert journal.recent_side_stops("SHORT", 6.0) == 0
+
+
+def test_trailing_stop_scored_from_snapshot_rule(fresh_db):
+    """Трейлинг судится по правилу ИЗ СНАПШОТА сигнала (что видел подписчик).
+
+    SHORT 100 / стоп 110 (риск 10) / тейк 80. Ход в пользу до 85 = +1.5R активирует
+    трейлинг, стоп подтягивается на 0.5R (5 пунктов) от достигнутого минимума."""
+    from app import runtime
+    from app.brain import journal
+    runtime.set_value("trail_activate_r", "1.5")
+    runtime.set_value("trail_distance_r", "0.5")
+    journal.record_signal(_sig())
+    snap = json.loads(fresh_db.query_one(
+        "SELECT snapshot_json FROM signals WHERE id=1")["snapshot_json"])
+    assert snap["trail"] == {"activate_r": 1.5, "distance_r": 0.5}
+
+    bars = [
+        (100, 101, 99, 100),      # филл (касание entry=100), трейлинг на этом баре не считаем
+        (100, 100, 85, 86),       # ход +1.5R -> стоп подтянулся на 85+5 = 90
+        (86, 92, 86, 91),         # откат вверх до 92 -> сработал подтянутый стоп 90
+    ]
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(bars, start="2026-01-01T00:15:00+00:00")})
+    closed = [c for c in res if c["status"] != "filled"]
+    assert len(closed) == 1
+    assert closed[0]["status"] == "stopped"
+    assert closed[0]["result_r"] == 1.0           # выход по 90: (100-90)/10 = +1.0R
+    assert closed[0]["exit_price"] == 90.0
+    row = fresh_db.query_one("SELECT exit_price, result_r FROM signals WHERE id=1")
+    assert row["exit_price"] == 90.0 and row["result_r"] == 1.0
+    ev = fresh_db.query_one(
+        "SELECT event FROM signal_events WHERE signal_id=1 ORDER BY id DESC LIMIT 1")
+    assert ev["event"] == "trail"                  # аудит-след: выход по подтянутому стопу
+
+
+def test_legacy_signal_without_trail_scored_as_before(fresh_db):
+    """РЕГРЕССИЯ КОНТРАКТА ЧЕСТНОСТИ: сигнал, опубликованный БЕЗ трейлинга, судится
+    по-старому даже если настройка сейчас включена — журнал неизменяем."""
+    from app import db, runtime
+    from app.brain import journal
+    runtime.set_value("trail_activate_r", "0")     # на момент публикации трейлинга нет
+    journal.record_signal(_sig())
+    assert "trail" not in json.loads(fresh_db.query_one(
+        "SELECT snapshot_json FROM signals WHERE id=1")["snapshot_json"])
+    runtime.set_value("trail_activate_r", "1.5")   # включили ПОСЛЕ публикации
+    bars = [(100, 101, 99, 100), (100, 100, 85, 86), (86, 92, 86, 91), (91, 111, 91, 105)]
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(bars, start="2026-01-01T00:15:00+00:00")})
+    closed = [c for c in res if c["status"] != "filled"]
+    assert len(closed) == 1
+    assert closed[0]["status"] == "stopped" and closed[0]["result_r"] == -1.0
+    assert db.query_one("SELECT exit_price FROM signals WHERE id=1")["exit_price"] == 110.0

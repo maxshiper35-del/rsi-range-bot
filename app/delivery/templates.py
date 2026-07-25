@@ -58,6 +58,28 @@ def _market_line(sig: Signal) -> str:
     return f"💹 Цена сейчас:  <code>{_price(market)}</code>\n" if market else ""
 
 
+def trail_line(sig: Signal, entry_prefix: str = "🔁 Трейлинг:") -> str:
+    """Правило подтяжки стопа ИЗ СНАПШОТА сигнала — то же, по которому судит журнал.
+
+    Без этой строки подписчик держал бы фиксированный стоп, а статистика считала бы
+    выход по подтянутому — расхождение публикуемого правила и правила оценки прямо
+    нарушает контракт честности. Пусто, если сигнал опубликован без трейлинга."""
+    snap = sig.indicators_snapshot if isinstance(sig.indicators_snapshot, dict) else {}
+    t = snap.get("trail")
+    if not isinstance(t, dict):
+        return ""
+    try:
+        act, dist = float(t["activate_r"]), float(t["distance_r"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    if act <= 0:
+        return ""
+    risk = abs(sig.entry - sig.stop)
+    trigger = (sig.entry + act * risk) if sig.side.value == "LONG" else (sig.entry - act * risk)
+    return (f"{entry_prefix} после <code>{_price(trigger)}</code> (+{act:g}R) "
+            f"двигать стоп на {dist:g}R от максимума хода\n")
+
+
 def render_signal_channel(sig: Signal, signal_id: int) -> str:
     """Пост нового сигнала в канал (публичная лента)."""
     tps = " / ".join(f"<code>{_price(t)}</code> ({_tp_r(sig.entry, sig.stop, t):.1f}R)"
@@ -70,6 +92,7 @@ def render_signal_channel(sig: Signal, signal_id: int) -> str:
         f"{_market_line(sig)}"
         f"📍 Вход:  <code>{_price(sig.entry)}</code>  (лимит)\n"
         f"🛑 Стоп:  <code>{_price(sig.stop)}</code>  (ход {stop_dist:.1f}%)\n"
+        f"{trail_line(sig)}"
         f"🎯 Цели:  {tps}\n"
         f"⚖️ R/R 1:{sig.risk_reward:.1f}    🔎 {int(sig.confidence * 100)}%\n"
         f"<blockquote expandable>Почему:\n{reasons}</blockquote>\n{LINE}\n"
@@ -93,6 +116,7 @@ def render_signal_dm(sig: Signal, signal_id: int) -> str:
         f"{_market_line(sig)}"
         f"📍 Вход:  <code>{_price(sig.entry)}</code>  (лимит)\n"
         f"🛑 Стоп:  <code>{_price(sig.stop)}</code>  (ход до стопа {stop_dist:.1f}%)\n"
+        f"{trail_line(sig)}"
         f"🎯 Тейки:\n{tps}\n"
         f"⚖️ R/R до TP{len(sig.take_profits)}: 1:{sig.risk_reward:.1f}\n"
         f"🔎 Уверенность: {conf_bar} {int(sig.confidence * 100)}%\n"

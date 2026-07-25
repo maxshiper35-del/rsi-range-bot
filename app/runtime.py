@@ -350,6 +350,24 @@ def min_stop_pct() -> float:
     return _num("min_stop_pct", float, 1.3)
 
 
+def trail_activate_r() -> float:
+    """Трейлинг стопа: включается после хода в +N·R. 0 = трейлинга нет (фикс. тейк).
+
+    Дефолт 1.5 по портфельной симуляции 25.07.2026 — единственная схема выхода, которая
+    улучшила ЧЕСТНУЮ OOS-половину, и улучшила устойчиво (при активации 1.0/1.5/2.0R):
+    OOS exp +0.006R -> +0.043R, просадка 45.2R -> 38.5R, винрейт 40% -> 47%. Проверено
+    на другом кэше сигналов (−0.040 -> +0.006) и на пессимистичных taker-издержках
+    (−0.022 -> +0.014). Лесенка частичных тейков и стоп-в-безубыток, наоборот, были
+    хуже фиксированного тейка в 9 прогонах из 9 — это ДРУГАЯ механика."""
+    return _num("trail_activate_r", float, 1.5)
+
+
+def trail_distance_r() -> float:
+    """Дистанция трейлинг-стопа от достигнутого пика, в R. Дефолт 0.5: варианты с 1.0R
+    в тех же прогонах давали заметно меньше (+0.008..+0.025R против +0.037..+0.043R)."""
+    return _num("trail_distance_r", float, 0.5)
+
+
 def time_filter_enabled() -> bool:
     """NY-окно входа для сетапа 6226 (SMCConfig.use_time_filter). Дефолт ВКЛ = статус-кво.
 
@@ -451,6 +469,8 @@ def effective() -> dict:
         "htf_block_countertrend": htf_block_countertrend(),
         "min_stop_pct": min_stop_pct(),
         "time_filter_enabled": time_filter_enabled(),
+        "trail_activate_r": trail_activate_r(),
+        "trail_distance_r": trail_distance_r(),
         "enabled_setups": enabled_setups(),
         "price_stars": price_stars(),
         "price_usdt": price_usdt(),

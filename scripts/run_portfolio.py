@@ -41,6 +41,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--max-stop-pct", type=float, default=None,
                    help="макс. дистанция стопа в %% от входа (аномально широкие стопы)")
     p.add_argument("--setups", default=None, help="оставить только эти сетапы (CSV)")
+    p.add_argument("--trail-activate", type=float, default=None,
+                   help="включить трейлинг после хода +N·R (напр. 1.0)")
+    p.add_argument("--trail-dist", type=float, default=1.0,
+                   help="дистанция трейлинга от пика в R (по умолчанию 1.0)")
+    p.add_argument("--max-hold", type=int, default=None,
+                   help="принудительный выход по close через N баров в позиции")
     p.add_argument("--from-dt", default=None,
                    help="брать сигналы с этой даты (OOS-срез, ISO: 2026-01-25)")
     p.add_argument("--to-dt", default=None, help="брать сигналы до этой даты (не включая)")
@@ -97,6 +103,9 @@ def main() -> None:
         fee_pct=args.fee, slippage_pct=args.slip,
         tp_ladder=parse_ladder(args.ladder) if args.ladder else None,
         move_be_after=args.be,
+        trail_activate_r=args.trail_activate,
+        trail_distance_r=args.trail_dist,
+        max_hold_bars=args.max_hold,
     )
     if args.json:
         print(json.dumps({

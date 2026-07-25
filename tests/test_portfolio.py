@@ -90,3 +90,47 @@ def test_portfolio_unfilled_limit_occupies_slot_then_expires():
     rep = simulate_portfolio(bars, [far, near], max_open_per_side=1, cooldown_stops=0)
     assert rep.signals_taken == 1 and rep.skipped_cap == 1     # слот занят висящей лимиткой
     assert rep.trades == 0                                     # исполнения не было
+
+
+def test_trailing_stop_locks_profit_without_lookahead():
+    """Трейлинг: после хода +N·R стоп подтягивается к пику, но вступает в силу СО
+    СЛЕДУЮЩЕГО бара — внутри бара порядок хай/лоу неизвестен (тот же принцип
+    без-лукахеда, что и во всём скоринге)."""
+    import pandas as pd
+
+    from app.core.signal_engine import Side
+    from app.sim.backtest import _simulate_open
+    # цена растёт до +3R, затем разворот вниз; тейк недостижимо далеко (+10R)
+    prices = [100, 101, 102, 103, 104, 103, 102, 101, 100, 99]
+    df = pd.DataFrame({
+        "dt": pd.date_range("2026-01-01", periods=len(prices), freq="1h", tz="UTC"),
+        "open": prices, "close": prices,
+        "high": [p + 0.2 for p in prices], "low": [p - 0.2 for p in prices],
+    })
+    tr = [{"level": 110.0, "r": 10.0, "frac": 1.0, "done": False}]
+    plain = _simulate_open(df, Side.LONG, 100.0, 99.0, list(tr), 0, None, 0.0, 0.0, 0.0)
+    trailed = _simulate_open(df, Side.LONG, 100.0, 99.0,
+                             [dict(t) for t in tr], 0, None, 0.0, 0.0, 0.0,
+                             trail_activate_r=2.0, trail_distance_r=1.0)
+    # без трейлинга позиция доезжает до стопа 99 -> -1R; с трейлингом фиксируется в плюсе
+    assert plain[1] < 0
+    assert trailed[1] > 1.0
+    assert trailed[0] == "stop"          # выход именно по подтянутому стопу
+
+
+def test_max_hold_bars_forces_timeout_exit():
+    """Ограничение времени в позиции: выход по close через N баров."""
+    import pandas as pd
+
+    from app.core.signal_engine import Side
+    from app.sim.backtest import _simulate_open
+    flat = [100.0] * 12
+    df = pd.DataFrame({
+        "dt": pd.date_range("2026-01-01", periods=len(flat), freq="1h", tz="UTC"),
+        "open": flat, "close": flat,
+        "high": [p + 0.3 for p in flat], "low": [p - 0.3 for p in flat],
+    })
+    tr = [{"level": 110.0, "r": 10.0, "frac": 1.0, "done": False}]
+    res = _simulate_open(df, Side.LONG, 100.0, 99.0, tr, 0, None, 0.0, 0.0, 0.0,
+                         max_hold_bars=3)
+    assert res is not None and res[0] == "timeout" and res[4] == 3

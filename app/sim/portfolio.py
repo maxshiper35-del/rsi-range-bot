@@ -95,7 +95,10 @@ def simulate_portfolio(bars: dict, signals: list, *,
                        slippage_pct: float = 0.02,
                        tp_ladder: list | None = None,
                        move_be_after: int | None = None,
-                       funding_bps_per_bar: float = 0.0) -> PortfolioReport:
+                       funding_bps_per_bar: float = 0.0,
+                       trail_activate_r: float | None = None,
+                       trail_distance_r: float = 1.0,
+                       max_hold_bars: int | None = None) -> PortfolioReport:
     """bars: {(symbol, tf): df} — те же кэш-бары, по которым считались сигналы.
     signals: список словарей из scripts.dump_signals (symbol, tf, bar_index, side, ...).
 
@@ -173,7 +176,10 @@ def simulate_portfolio(bars: dict, signals: list, *,
         else:
             tranches = [{"level": sig["tp"], "r": sig["rr"], "frac": 1.0, "done": False}]
         res = _simulate_open(df, side, entry, stop, tranches, fill_i, move_be_after,
-                             fee_pct, slippage_pct, funding_bps_per_bar)
+                             fee_pct, slippage_pct, funding_bps_per_bar,
+                             trail_activate_r=trail_activate_r,
+                             trail_distance_r=trail_distance_r,
+                             max_hold_bars=max_hold_bars)
         if res is None:
             continue
         outcome, result_r, _mfe, _mae, exit_i = res

@@ -166,3 +166,30 @@ def test_render_result_leverage_clamped_at_liquidation():
     txt = templates.render_result(
         _closed(status="stopped", result_r=-1.0, price_move_pct=-3.0), display_leverage=40.0)
     assert "-100.0%" in txt and "-120" not in txt
+
+
+def test_trail_line_published_matches_scoring_rule():
+    """Правило трейлинга обязано быть В ПОСТЕ: журнал судит по нему, значит подписчик
+    должен его видеть. Сигнал без трейлинга — строки нет (старая семантика)."""
+    from app.core.signal_engine import Side, Signal
+    from app.delivery import templates
+
+    def _sig(side=Side.LONG, snap=None):
+        return Signal(symbol="BTC/USDT:USDT", side=side, timeframe="1h",
+                      entry=100.0, stop=90.0, take_profits=[130.0], risk_reward=3.0,
+                      confidence=0.7, reasons=["тест"],
+                      created_at="2026-01-01T00:00:00+00:00",
+                      indicators_snapshot=snap if snap is not None else {"setup": "6226"})
+
+    trail = {"setup": "6226", "trail": {"activate_r": 1.5, "distance_r": 0.5}}
+    line = templates.trail_line(_sig(snap=trail))
+    assert "115" in line and "+1.5R" in line and "0.5R" in line   # LONG: 100 + 1.5*10
+    short = templates.trail_line(_sig(side=Side.SHORT, snap=trail))
+    assert "85" in short                                           # SHORT: 100 - 1.5*10
+    assert templates.trail_line(_sig()) == ""                      # без правила — пусто
+    assert templates.trail_line(_sig(snap={"trail": {"activate_r": 0}})) == ""
+
+    # строка реально попадает в оба поста
+    assert "Трейлинг" in templates.render_signal_channel(_sig(snap=trail), 1)
+    assert "Трейлинг" in templates.render_signal_dm(_sig(snap=trail), 1)
+    assert "Трейлинг" not in templates.render_signal_dm(_sig(), 1)
