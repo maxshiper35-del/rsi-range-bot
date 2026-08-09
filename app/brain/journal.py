@@ -253,7 +253,30 @@ def recent_side_stops(side: str, hours: float) -> int:
     """Стопы направления за скользящее окно N часов (по closed_at, все символы) — для
     анти-кластерного тормоза. Серия стопов одной стороны = рынок гонит тренд против
     ретрейсмент-входов (17.07: 8 стопов LONG за 6ч на сползании BTC −3.5%).
-    Теневые исходы semiauto-rejected не считаются: их статус остаётся 'rejected'."""
+    Теневые исходы semiauto-rejected не считаются: их статус остаётся 'rejected'.
+
+    ЗНАК result_r НЕ УЧИТЫВАЕТСЯ СОЗНАТЕЛЬНО. При схеме «выход только по трейлингу»
+    (trail_only_exit, с 25.07.2026) status='stopped' стоит и у ПРИБЫЛЬНОЙ фиксации по
+    подтянутому стопу — вживую это треть таких выходов (8 из 25 с 25.07.2026). Логика
+    подсказывает их не считать: прибыль ≠ «рынок против входов». Портфельный гейт
+    09.08.2026 говорит обратное (9 символов, 1h+4h, 2021-07..2026-07, конфиг в паритете
+    с продом: 6226+LTF, min_stop_pct 1.3, трейлинг 1.5/0.2 без фикс. тейка, cap 6,
+    тормоз 3/6ч, мейкер-вход/тейкер-выход, фандинг 0.125 bps/бар):
+
+      правило                  5 лет: exp / Σ / DD        OOS 1г: exp / Σ / DD
+      любой стоп (осталось)    +0.196R / +1048R / 32.2R   +0.222R / +283R / 21.8R
+      только result_r<0        +0.189R / +1025R / 41.0R   +0.215R / +278R / 25.4R
+      тормоз выключен          +0.193R / +1072R / 35.7R   +0.222R / +293R / 29.6R
+
+    Хуже на ОБЕИХ выборках при БОЕВОМ окне 6ч — и при пороге 2, и при 3, и при 4 (6
+    сравнений из 6); сильнее всего страдает просадка (+27% на 5 годах). Более того, на
+    5 годах фильтр по знаку хуже ПОЛНОСТЬЮ ВЫКЛЮЧЕННОГО тормоза и по матожиданию, и по
+    просадке: полумера ломает ограничитель, не давая ничего взамен. При окне 12ч знак
+    сравнения переворачивается (там фильтр лучше на обеих выборках) — то есть дело не в
+    «правильности» знака, а в силе торможения. Механизм, судя по замеру: кластер выходов
+    ОДНОЙ стороны — признак выдохшегося движения независимо от знака, а тормоз работает
+    ограничителем темпа перезахода, а не детектором убытков. Перепроверить:
+    simulate_portfolio(cooldown_losses_only=True) / run_portfolio --cooldown-losses-only."""
     cutoff = (clock.utcnow() - timedelta(hours=hours)).isoformat()
     row = db.query_one(
         "SELECT COUNT(*) AS n FROM signals WHERE side=? AND status='stopped' "
@@ -343,9 +366,14 @@ def _outcome_from_bars(row, df) -> tuple | None:
     СТОП; на САМОМ баре филла тейк НЕ присуждается (high/low не говорят, была ли цена у
     тейка ДО или ПОСЛЕ исполнения лимитки — ретрейсный лимит почти всегда касается
     тейк-стороны до филла; аудит-2 математики [2]), стоп на баре филла — присуждается.
-    -> (status, event, result_r|None, exit_price|None, fill_dt_iso|None)
+    -> (status, event, result_r|None, exit_price|None, fill_dt_iso|None, exit_dt_iso|None)
        | None (ждём fill / баров мало / окно не покрывает филл).
        status='open' — вход исполнен, развязки ещё нет.
+    exit_dt — время БАРА выхода (для expired — момент снятия ордера), а не момент такта
+    поллера: закрытые сделки скоупятся по closed_at (тормоз стороны, эквити, карточка
+    недели), и после простоя бота пачка старых исходов иначе схлопывалась в одну точку
+    «сейчас» — 09.08.2026 это дало призрачный кластер из 5 стопов LONG «за 6 часов»
+    и заблокировало сторону на полдня на основании сделок девятидневной давности.
     """
     import pandas as pd
 
@@ -402,8 +430,11 @@ def _outcome_from_bars(row, df) -> tuple | None:
         if not filled:
             if (bar_dt - decision).total_seconds() > MAX_WAIT_HOURS * 3600:
                 # лимитка не исполнилась за окно — сделки не было (тач ПОСЛЕ окна не в счёт:
-                # подписчик, следующий контракту, уже снял ордер — аудит-2 математики [7])
-                return ("expired", "expired", None, None, None)
+                # подписчик, следующий контракту, уже снял ордер — аудит-2 математики [7]).
+                # Время снятия — КОНЕЦ окна, а не бар, на котором мы это заметили: момент
+                # определён контрактом и не зависит от ТФ скоринга и глубины фетча.
+                expire_dt = decision + pd.Timedelta(hours=MAX_WAIT_HOURS)
+                return ("expired", "expired", None, None, None, expire_dt.isoformat())
             if not (lo <= entry <= hi):
                 continue
             filled = True                            # вход исполнен на ЭТОМ баре
@@ -413,14 +444,16 @@ def _outcome_from_bars(row, df) -> tuple | None:
             if lo <= cur_stop:
                 r_stop = (cur_stop - entry) / risk           # −1.0 либо плюс, если подтянут
                 event = "stopped" if cur_stop == stop else "trail"
-                return ("stopped", event, round(r_stop, 4), cur_stop, fill_dt)
+                return ("stopped", event, round(r_stop, 4), cur_stop, fill_dt,
+                        bar_dt.isoformat())
             hit = ([] if bar_dt == tp_block_dt or not tp_exits
                    else [(c, tp) for c, tp in tps if hi >= tp])
         else:
             if hi >= cur_stop:
                 r_stop = (entry - cur_stop) / risk
                 event = "stopped" if cur_stop == stop else "trail"
-                return ("stopped", event, round(r_stop, 4), cur_stop, fill_dt)
+                return ("stopped", event, round(r_stop, 4), cur_stop, fill_dt,
+                        bar_dt.isoformat())
             hit = ([] if bar_dt == tp_block_dt or not tp_exits
                    else [(c, tp) for c, tp in tps if lo <= tp])
         if trail is not None and bar_dt != tp_block_dt:
@@ -443,7 +476,7 @@ def _outcome_from_bars(row, df) -> tuple | None:
         if hit:
             col, tp = hit[-1]                        # лучший достигнутый в этом баре тейк
             r = (tp - entry) / risk if side == "LONG" else (entry - tp) / risk
-            return (col, col, r, tp, fill_dt)
+            return (col, col, r, tp, fill_dt, bar_dt.isoformat())
         if filled and max_hold_h > 0 and fill_dt is not None:
             held_h = (bar_dt - pd.to_datetime(fill_dt, utc=True)).total_seconds() / 3600.0
             if held_h >= max_hold_h:
@@ -453,9 +486,11 @@ def _outcome_from_bars(row, df) -> tuple | None:
                 close_p = float(b["close"])
                 r_now = ((close_p - entry) / risk if side == "LONG"
                          else (entry - close_p) / risk)
-                return ("stopped", "timeout", round(r_now, 4), close_p, fill_dt)
+                return ("stopped", "timeout", round(r_now, 4), close_p, fill_dt,
+                        bar_dt.isoformat())
     if filled:
-        return ("open", None, None, None, fill_dt)   # вход есть, развязки нет — сообщить о филле
+        # вход есть, развязки нет — сообщить о филле
+        return ("open", None, None, None, fill_dt, None)
     return None                                      # всё ещё ждём fill
 
 
@@ -520,7 +555,7 @@ def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
         res = _outcome_from_bars(row, df)
         if res is None:
             continue
-        status, event, result_r, exit_price, fill_dt = res
+        status, event, result_r, exit_price, fill_dt, exit_dt = res
         now = clock.utcnow_iso()
         shadow = row["status"] == "rejected"
         base = {"id": row["id"], "symbol": row["symbol"], "side": row["side"],
@@ -542,11 +577,16 @@ def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
         if status == "open":
             continue                                 # вход есть, развязки ещё нет
         r_val = round(result_r, 4) if result_r is not None else None
+        # closed_at — время БАРА выхода (домен), updated_at — момент такта (служебное).
+        # Тот же принцип, что у filled_at. Фолбэк на now недостижим для терминальных
+        # исходов (exit_dt отсутствует только у status='open', отсеянного выше) и стоит
+        # лишь затем, чтобы колонка не могла остаться NULL.
         with db.transaction() as conn:
             conn.execute(
                 "UPDATE signals SET status=?, result_r=?, closed_at=?, updated_at=?, "
                 "exit_price=? WHERE id=?",
-                (row["status"] if shadow else status, r_val, now, now, exit_price, row["id"]),
+                (row["status"] if shadow else status, r_val, exit_dt or now, now,
+                 exit_price, row["id"]),
             )
             conn.execute(
                 "INSERT INTO signal_events(signal_id, event, price, r_at_event, created_at) "

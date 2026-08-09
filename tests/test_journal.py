@@ -697,6 +697,69 @@ def test_trail_only_exit_ignores_take_profit(fresh_db):
     assert ev["event"] == "trail"
 
 
+# --- closed_at = время бара выхода (инцидент 09.08.2026) ---
+def test_closed_at_is_exit_bar_not_tick_time(fresh_db):
+    """closed_at — время БАРА, на котором позиция реально закрылась, а не момент такта.
+
+    updated_at при этом остаётся служебным «когда тронули строку» = now. Тот же принцип,
+    что у filled_at (доменное время события в доменной колонке)."""
+    from app import clock
+    from app.brain import journal
+    before = clock.utcnow_iso()
+    journal.record_signal(_sig())                    # SHORT 100 / stop 110, created 00:00
+    rows = [
+        (100, 101, 99, 100),                         # 00:15 филл
+        (100, 101, 99, 100),                         # 00:30 тишина
+        (100, 111, 99, 105),                         # 00:45 стоп 110
+    ]
+    journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(rows, start="2026-01-01T00:15:00+00:00")})
+    row = fresh_db.query_one("SELECT * FROM signals WHERE id=1")
+    assert row["status"] == "stopped"
+    assert row["closed_at"] == "2026-01-01T00:45:00+00:00"
+    assert row["updated_at"] >= before               # момент обработки, не бар выхода
+
+
+def test_closed_at_of_expired_is_end_of_wait_window(fresh_db):
+    """Неисполненная лимитка «закрыта» концом окна ожидания (решающий бар + MAX_WAIT_HOURS),
+    а не баром, на котором поллер это заметил: момент задан контрактом и не зависит от ТФ
+    скоринга и глубины фетча."""
+    from app.brain import journal
+    journal.record_signal(_sig())                    # created 00:00, m15 -> решение 00:15
+    below = [(90, 91, 89, 90)] * 55                  # 55 часовых баров > окна 50ч
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(below, start="2026-01-01T01:00:00+00:00", step_min=60)})
+    assert res[0]["status"] == "expired"
+    row = fresh_db.query_one("SELECT closed_at FROM signals WHERE id=1")
+    assert row["closed_at"] == "2026-01-03T02:15:00+00:00"   # 00:15 + 50ч
+
+
+def test_stale_backlog_does_not_trip_side_cooldown(fresh_db):
+    """РЕГРЕССИЯ 09.08.2026: после 9 суток простоя 8 сделок доскорились одним тактом и все
+    получили closed_at = «сейчас» — анти-кластерный тормоз увидел призрачный кластер стопов
+    «за 6 часов» и заблокировал сторону на полдня по сделкам девятидневной давности.
+    Старый исход в окно НЕ попадает, свежий — попадает (тормоз не сломан, а вылечен)."""
+    from datetime import timedelta
+
+    from app import clock
+    from app.brain import journal
+    stop_rows = [(50, 51, 49, 50), (50, 51, 44, 45)]          # филл, затем стоп 45
+    # (1) сделка из бэклога: бары полугодовой давности -> вне любого скользящего окна
+    journal.record_signal(_sig(symbol="BTC/USDT:USDT", side=Side.LONG,
+                               entry=50.0, stop=45.0, tp=60.0))
+    journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(stop_rows, start="2026-01-01T00:15:00+00:00")})
+    assert journal.recent_side_stops("LONG", 6.0) == 0
+    # (2) свежая сделка: бары последних часов -> тормоз обязан её видеть
+    start = (clock.utcnow() - timedelta(hours=3)).replace(microsecond=0)
+    journal.record_signal(_sig(symbol="ETH/USDT:USDT", side=Side.LONG,
+                               entry=50.0, stop=45.0, tp=60.0,
+                               created_at=(start - timedelta(minutes=15)).isoformat()))
+    journal.update_outcomes_from_bars(
+        {"ETH/USDT:USDT": _bars(stop_rows, start=start.isoformat())})
+    assert journal.recent_side_stops("LONG", 6.0) == 1
+
+
 def test_trail_max_hold_closes_by_timeout(fresh_db):
     """Потолок удержания: без фиксированного тейка сделка иначе висит неделями, занимая
     слот направления. Выход по ЗАКРЫТИЮ бара — цена, доступная рыночным ордером."""
