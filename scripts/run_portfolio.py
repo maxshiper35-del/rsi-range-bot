@@ -61,11 +61,21 @@ def parse_args(argv=None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _setup_enabled(tag: str, enabled: tuple) -> bool:
+    """Та же префиксная семантика, что у SMCEngine._setup_enabled (smc_setups.py).
+
+    Иначе инструмент замера молча меряет НЕ ТО, что поедет в прод: `--setups "6226,LTF"`
+    при точном сравнении выкидывало LTF-BB/LTF-OB целиком, и прогон, подписанный
+    «6226+LTF», на деле был одним 6226 (найдено 08.08.2026 по by_setup в отчёте).
+    """
+    return any(e and (tag == e or tag.startswith(e) or e.startswith(tag)) for e in enabled)
+
+
 def load(args) -> tuple[dict, list]:
     cache, sig_dir = Path(args.cache), Path(args.signals)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     tfs = [t.strip() for t in args.tfs.split(",") if t.strip()]
-    setups = {s.strip() for s in args.setups.split(",")} if args.setups else None
+    setups = tuple(s.strip() for s in args.setups.split(",") if s.strip()) if args.setups else None
     bars, signals = {}, []
     for symbol in symbols:
         for tf in tfs:
@@ -75,7 +85,7 @@ def load(args) -> tuple[dict, list]:
                 continue
             bars[(symbol, tf)] = pd.read_csv(bar_path, parse_dates=["dt"])
             for s in json.loads(sig_path.read_text()):
-                if setups is not None and s["setup"] not in setups:
+                if setups is not None and not _setup_enabled(s["setup"], setups):
                     continue
                 if args.min_conf is not None and s["confidence"] < args.min_conf:
                     continue
