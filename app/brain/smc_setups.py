@@ -33,6 +33,13 @@ from app.core.signal_engine import Side, Signal, StrategyConfig
 @dataclass
 class SMCConfig(StrategyConfig):
     # структура / ликвидность
+    # РАСХОЖДЕНИЕ С ПЕРВОИСТОЧНИКОМ, оставлено сознательно (29.07.2026). Курс определяет
+    # свинг как ТРИ свечи («посередине — выше двух по бокам»), то есть 1/1. Механически
+    # 1/1 даёт свинг каждые ~2 бара (64 против 28 на 126 барах синтетики) и выдаёт сигнал
+    # даже на чистом тренде, где 2/2 молчит: курс полагается на то, что человек выберет
+    # «самый явный съём ликвидности», а у движка этой дискреции нет. 2/2 — механическая
+    # замена этому отбору. Значение проверяется A/B-прогоном на 5 годах; менять только
+    # по результату замера, не по тексту колоды.
     swing_left: int = 2
     swing_right: int = 2
     eq_tol_atr: float = 0.1
@@ -57,6 +64,20 @@ class SMCConfig(StrategyConfig):
     use_time_filter: bool = True
     entry_window_ny: tuple = (7 * 60, 14 * 60)      # NY 07:00-14:00, полуинтервал [lo, hi)
     after_break_ny: int = 7 * 60                    # слом не раньше NY 07:00
+    # Окно СЪЁМА ЛИКВИДНОСТИ И СЛОМА — концептуально отдельное от окна входа: первоисточник
+    # (итоговый слайд 6226) задаёт «съем самой очевидной ликвидности с 2.00 до 11.00» и вход
+    # «только с 7.00 до 14.00». Разделение введено 29.07.2026, но ДЕФОЛТ оставлен равным окну
+    # входа: замер на 5 годах показал, что расширение до (120, 660) качество не улучшает —
+    # 6226 даёт +0.184R против +0.189R у статус-кво при большем числе сигналов.
+    break_window_ny: tuple = (7 * 60, 14 * 60)
+    # OB/BB одной свечой-экстремумом, НЕ всем движением. Расхождение с первоисточником
+    # («Ордер Блок — это ВСЁ ДВИЖЕНИЕ») сохранено по результату замера 29.07.2026 на 5 годах:
+    #   одна свеча (статус-кво)  LTF-BB 2883 сд. +0.213R | LTF-OB 271 сд. +0.524R | PF 1.37
+    #   всё движение (по курсу)  LTF-BB 4835 сд. +0.135R | LTF-OB 358 сд. +0.349R | PF 1.26
+    # Узкая зона даёт более тесный стоп и работает фильтром отбора; широкая пропускает в 1.7
+    # раза больше сделок втрое худшего качества и поднимает просадку с 26.1R до 33.1R.
+    # Менять только по новому замеру (флаг detect_order_block(full_move=...) сохранён).
+    ob_full_move: bool = False
 
     # веса SMC-confidence (сумма = 1.0)
     w_bias: float = 0.30
@@ -311,8 +332,9 @@ def build_6226(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = None,
         if m_break is not None and m_now is not None:
             lo, hi = cfg.entry_window_ny
             in_entry_window = _in_window(m_now, lo, hi)
-            if m_break < cfg.after_break_ny or not in_entry_window:
-                return None                        # вне окна — отбраковка
+            b_lo, b_hi = cfg.break_window_ny
+            if not _in_window(m_break, b_lo, b_hi):
+                return None                        # слом вне окна съёма ликвидности
 
     bias = _bias_score(df, imp.side, htf_df, cfg, entry=entry)
     trigger = 1.0 if imp.brk.body_confirmed else 0.5  # закреп телом / только закрытием
@@ -382,7 +404,8 @@ def build_ltf_poi(htf_df: pd.DataFrame | None, ltf_df: pd.DataFrame, symbol: str
     if imp is None:
         return None
     br_dir = Bias.BEAR if imp.side == Side.SHORT else Bias.BULL
-    block = det.detect_order_block(ltf_df, imp.swings, imp.brk, br_dir)
+    block = det.detect_order_block(ltf_df, imp.swings, imp.brk, br_dir,
+                                   full_move=cfg.ob_full_move)
     if block is None:
         return None
 

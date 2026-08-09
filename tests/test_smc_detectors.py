@@ -161,6 +161,27 @@ def test_detect_order_block_breaker():
     assert ob.bias == Bias.BEAR
 
 
+def test_order_block_spans_whole_move_not_single_candle():
+    """Блок = ВСЁ контртрендовое движение, а не одна свеча-экстремум.
+
+    Первоисточник: «Ордер Блок — это НЕ конкретная свеча, это ВСЁ ДВИЖЕНИЕ, направленное
+    на снятие ликвидности». Прежняя реализация брала одну свечу, из-за чего зона была в
+    разы уже, вход от её MT попадал не туда, а стоп за «дальнюю границу» — скальп-тесным.
+    full_move=False сохранён для A/B и здесь служит эталоном старого поведения."""
+    df = make_df(_BARS_SHORT)
+    sw = find_swings(df)
+    br = detect_structure_break(df, sw, market_structure(df, sw))
+    full = detect_order_block(df, sw, br, Bias.BEAR, full_move=True)
+    single = detect_order_block(df, sw, br, Bias.BEAR, full_move=False)
+    assert full is not None and single is not None
+    # верх у обоих один (вершина рывка), но полная зона тянется ниже — на весь рывок
+    assert abs(full.top - single.top) < 1e-9
+    assert full.bottom < single.bottom
+    assert full.index_start < single.index_start
+    # и, как следствие, дальняя граница (стоп) дальше, а MT — иной уровень входа
+    assert (full.top - full.bottom) > (single.top - single.bottom)
+
+
 # --- 1.8 SMT ---------------------------------------------------------------
 def test_detect_smt_direct_divergence():
     # A обновляет лой на последнем баре, B — нет -> прямая дивергенция -> лонг B

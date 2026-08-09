@@ -89,17 +89,31 @@ def test_setup_1_1_short():
 
 # --- гейт времени 6226 -----------------------------------------------------
 def test_6226_time_gate_blocks_outside_window():
-    # окно входа UTC 11:00-18:00; последний бар (06:00 + 15*15м = 09:45) вне окна -> None
+    # бар слома закрывается в NY 05:00 — вне окна break_window_ny (дефолт 7:00-14:00) -> None
     early = datetime(2026, 1, 5, 6, 0, tzinfo=timezone.utc)
     cfg = SMCConfig(use_time_filter=True)
     assert build_6226(_df(_BARS_SHORT, dt_start=early), "T", cfg) is None
 
 
 def test_6226_time_gate_allows_inside_window():
-    # 13:00 UTC -> внутри окна 11:00-18:00 -> сигнал есть
+    # бар слома закрывается в NY 12:00 — внутри окна -> сигнал есть
     ok = datetime(2026, 1, 5, 13, 0, tzinfo=timezone.utc)
     sig = build_6226(_df(_BARS_SHORT, dt_start=ok), "T", SMCConfig(use_time_filter=True))
     assert sig is not None and sig.side == Side.SHORT
+
+
+def test_6226_break_window_is_separate_knob_from_entry_window():
+    """Окно слома вынесено в break_window_ny — концептуально это НЕ окно входа.
+
+    Первоисточник задаёт два окна: съём ликвидности и слом с 2:00 до 11:00 NY, вход с
+    7:00 до 14:00. Дефолт оставлен равным окну входа, потому что расширение до (120, 660)
+    качество не улучшило (6226: +0.184R против +0.189R на 5 годах). Тест фиксирует, что
+    ручка РАБОТАЕТ и её можно перемерить, не переписывая гейт заново."""
+    late = datetime(2026, 1, 5, 13, 0, tzinfo=timezone.utc)   # слом в NY 12:00
+    df = _df(_BARS_SHORT, dt_start=late)
+    assert build_6226(df, "T", SMCConfig(use_time_filter=True)) is not None
+    narrow = SMCConfig(use_time_filter=True, break_window_ny=(2 * 60, 11 * 60))
+    assert build_6226(df, "T", narrow) is None    # 12:00 вне окна первоисточника
 
 
 # --- SMCEngine -------------------------------------------------------------

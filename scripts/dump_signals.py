@@ -73,6 +73,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--min-impulse", type=float, default=1.0)
     p.add_argument("--time-filter", action="store_true")
     p.add_argument("--htf-block", action="store_true")
+    p.add_argument("--swing", type=int, default=None,
+                   help="баров слева/справа для свинга (1 = как в первоисточнике, 2 = дефолт)")
+    p.add_argument("--ob-single-candle", action="store_true",
+                   help="старое поведение: OB/BB = одна свеча-экстремум, а не всё движение")
+    p.add_argument("--break-window", default=None,
+                   help="окно съёма/слома в NY-минутах, напр. '120,660' (2:00-11:00)")
     p.add_argument("--cache", default="data/cache")
     p.add_argument("--out", default="data/cache/signals")
     return p.parse_args(argv)
@@ -84,12 +90,21 @@ def main() -> None:
     cache, out = Path(args.cache), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     htf_map = parse_htf_map(args.htf_map)
+    extra: dict = {}
+    if args.swing is not None:
+        extra["swing_left"] = args.swing
+        extra["swing_right"] = args.swing
+    if args.break_window:
+        lo, hi = (int(x) for x in args.break_window.split(","))
+        extra["break_window_ny"] = (lo, hi)
     cfg = SMCConfig(
         use_time_filter=args.time_filter,
         htf_block_countertrend=args.htf_block,
         min_confidence=args.min_conf,
         min_impulse_atr=args.min_impulse,
         enabled_setups=tuple(s.strip() for s in args.setups.split(",") if s.strip()),
+        ob_full_move=not args.ob_single_candle,
+        **extra,
     )
     for symbol in [s.strip() for s in args.symbols.split(",") if s.strip()]:
         for tf in [t.strip() for t in args.tfs.split(",") if t.strip()]:

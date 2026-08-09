@@ -423,12 +423,22 @@ CORRELATIONS: dict[tuple[str, str], tuple[float, str]] = {
 # ---------------------------------------------------------------------------
 def detect_order_block(df: pd.DataFrame, swings: list[Swing],
                        structure_break: StructureBreak | None, trend: Bias,
-                       window: int = 10) -> Zone | None:
+                       window: int = 10, full_move: bool = False) -> Zone | None:
     """Единая модель OB/BB: движение против тренда, снявшее ликвидность + импульсный выход.
 
     OB  — рывок внутри тренда (BOS, продолжение); BB — тот же рывок при развороте (CHOCH).
-    Зона = свеча-origin рывка, границы ПО ТЕНЯМ (high..low). Вход — на возврате (mitigation),
-    стоп за дальнюю границу блока.
+    Границы ПО ТЕНЯМ. Вход — на возврате (mitigation), стоп за дальнюю границу блока.
+
+    full_move=True: зона = ВСЁ контртрендовое движение от свинга, с которого оно началось,
+    до его вершины/низа — так блок определён в первоисточнике («Ордер Блок — это НЕ
+    конкретная свеча, это ВСЁ ДВИЖЕНИЕ, направленное на снятие ликвидности»).
+
+    ДЕФОЛТ False (одна свеча-экстремум) — сознательное расхождение с первоисточником по
+    результату замера 29.07.2026 на 5 годах (9 символов, 1h+4h, живые правила):
+      одна свеча   LTF-BB 2883 сд. +0.213R | LTF-OB 271 сд. +0.524R | Σ +1114R | PF 1.37
+      всё движение LTF-BB 4835 сд. +0.135R | LTF-OB 358 сд. +0.349R | Σ +1057R | PF 1.26
+    Узкая зона даёт более тесный стоп и работает фильтром отбора; широкая пропускает в 1.7
+    раза больше сделок втрое худшего качества и поднимает просадку с 26.1R до 33.1R.
     """
     if structure_break is None:
         return None
@@ -441,11 +451,21 @@ def detect_order_block(df: pd.DataFrame, swings: list[Swing],
     if structure_break.direction == Bias.BEAR:
         origin = start + int(high[start:bi + 1].argmax())   # вершина рывка перед сломом вниз
         bias = Bias.BEAR
+        # начало рывка — последний свинг-ЛОЙ перед вершиной (движение шло снизу вверх)
+        anchors = [s.index for s in swings if s.kind == Kind.LOW and s.index < origin]
     else:
         origin = start + int(low[start:bi + 1].argmin())    # низ рывка перед сломом вверх
         bias = Bias.BULL
-    return Zone(kind=kind, top=float(high[origin]), bottom=float(low[origin]),
-                index_start=origin, index_end=bi, bias=bias)
+        anchors = [s.index for s in swings if s.kind == Kind.HIGH and s.index < origin]
+
+    if not full_move:
+        return Zone(kind=kind, top=float(high[origin]), bottom=float(low[origin]),
+                    index_start=origin, index_end=bi, bias=bias)
+
+    leg_start = max(anchors[-1], start) if anchors else origin
+    seg = slice(leg_start, origin + 1)
+    return Zone(kind=kind, top=float(high[seg].max()), bottom=float(low[seg].min()),
+                index_start=leg_start, index_end=bi, bias=bias)
 
 
 # ---------------------------------------------------------------------------

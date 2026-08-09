@@ -73,10 +73,28 @@ def test_new_runtime_keys(fresh_db):
     assert runtime.trial_days() == 7
 
 
-def test_enabled_setups_default_is_conservative(fresh_db):
+def test_trail_defaults_from_five_year_backtest(fresh_db):
+    """Схема выхода после пересмотра 28.07.2026 на 5-летнем прогоне.
+
+    Дистанция 0.2R: зависимость монотонна (0.2 < 0.3 < 0.5) в обеих независимых выборках,
+    поэтому дефолт изменён. Активация остаётся 1.5R: там оптимум между выборками
+    переворачивается, менять статус-кво не на чем (см. docstring trail_distance_r)."""
+    from app import db, runtime
+    assert runtime.trail_distance_r() == 0.2
+    # фикстура гасит трейлинг (см. conftest), поэтому дефолт активации проверяем,
+    # сняв её override — иначе тест читал бы значение фикстуры, а не код
+    db.execute("DELETE FROM settings WHERE key='trail_activate_r'")
+    assert runtime.trail_activate_r() == 1.5
+    runtime.set_value("trail_distance_r", "0.5")          # админка по-прежнему перекрывает
+    assert runtime.trail_distance_r() == 0.5
+
+
+def test_enabled_setups_default_excludes_setup_11(fresh_db):
     from app import runtime
-    # дефолт: только 1:1 (6226/LTF доказанно убыточны в бэктесте, LTF-BB подтвердил живьём)
-    assert runtime.enabled_setups() == ("1:1",)
+    # дефолт: 6226 + LTF-BB/LTF-OB, без 1:1 — 5-летний прогон дал 1:1 exp +0.029R против
+    # +0.237R у этого набора; обоснование и цифры в комментарии к _DEFAULT_ENABLED_SETUPS
+    assert runtime.enabled_setups() == ("6226", "LTF")
+    assert "1:1" not in runtime.enabled_setups()
     runtime.set_value("enabled_setups", "1:1,6226")
     assert runtime.enabled_setups() == ("1:1", "6226")
     runtime.set_value("enabled_setups", "6226,1:1,open-SMC,LTF")
@@ -111,7 +129,7 @@ def test_format_admin_status():
     eff = {"paused": True, "symbols": ["BTC/USDT:USDT"], "timeframes": ["15m", "1h"],
            "signal_mode": "auto", "channel": "-100123", "channel_enabled": True,
            "channel_mode": "full", "min_confidence": 0.5, "min_impulse_atr": 1.0,
-           "min_rr_open_model": 0.5, "max_open_per_side": 6, "enabled_setups": ("1:1",),
+           "min_rr_open_model": 0.5, "max_open_per_side": 6, "enabled_setups": ("6226", "LTF"),
            "price_stars": 1000, "price_usdt": 20, "sub_days": 30, "free_per_week": 3}
     txt = bot.format_admin_status(eff, {"total": 5, "paid": 2})
     assert "НА ПАУЗЕ" in txt and "BTC/USDT:USDT" in txt and "платных 2" in txt
