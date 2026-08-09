@@ -92,6 +92,7 @@ def simulate_portfolio(bars: dict, signals: list, *,
                        max_open_per_side: int = 6,
                        cooldown_stops: int = 3,
                        cooldown_hours: float = 6.0,
+                       cooldown_losses_only: bool = False,
                        dedup: bool = True,
                        fee_pct: float = 0.055,
                        slippage_pct: float = 0.02,
@@ -127,10 +128,22 @@ def simulate_portfolio(bars: dict, signals: list, *,
                 out[a["side"]] += 1
         return out
 
+    def counts_as_stop(c: dict) -> bool:
+        """Что взводит анти-кластерный тормоз. Живой аналог — journal.recent_side_stops.
+
+        cooldown_losses_only=True: только УБЫТОЧНЫЙ выход по стопу. При схеме «выход только
+        по трейлингу» подтянутый стоп закрывает и прибыльные сделки, а прибыльная фиксация
+        не свидетельствует, что рынок гонит тренд против ретрейсмент-входов. ДЕФОЛТ False
+        (= живое правило): замер 09.08.2026 показал, что фильтр по знаку хуже на обеих
+        выборках — см. journal.recent_side_stops, там таблица."""
+        if not c["outcome"].endswith("stop"):
+            return False
+        return c["result_r"] < 0 if cooldown_losses_only else True
+
     def recent_stops(side: str, now: pd.Timestamp) -> int:
         cutoff = now - pd.Timedelta(hours=cooldown_hours)
         return sum(1 for c in closed
-                   if c["side"] == side and c["outcome"].endswith("stop")
+                   if c["side"] == side and counts_as_stop(c)
                    and cutoff <= c["closed_dt"] <= now)
 
     def duplicate_active(sig: dict, now: pd.Timestamp) -> bool:

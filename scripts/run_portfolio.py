@@ -29,6 +29,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--cap", type=int, default=6, help="max_open_per_side (0 = без лимита)")
     p.add_argument("--cooldown-stops", type=int, default=3, help="0 = тормоз выключен")
     p.add_argument("--cooldown-hours", type=float, default=6.0)
+    p.add_argument("--cooldown-losses-only", action="store_true",
+                   help="в тормоз стороны считать только УБЫТОЧНЫЕ выходы по стопу "
+                        "(при выходе только по трейлингу прибыльная фиксация тоже 'stop')")
     p.add_argument("--no-dedup", action="store_true")
     p.add_argument("--ladder", default=None)
     p.add_argument("--be", type=int, default=None)
@@ -112,6 +115,7 @@ def main() -> None:
         max_open_per_side=args.cap,
         cooldown_stops=args.cooldown_stops,
         cooldown_hours=args.cooldown_hours,
+        cooldown_losses_only=args.cooldown_losses_only,
         dedup=not args.no_dedup,
         fee_pct=args.fee, slippage_pct=args.slip,
         funding_bps_per_bar=args.funding,

@@ -66,6 +66,33 @@ def test_portfolio_cooldown_pauses_side_after_stop_series():
     assert hot.trades == 2 and cold.trades == 3
 
 
+def test_cooldown_losses_only_ignores_profitable_trailing_exit():
+    """Ручка cooldown_losses_only: ПРИБЫЛЬНЫЙ выход по подтянутому стопу не взводит тормоз.
+
+    При схеме «выход только по трейлингу» такой выход тоже имеет outcome='stop' (и
+    status='stopped' в живом журнале), но свидетельством «рынок гонит тренд против
+    ретрейсмент-входов» он не является. Дефолт False — см. замер в docstring
+    simulate_portfolio: на 5 годах фильтрация по знаку даёт худшую просадку."""
+    prices = [100, 100, 101, 102, 103, 104, 103, 102, 101, 100] + [99.5, 99.0] + [98.0] * 30
+    df = pd.DataFrame({
+        "dt": pd.date_range("2026-01-01", periods=len(prices), freq="1h", tz="UTC"),
+        "open": prices, "close": prices,
+        "high": [p + 0.2 for p in prices], "low": [p - 0.2 for p in prices],
+    })
+    bars = {(s, "1h"): df for s in ("A/USDT:USDT", "B/USDT:USDT", "C/USDT:USDT")}
+    # A и B выходят по трейлингу В ПЛЮС на баре 6; C приходит следом (бар 7)
+    sigs = [_sig("A/USDT:USDT", 0, tp=200.0), _sig("B/USDT:USDT", 0, tp=200.0),
+            _sig("C/USDT:USDT", 7, tp=200.0)]
+    kw = dict(max_open_per_side=0, cooldown_stops=2, cooldown_hours=48,
+              fee_pct=0.0, slippage_pct=0.0, trail_activate_r=2.0, trail_distance_r=1.0)
+    hot = simulate_portfolio(bars, sigs, **kw)
+    soft = simulate_portfolio(bars, sigs, cooldown_losses_only=True, **kw)
+    # оба выхода — прибыльные «стопы» (подтянутый стоп), именно они и тормозят сторону
+    assert [(t.outcome, t.result_r > 0) for t in hot.detail] == [("stop", True)] * 2
+    assert hot.skipped_cooldown == 1 and hot.trades == 2
+    assert soft.skipped_cooldown == 0 and soft.trades == 3
+
+
 def test_portfolio_report_equity_by_time_and_breakdowns():
     """Эквити строится по времени ЗАКРЫТИЯ (портфельная просадка), есть разбивки."""
     up = _bars(drift=0.5)
