@@ -16,7 +16,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <!-- venv, а не /usr/bin/python3 — см. комментарий в com.rsirange.bot.plist -->
+        <string>/Users/mac/bot ctypto/.venv/bin/python</string>
         <string>-m</string>
         <string>scripts.backup_db</string>
     </array>

@@ -1,5 +1,11 @@
 .PHONY: help init-db run run-webhook backtest test lint fmt typecheck clean install-hooks install-playwright
 
+# Интерпретатор: venv проекта, если он есть, иначе системный python3.
+# /usr/bin/python3 на macOS — шим Xcode: после апдейта Xcode он отказывается
+# стартовать до принятия лицензии и уносит с собой прод и весь дев-тулинг
+# (инцидент 30.07.2026, 9 суток простоя). venv от этого не зависит.
+PY := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
+
 help:
 	@echo "init-db            - применить миграции (создать/обновить схему БД)"
 	@echo "run                - запустить Telegram-бота"
@@ -15,31 +21,31 @@ help:
 	@echo "clean              - удалить кэши"
 
 init-db:
-	python3 -m scripts.init_db
+	$(PY) -m scripts.init_db
 
 run:
-	python3 -m app.delivery.bot
+	$(PY) -m app.delivery.bot
 
 run-webhook:
-	python3 -m app.v2.tradingview_webhook
+	$(PY) -m app.v2.tradingview_webhook
 
 backtest:
-	python3 -m scripts.run_backtest
+	$(PY) -m scripts.run_backtest
 
 backup-db:
-	python3 -m scripts.backup_db
+	$(PY) -m scripts.backup_db
 
 test:
-	python3 -m pytest
+	$(PY) -m pytest
 
 lint:
-	python3 -m ruff check app tests scripts
+	$(PY) -m ruff check app tests scripts
 
 fmt:
-	python3 -m ruff format app tests scripts
+	$(PY) -m ruff format app tests scripts
 
 typecheck:
-	python3 -m mypy app
+	$(PY) -m mypy app
 
 install-hooks:
 	cp scripts/hooks/pre-commit .git/hooks/pre-commit
@@ -47,7 +53,7 @@ install-hooks:
 	@echo "pre-commit хук установлен: .git/hooks/pre-commit"
 
 install-playwright:
-	python3 -m playwright install chromium
+	$(PY) -m playwright install chromium
 
 clean:
 	rm -rf .pytest_cache .mypy_cache .ruff_cache

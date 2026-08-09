@@ -20,7 +20,11 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <!-- venv на python.org 3.11, а НЕ /usr/bin/python3: системный питон — шим Xcode,
+             и после апдейта Xcode он отказывается стартовать («You have not agreed to the
+             Xcode license agreements»), из-за чего 30.07.2026 бот молча лежал 9 суток
+             в крэш-лупе. venv от состояния лицензии Xcode не зависит. -->
+        <string>/Users/mac/bot ctypto/.venv/bin/python</string>
         <string>-m</string>
         <string>app.delivery.bot</string>
     </array>
