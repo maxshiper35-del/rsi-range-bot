@@ -348,11 +348,16 @@ def build_6226(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = None,
 
     reasons = [
         f"свип {'хая' if imp.side == Side.SHORT else 'лоя'} (снятие ликвидности)",
-        f"слом структуры {imp.brk.kind} (закреп телом)",
+        # честный текст по факту (аудит 11.08.2026): раньше «закреп телом» писался
+        # безусловно, даже когда закрепа не было и trigger=0.5
+        f"слом структуры {imp.brk.kind} "
+        f"({'закреп телом' if imp.brk.body_confirmed else 'только закрытием'})",
         "фибо 1/0.62/0/-0.26 по импульсу",
     ] + cf_reasons
     return _mk_signal(df, symbol, imp.side, timeframe, entry, stop, [take],
-                      cfg.rr_6226, confidence, reasons, imp, setup="6226")
+                      cfg.rr_6226, confidence, reasons, imp, setup="6226",
+                      scores={"bias": round(bias, 3), "trigger": trigger,
+                              "sweep": sweep, "confl": round(confl, 3)})
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +391,9 @@ def detect_setup_1_1(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = None
         "вход 0.5, стоп 1, тейк 0 (RR 1:1)",
     ] + cf_reasons
     return _mk_signal(df, symbol, imp.side, timeframe, entry, stop, [take],
-                      cfg.rr_setup11, confidence, reasons, imp, setup="1:1")
+                      cfg.rr_setup11, confidence, reasons, imp, setup="1:1",
+                      scores={"bias": round(bias, 3), "trigger": trigger,
+                              "sweep": sweep, "confl": round(confl, 3)})
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +458,9 @@ def build_ltf_poi(htf_df: pd.DataFrame | None, ltf_df: pd.DataFrame, symbol: str
         f"вход от {block.kind} (MT 50%), стоп за дальнюю границу блока",
     ] + cf_reasons
     return _mk_signal(ltf_df, symbol, imp.side, timeframe, entry, stop, [take],
-                      round(rr, 2), confidence, reasons, imp, setup=f"LTF-{block.kind}")
+                      round(rr, 2), confidence, reasons, imp, setup=f"LTF-{block.kind}",
+                      scores={"bias": bias, "trigger": trigger,
+                              "sweep": sweep, "confl": round(confl, 3)})
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +508,9 @@ def build_opening_model(df: pd.DataFrame, symbol: str, cfg: SMCConfig | None = N
 
     reasons = [f"модель открытия {model}", ez, "стоп за точку разворота/свип"] + cf_reasons
     return _mk_signal(df, symbol, imp.side, timeframe, entry, stop, [take],
-                      rr, confidence, reasons, imp, setup=f"open-{model}")
+                      rr, confidence, reasons, imp, setup=f"open-{model}",
+                      scores={"bias": round(bias, 3), "trigger": trigger,
+                              "sweep": sweep, "confl": round(confl, 3)})
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +532,7 @@ def _signal_created_at(df: pd.DataFrame) -> str:
 def _mk_signal(df: pd.DataFrame, symbol: str, side: Side, timeframe: str,
                entry: float, stop: float,
                tps: list[float], rr: float, confidence: float, reasons: list[str],
-               imp: _Impulse, setup: str) -> Signal:
+               imp: _Impulse, setup: str, scores: dict | None = None) -> Signal:
     # R/R ВСЕГДА из фактических уровней (до последнего тейка) — чтобы показанное
     # соотношение точно совпадало с показанными вход/стоп/тейк
     risk = abs(entry - stop)
@@ -547,6 +558,10 @@ def _mk_signal(df: pd.DataFrame, symbol: str, side: Side, timeframe: str,
             "break_index": imp.brk.break_index,
             "swept": imp.swept,
             "clean_impulse": imp.clean,
+            # суб-скоры confidence (аудит 11.08.2026): до этого bias/trigger/confl
+            # невосстановимо терялись — калибровка весов w_* была невозможна ни по
+            # журналу, ни по кэшу сигналов. Чистая инструментация, дефолты не меняет.
+            **({"scores": scores} if scores else {}),
         },
     )
 

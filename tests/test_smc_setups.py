@@ -70,6 +70,37 @@ def test_build_6226_short():
     assert sig.indicators_snapshot["market"] == 94.0   # close последнего бара
 
 
+def test_snapshot_logs_confidence_subscores():
+    """Суб-скоры confidence пишутся в снапшот (аудит 11.08.2026).
+
+    До этого bias/trigger/confl невосстановимо терялись — калибровка весов w_*
+    была невозможна ни по журналу, ни по кэшу сигналов. Проверяем и арифметику:
+    свёртка суб-скоров весами обязана давать сам confidence — иначе в снапшоте
+    лежит не то, из чего скор посчитан."""
+    cfg = SMCConfig(use_time_filter=False, min_confidence=0.0)
+    for sig in (build_6226(_df(_BARS_SHORT), "T", cfg),
+                detect_setup_1_1(_df(_BARS_SHORT), "T", cfg)):
+        assert sig is not None
+        sc = sig.indicators_snapshot["scores"]
+        assert set(sc) == {"bias", "trigger", "sweep", "confl"}
+        expect = _confidence(sc["bias"], sc["trigger"], sc["sweep"], sc["confl"], cfg)
+        assert abs(sig.confidence - expect) < 0.02   # confidence округлён до 2 знаков
+
+
+def test_6226_reason_text_honest_about_body_close():
+    """Текст причины отражает ФАКТ закрепа телом, а не пишется безусловно.
+
+    Баг из аудита 11.08.2026: «закреп телом» печатался даже при trigger=0.5
+    (body_confirmed=False) — пост в канале врал о качестве слома."""
+    sig = build_6226(_df(_BARS_SHORT), "T",
+                     SMCConfig(use_time_filter=False, min_confidence=0.0))
+    assert sig is not None
+    brk_line = next(r for r in sig.reasons if r.startswith("слом структуры"))
+    body = sig.indicators_snapshot["scores"]["trigger"] == 1.0
+    assert ("закреп телом" in brk_line) == body
+    assert ("только закрытием" in brk_line) == (not body)
+
+
 def test_build_6226_flat_returns_none():
     from app.core.signal_engine import _synthetic_uptrend
     assert build_6226(_synthetic_uptrend(), "T",
