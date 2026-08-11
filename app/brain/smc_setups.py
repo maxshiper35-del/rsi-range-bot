@@ -97,6 +97,22 @@ class SMCConfig(StrategyConfig):
     # и были убыточны в момент рождения. 0 = гейт выключен.
     min_stop_pct: float = 0.0
 
+    # --- A/B-кандидаты 11.08.2026 (дефолты «выключено» = поведение как раньше) ---
+    # Оживший require_body_close: старый параметр detect_structure_break объявлен, но
+    # МЁРТВ (в теле не читается — аудит 11.08.2026). Вместо правки контракта детектора —
+    # гейт на уровне импульса: слом только закрытием (body_confirmed=False) отбрасывается.
+    enforce_body_close: bool = False
+    # SMT-вето (пак CHS, колода SMT by SMC): при активной дивергенции коррелированной
+    # пары (партнёр снял экстремум, свой актив нет -> подсказка стороны отстающему)
+    # кандидат ПРОТИВ подсказки отбрасывается. Нет дивергенции или партнёра — пас.
+    smt_mode: str = "off"               # "off" | "veto"
+    smt_lookback: int = 20
+    # Вето «слом в имбаланс» (правило отмены из пака: «против HPZ не попрёшь»):
+    # закрытие решающего бара слома ВНУТРИ противоположной неинверсированной HPZ-зоны
+    # (FVG/GAP/BPR, сформированной до слома) — сетап не берётся.
+    veto_break_into_hpz: bool = False
+    hpz_kinds: tuple = ("FVG", "GAP", "BPR")
+
     # жёсткий блок контртренда от ПОДТВЕРЖДЁННОЙ структуры HTF (две пары свингов
     # HH+HL / LH+LL, фолбэк по наклону не считается). Урок 17.07: штраф −0.25 в
     # confidence пропускал лонги в сползании (8 стопов LONG за 6ч); 12-мес бэктест —
@@ -250,6 +266,12 @@ def _find_impulse(df: pd.DataFrame, cfg: SMCConfig) -> _Impulse | None:
     brk = det.detect_structure_break(df, swings, trend, cfg.require_body_close)
     if brk is None:
         return None
+    # A/B 11.08.2026: жёсткое требование закрепа телом (см. SMCConfig.enforce_body_close)
+    if cfg.enforce_body_close and not brk.body_confirmed:
+        return None
+    # A/B 11.08.2026: вето «слом в имбаланс» (см. SMCConfig.veto_break_into_hpz)
+    if cfg.veto_break_into_hpz and _break_into_hpz(df, brk, cfg):
+        return None
     side = Side.SHORT if brk.direction == Bias.BEAR else Side.LONG
 
     low = df["low"].to_numpy()
@@ -293,6 +315,32 @@ def _find_impulse(df: pd.DataFrame, cfg: SMCConfig) -> _Impulse | None:
     clean = _impulse_clean(df, s_index, e_index, cfg.max_impulse_wick_ratio)
     return _Impulse(side, float(S), float(E), s_index, e_index,
                     swept=sweep is not None, clean=clean, brk=brk, swings=swings)
+
+
+def _break_into_hpz(df: pd.DataFrame, brk: det.StructureBreak, cfg: SMCConfig) -> bool:
+    """Правило отмены «слом в имбаланс»: закрытие решающего бара слома внутри
+    ПРОТИВОПОЛОЖНОЙ неинверсированной HPZ-зоны (FVG/GAP/BPR), сформированной до слома.
+
+    Слом вниз, воткнувшийся в бычий имбаланс-магнит, по паку не торгуется: зона с
+    высокой вероятностью даст реакцию против входа. Инверсия зоны проверяется только
+    барами окна (df и есть окно скана до текущего закрытого бара) — лукахеда нет.
+    """
+    close = float(df["close"].iloc[brk.break_index])
+    want = Bias.BULL if brk.direction == Bias.BEAR else Bias.BEAR
+    fvgs = det.detect_fvg(df) if {"FVG", "BPR"} & set(cfg.hpz_kinds) else []
+    zones: list[det.Zone] = []
+    if "FVG" in cfg.hpz_kinds:
+        zones += fvgs
+    if "GAP" in cfg.hpz_kinds:
+        zones += det.detect_gap(df)
+    if "BPR" in cfg.hpz_kinds:
+        zones += det.detect_bpr(fvgs)
+    for z in zones:
+        if z.bias != want or z.index_end > brk.break_index:
+            continue
+        if z.bottom <= close <= z.top and not det.apply_inversion_rule(df, z).inverted:
+            return True
+    return False
 
 
 def _impulse_clean(df: pd.DataFrame, i0: int, i1: int, max_ratio: float) -> bool:
@@ -593,7 +641,8 @@ class SMCEngine:
                    for e in self.cfg.enabled_setups)
 
     def analyze_single(self, df: pd.DataFrame, symbol: str, timeframe: str,
-                       htf_df: pd.DataFrame | None = None) -> Signal | None:
+                       htf_df: pd.DataFrame | None = None,
+                       partner_df: pd.DataFrame | None = None) -> Signal | None:
         candidates: list[Signal | None] = []
         if self._setup_enabled("6226"):
             candidates.append(build_6226(df, symbol, self.cfg, timeframe, htf_df))
@@ -622,6 +671,13 @@ class SMCEngine:
             if trend is not None:
                 want = {Bias.BULL: Side.LONG, Bias.BEAR: Side.SHORT}[trend]
                 signals = [c for c in signals if c.side == want]
+        # SMT-вето (A/B 11.08.2026): активная дивергенция коррелированного партнёра
+        # даёт подсказку стороны ОТСТАЮЩЕМУ активу (нам) — кандидат против подсказки
+        # отбрасывается; без дивергенции/партнёра фильтр нейтрален (см. SMCConfig.smt_mode)
+        if signals and self.cfg.smt_mode == "veto" and partner_df is not None:
+            smt = det.detect_smt(partner_df, df, "direct", self.cfg.smt_lookback)
+            if smt is not None:
+                signals = [c for c in signals if c.side.value == smt.side]
         if not signals:
             return None
         return max(signals, key=lambda s: s.confidence)

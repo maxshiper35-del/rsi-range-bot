@@ -37,18 +37,28 @@ def parse_htf_map(raw: str) -> dict:
 
 
 def scan_signals(df: pd.DataFrame, symbol: str, tf: str, cfg: SMCConfig,
-                 window: int, htf_tf: str | None, min_bars: int = 20) -> list[dict]:
+                 window: int, htf_tf: str | None, min_bars: int = 20,
+                 partner_df: pd.DataFrame | None = None) -> list[dict]:
     """Пройти историю бар за баром и записать КАЖДЫЙ сигнал движка (без симуляции сделок).
 
     Без лукахеда: движку видно только окно закрытых баров до текущего включительно —
-    ровно как вживую (poller отдаёт последние `window` закрытых баров)."""
+    ровно как вживую (poller отдаёт последние `window` закрытых баров).
+    partner_df (SMT-вето): партнёру нарезается окно ПО ВРЕМЕНИ — только бары с ts не
+    позже текущего бара своего актива, последние `window` штук — синхронно и без
+    лукахеда даже при дырах в данных партнёра."""
     engine = SMCEngine(cfg)
     htf_minutes = SMCEngine.TF_MINUTES.get(htf_tf, 0) if htf_tf else 0
+    p_ts = partner_df["ts"].to_numpy() if partner_df is not None else None
     out: list[dict] = []
     for i in range(min_bars, len(df)):
         win = df.iloc[max(0, i - window + 1):i + 1].reset_index(drop=True)
         htf_win = _resample_htf(win, htf_minutes) if htf_minutes else None
-        sig = engine.analyze_single(win, symbol, tf, htf_df=htf_win)
+        p_win = None
+        if partner_df is not None:
+            j = int(p_ts.searchsorted(df["ts"].iloc[i], side="right"))
+            if j >= min_bars:
+                p_win = partner_df.iloc[max(0, j - window):j].reset_index(drop=True)
+        sig = engine.analyze_single(win, symbol, tf, htf_df=htf_win, partner_df=p_win)
         if sig is None:
             continue
         out.append({
@@ -79,6 +89,14 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="старое поведение: OB/BB = одна свеча-экстремум, а не всё движение")
     p.add_argument("--break-window", default=None,
                    help="окно съёма/слома в NY-минутах, напр. '120,660' (2:00-11:00)")
+    p.add_argument("--enforce-body-close", action="store_true",
+                   help="A/B: слом только закрытием (без закрепа телом) отбрасывается")
+    p.add_argument("--veto-break-hpz", action="store_true",
+                   help="A/B: вето «слом в имбаланс» — закрытие бара слома внутри "
+                        "противоположной неинверсированной FVG/GAP/BPR")
+    p.add_argument("--smt-veto-pair", default=None,
+                   help="A/B: SMT-вето, партнёры CSV 'BTC/USDT:USDT=ETH/USDT:USDT,...' — "
+                        "символ без партнёра сканируется без вето")
     p.add_argument("--cache", default="data/cache")
     p.add_argument("--out", default="data/cache/signals")
     return p.parse_args(argv)
@@ -97,6 +115,7 @@ def main() -> None:
     if args.break_window:
         lo, hi = (int(x) for x in args.break_window.split(","))
         extra["break_window_ny"] = (lo, hi)
+    smt_pairs = parse_htf_map(args.smt_veto_pair or "")   # тот же формат 'A=B,C=D'
     cfg = SMCConfig(
         use_time_filter=args.time_filter,
         htf_block_countertrend=args.htf_block,
@@ -104,6 +123,9 @@ def main() -> None:
         min_impulse_atr=args.min_impulse,
         enabled_setups=tuple(s.strip() for s in args.setups.split(",") if s.strip()),
         ob_full_move=not args.ob_single_candle,
+        enforce_body_close=args.enforce_body_close,
+        veto_break_into_hpz=args.veto_break_hpz,
+        smt_mode="veto" if smt_pairs else "off",
         **extra,
     )
     for symbol in [s.strip() for s in args.symbols.split(",") if s.strip()]:
@@ -113,7 +135,15 @@ def main() -> None:
                 log.warning("нет кэша баров: %s", path)
                 continue
             df = pd.read_csv(path, parse_dates=["dt"])
-            sigs = scan_signals(df, symbol, tf, cfg, args.window, htf_map.get(tf))
+            partner_df = None
+            if smt_pairs.get(symbol):
+                p_path = cache / cache_name(smt_pairs[symbol], tf)
+                if p_path.exists():
+                    partner_df = pd.read_csv(p_path, parse_dates=["dt"])
+                else:
+                    log.warning("SMT: нет кэша партнёра %s — %s без вето", p_path, symbol)
+            sigs = scan_signals(df, symbol, tf, cfg, args.window, htf_map.get(tf),
+                                partner_df=partner_df)
             dest = out / f"{cache_name(symbol, tf)[:-4]}.json"
             dest.write_text(json.dumps(sigs, ensure_ascii=False))
             log.info("%s %s: %d сигналов -> %s", symbol, tf, len(sigs), dest)

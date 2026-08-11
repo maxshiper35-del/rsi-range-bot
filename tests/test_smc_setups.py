@@ -461,3 +461,68 @@ def test_min_stop_pct_cost_gate():
     assert none_cfg.analyze_single(df, "T", "m15") is None
     # 0 = гейт выключен (дефолт), поведение не меняется
     assert SMCConfig().min_stop_pct == 0.0
+
+
+# --- A/B-гейты 11.08.2026 (enforce_body_close / SMT-вето / вето «слом в имбаланс») ---
+def test_smt_veto_drops_side_against_divergence(monkeypatch):
+    """SMT-вето отбрасывает кандидата против подсказки и пропускает по ней.
+
+    Подсказку монкейпатчим — семантика самого detect_smt покрыта своими тестами,
+    здесь проверяется ПРОВОДКА: analyze_single реально читает подсказку и фильтрует.
+    """
+    from app.brain import smc_detectors as det
+    from app.brain.smc_detectors import SMTSignal
+
+    cfg = SMCConfig(use_time_filter=False, min_confidence=0.0, smt_mode="veto")
+    eng = SMCEngine(cfg)
+    df, partner = _df(_BARS_SHORT), _df(_BARS_SHORT)
+
+    monkeypatch.setattr(det, "detect_smt", lambda *a, **k: SMTSignal("LONG", "direct", "t"))
+    assert eng.analyze_single(df, "T", "m15", partner_df=partner) is None  # SHORT против LONG
+
+    monkeypatch.setattr(det, "detect_smt", lambda *a, **k: SMTSignal("SHORT", "direct", "t"))
+    ok = eng.analyze_single(df, "T", "m15", partner_df=partner)
+    assert ok is not None and ok.side == Side.SHORT                       # по подсказке
+
+    monkeypatch.setattr(det, "detect_smt", lambda *a, **k: None)
+    assert eng.analyze_single(df, "T", "m15", partner_df=partner) is not None  # нейтрально
+
+
+def test_smt_veto_neutral_without_partner():
+    # без партнёрского фрейма вето обязано быть нейтральным даже при smt_mode=veto
+    cfg = SMCConfig(use_time_filter=False, min_confidence=0.0, smt_mode="veto")
+    assert SMCEngine(cfg).analyze_single(_df(_BARS_SHORT), "T", "m15") is not None
+
+
+def test_enforce_body_close_gates_close_only_break(monkeypatch):
+    """enforce_body_close: слом без закрепа телом отбрасывается ЦЕЛИКОМ (не скором).
+
+    body_confirmed монкейпатчим через detect_structure_break — синтетика _BARS_SHORT
+    даёт закреп телом, а нужен именно слом «только закрытием»."""
+    from app.brain import smc_detectors as det
+
+    real = det.detect_structure_break
+
+    def close_only(*a, **k):
+        brk = real(*a, **k)
+        if brk is not None:
+            brk.body_confirmed = False
+        return brk
+
+    monkeypatch.setattr(det, "detect_structure_break", close_only)
+    df = _df(_BARS_SHORT)
+    soft = build_6226(df, "T", SMCConfig(use_time_filter=False, min_confidence=0.0))
+    assert soft is not None and soft.indicators_snapshot["scores"]["trigger"] == 0.5
+    assert "только закрытием" in " ".join(soft.reasons)
+    hard = SMCConfig(use_time_filter=False, min_confidence=0.0, enforce_body_close=True)
+    assert build_6226(df, "T", hard) is None
+
+
+def test_veto_break_into_hpz_flag_off_is_noop():
+    # дефолт False — сигнал тот же (паритет пове́дения); True на этой синтетике не
+    # обязан находить зону, но не должен падать
+    df = _df(_BARS_SHORT)
+    base = build_6226(df, "T", SMCConfig(use_time_filter=False, min_confidence=0.0))
+    assert base is not None
+    on = SMCConfig(use_time_filter=False, min_confidence=0.0, veto_break_into_hpz=True)
+    build_6226(df, "T", on)   # не падает; исход зависит от зон в синтетике
