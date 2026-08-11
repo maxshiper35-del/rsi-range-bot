@@ -22,6 +22,12 @@ __pycache__/
 .venv/
 venv/
 
+# macOS
+.DS_Store
+
+# выгрузки анализа (генерируются, 9.6 МБ)
+graphify-out/
+
 # инструменты
 .pytest_cache/
 .mypy_cache/
