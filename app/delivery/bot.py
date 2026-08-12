@@ -971,6 +971,7 @@ ADMIN_COMMANDS = USER_COMMANDS + [
     ("delsymbol", "убрать символ"),
     ("setmode", "auto|semiauto — режим сигналов"),
     ("setups", "включённые сетапы стратегии"),
+    ("executor", "демо-исполнение на BingX (VST): status | on | off"),
     ("bysetup", "статистика по тегу сетапа (6226/1:1/open-SMC/LTF-BB/LTF-OB)"),
     ("growth", "атрибуция: источник -> приглашено -> оплатили -> %"),
     ("minconf", "порог уверенности сетапа (0..1)"),
@@ -2422,6 +2423,37 @@ def main() -> None:
             return
         await _set(m, "min_confidence", v, f"Мин. уверенность: {v}")
 
+    @dp.message(Command("executor"))
+    async def _executor_cmd(m):
+        if m.from_user.id not in cfg.admin_ids:
+            return
+        from app.v2 import bingx_executor
+        arg = ((m.text or "").split(maxsplit=1) + [""])[1].strip().lower()
+        if arg == "on":
+            # since = сейчас: исполняются только сигналы, созданные ПОСЛЕ включения
+            await asyncio.to_thread(runtime.set_executor_since, clock.utcnow_iso())
+            await asyncio.to_thread(runtime.set_value, "executor_enabled", "1")
+            await m.answer("🤖 Executor ВКЛ (демо BingX, VST). Исполняются только новые "
+                           "сигналы. Реальные деньги в v1 невозможны технически.")
+            return
+        if arg == "off":
+            await asyncio.to_thread(runtime.set_value, "executor_enabled", "0")
+            await m.answer("🤖 Executor ВЫКЛ. Открытые демо-позиции журналом донашиваться "
+                           "НЕ будут: закрой их и висящие лимитки руками в BingX (Demo) "
+                           "или включи executor обратно. Аварийные стопы −1R на бирже "
+                           "остаются.")
+            return
+        st = await asyncio.to_thread(bingx_executor.status)
+        orders = ", ".join(f"{k}: {v}" for k, v in st["orders"].items()) or "нет"
+        await m.answer(
+            f"🤖 <b>Executor (демо BingX)</b>\n"
+            f"Состояние: {'ВКЛ' if st['enabled'] else 'выкл'}\n"
+            f"VST-баланс: {st['vst'] if st['vst'] is not None else '—'}\n"
+            f"Риск на сделку: {st['risk_pct']:g}%\n"
+            f"Ордеров в учёте: {orders}\n"
+            f"Включён с: {st['since'] or '—'}\n"
+            "Команды: /executor on | off", parse_mode="HTML")
+
     @dp.message(Command("setups"))
     async def _setups(m):
         if not _is_admin(m):
@@ -3470,10 +3502,30 @@ def main() -> None:
         while True:
             try:
                 await _maintenance()
+                # executor V2 (демо BingX, флаг выкл по умолчанию): сверка журнал->биржа.
+                # Отдельный try: сбой биржи не должен глушить пульс dead-man's switch ниже.
+                executor_report: list = []
+                if runtime.executor_enabled():
+                    try:
+                        from app.v2 import bingx_executor
+                        executor_report = await asyncio.to_thread(bingx_executor.reconcile)
+                        for line in executor_report:
+                            log.info("executor: %s", line)
+                    except Exception:                   # noqa: BLE001 — цикл живёт всегда
+                        log.exception("executor reconcile")
                 # пульс dead-man's switch ПОСЛЕ успешного цикла: упавшее обслуживание
                 # прекращает пульс -> внешний алерт (грейс healthchecks поглощает
                 # разовые сбои). Сеть/URL глотается внутри healthcheck_ping.
                 await asyncio.to_thread(healthcheck_ping, get_settings().healthcheck_url)
+                # алерты executor — ПОСЛЕ пульса и ОДНИМ сообщением на админа: таймауты
+                # Telegram не должны сдвигать пинг за грейс healthchecks (ревью 13.08)
+                if executor_report:
+                    joined = "🤖 Executor:\n" + "\n".join(executor_report)
+                    for admin_id in cfg.admin_ids:
+                        try:
+                            await bot.send_message(admin_id, joined)
+                        except Exception:               # noqa: BLE001
+                            pass
             except Exception:                          # noqa: BLE001 — цикл живёт всегда
                 log.exception("maintenance-цикл")
             await asyncio.sleep(60)

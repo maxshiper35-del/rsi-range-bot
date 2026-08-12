@@ -388,6 +388,31 @@ def trail_distance_r() -> float:
     return _num("trail_distance_r", float, 0.2)
 
 
+def executor_enabled() -> bool:
+    """Executor V2 (демо BingX): авто-исполнение сигналов на VST-счёте. Дефолт ВЫКЛ.
+
+    v1 работает ТОЛЬКО в песочнице (sandbox зашит в app/v2/bingx_executor.py) — режим
+    реальных денег не включается этим флагом в принципе, он потребует отдельного кода
+    после гейта живой статистики (сверка 28.08). Executor — ЗЕРКАЛО журнала: сам он
+    не принимает торговых решений, только исполняет уже записанные."""
+    return (_raw("executor_enabled") or "0").lower() in _TRUE
+
+
+def executor_risk_pct() -> float:
+    """Риск на сделку executor'а в % от баланса VST (демо). Дефолт 1.0."""
+    return _num("executor_risk_pct", float, 1.0)
+
+
+def executor_since() -> str | None:
+    """Момент включения executor: исполняются ТОЛЬКО сигналы, созданные ПОСЛЕ него.
+    Иначе включение флага бросалось бы догонять старые филлы по уехавшим ценам."""
+    return _raw("executor_since")
+
+
+def set_executor_since(iso: str | None) -> None:
+    set_value("executor_since", iso or "")
+
+
 def trail_only_exit() -> bool:
     """Выход ТОЛЬКО по трейлингу: фиксированный тейк не закрывает позицию.
 
