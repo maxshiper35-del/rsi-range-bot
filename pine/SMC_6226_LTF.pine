@@ -1,0 +1,639 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+//  SMC Bot — 6226 + LTF-BB/OB   ·   порт боевой конфигурации Python-движка
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Построчный порт app/brain/smc_setups.py + smc_detectors.py (28.07.2026).
+//  Конфигурация прошла 5-летний портфельный прогон (9 символов, 1h+4h,
+//  2021-07..2026-07): 5045 сделок, exp +0.221R, Σ +1114R, PF 1.37, просадка 26.1R.
+//
+//  ПЕРЕНЕСЕНО ТОЧНО:
+//    свинги 2/2 с тай-брейком «строго > слева, >= справа», market_structure,
+//    BOS/CHOCH с флагом закрепа телом, импульс с якорем на БЛИЖАЙШЕМ свинге,
+//    направленный свип, чистота импульса, FVG + правило инверсии, EQH/EQL,
+//    ордер/брейкер-блок, confidence с весами 0.30/0.30/0.20/0.20,
+//    костовый гейт min_stop_pct, окно NY 07:00-14:00, блок контртренда по HTF,
+//    лимитный вход с окном 50ч, выход ТОЛЬКО по трейлингу 1.5R→0.2R, потолок 168ч.
+//
+//  ПЕРЕНЕСТИ НЕЛЬЗЯ (Pine видит один символ):
+//    портфельный лимит 6 позиций на сторону, анти-кластерный тормоз по всем
+//    монетам, параллельные позиции по разным сетапам. Здесь одна позиция за раз.
+//    Поэтому итог НЕ обязан совпадать с портфельным бэктестом.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+strategy("SMC 6226 + LTF POI", overlay = true, initial_capital = 1000,
+     pyramiding = 0, calc_on_every_tick = false, process_orders_on_close = true,
+     commission_type = strategy.commission.percent, commission_value = 0.055,
+     slippage = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 100,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ПАРАМЕТРЫ
+// ─────────────────────────────────────────────────────────────────────────────
+gS = "① Стратегия"
+useSetup6226 = input.bool(true, "Сетап 6226 (флагман)",   group = gS)
+useSetupLTF  = input.bool(true, "Сетап LTF-BB / LTF-OB",  group = gS)
+winBars      = input.int(200,   "Окно анализа, баров",    minval = 60, maxval = 500, group = gS,
+     tooltip = "Столько закрытых баров видит движок — как в живом боте (window=200)")
+swLeft       = input.int(2,     "Свинг: баров слева",     minval = 1, maxval = 5, group = gS)
+swRight      = input.int(2,     "Свинг: баров справа",    minval = 1, maxval = 5, group = gS)
+minImpATR    = input.float(1.0, "Мин. импульс, ATR",      minval = 0.0, step = 0.1, group = gS,
+     tooltip = "Меньше — мелкая структура: стоп получается скальп-тесным")
+minConf      = input.float(0.5, "Мин. confidence",        minval = 0.0, maxval = 1.0, step = 0.05, group = gS)
+
+gE = "② Выход"
+trailActR    = input.float(1.5, "Трейлинг включается после, R",   minval = 0.1, step = 0.1, group = gE)
+trailDistR   = input.float(0.2, "Дистанция трейлинга от пика, R", minval = 0.05, step = 0.05, group = gE,
+     tooltip = "0.2 — монотонно лучше 0.3 и 0.5 на обеих независимых выборках")
+maxHoldHours = input.float(168, "Потолок удержания, часов",       minval = 0, group = gE,
+     tooltip = "0 = без потолка. Без фикс. тейка позиция иначе висит неделями")
+showTP       = input.bool(true, "Рисовать цель (по ней НЕ выходим)", group = gE)
+
+gF = "③ Фильтры"
+minStopPct  = input.float(1.3, "Костовый гейт: мин. стоп, % от входа", minval = 0.0, step = 0.1, group = gF,
+     tooltip = "Тесный стоп = комиссия съедает долю R и раздувает плечо")
+useTimeFilt = input.bool(true, "Окно входа NY 07:00-14:00 (только 6226)", group = gF)
+htfBlock    = input.bool(true, "Блок контртренда по HTF", group = gF)
+htfTF       = input.timeframe("240", "Старший таймфрейм (HTF)", group = gF,
+     tooltip = "Живой бот: для 1h контекст 4h, для 4h — 1d")
+waitHours   = input.float(50,  "Окно жизни лимитки, часов", minval = 1, group = gF)
+
+gR = "④ Риск"
+riskPct = input.float(0.5, "Риск на сделку, % депозита", minval = 0.05, maxval = 5.0, step = 0.05, group = gR,
+     tooltip = "0.5% — рабочая точка. Выше 1% просадка растёт быстрее прибыли")
+
+gV = "⑤ Оформление"
+showZones  = input.bool(true,  "Зоны ордер-блоков",  group = gV)
+showLevels = input.bool(true,  "Уровни вход/стоп/цель", group = gV)
+showLabels = input.bool(true,  "Метки сигналов",     group = gV)
+showSwings = input.bool(false, "Точки свингов",      group = gV)
+showPanel  = input.bool(true,  "Панель статистики",  group = gV)
+panelPos   = input.string("Справа сверху", "Положение панели",
+     options = ["Справа сверху", "Справа снизу", "Слева сверху", "Слева снизу"], group = gV)
+
+// ── палитра ──
+cLong    = #26a69a
+cShort   = #ef5350
+cLongBg  = color.new(#26a69a, 88)
+cShortBg = color.new(#ef5350, 88)
+cEntry   = #ffb74d
+cStop    = #ef5350
+cTake    = #26c6da
+cTrail   = #ab47bc
+cInk     = #d1d4dc
+cMuted   = #787b86
+cPanelBg = color.new(#131722, 12)
+cPanelHd = color.new(#2a2e39, 0)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  БАЗОВОЕ
+// ─────────────────────────────────────────────────────────────────────────────
+// ATR-скаляр = МЕДИАНА True Range за 14 баров (не RMA) — как atr_scalar() в Python
+atrS = ta.median(ta.tr(true), 14)
+
+tfMin      = timeframe.in_seconds(timeframe.period) / 60
+maxWaitBar = math.max(1, int(waitHours * 60 / tfMin))
+maxHoldBar = maxHoldHours <= 0 ? 1000000 : math.max(1, int(maxHoldHours * 60 / tfMin))
+eps        = 1e-9
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  СВИНГИ  (строго > слева, >= справа — иначе EQH/EQL невидимы)
+// ─────────────────────────────────────────────────────────────────────────────
+var array<float> shP = array.new<float>()
+var array<int>   shI = array.new<int>()
+var array<float> slP = array.new<float>()
+var array<int>   slI = array.new<int>()
+
+f_isSwingHigh() =>
+    bool ok = bar_index >= swLeft + swRight
+    if ok
+        float c = high[swRight]
+        for k = 1 to swLeft
+            if not (c > high[swRight + k])
+                ok := false
+        for k = 1 to swRight
+            if not (c >= high[swRight - k])
+                ok := false
+    ok
+
+f_isSwingLow() =>
+    bool ok = bar_index >= swLeft + swRight
+    if ok
+        float c = low[swRight]
+        for k = 1 to swLeft
+            if not (c < low[swRight + k])
+                ok := false
+        for k = 1 to swRight
+            if not (c <= low[swRight - k])
+                ok := false
+    ok
+
+isSH = f_isSwingHigh()
+isSL = f_isSwingLow()
+
+if isSH
+    array.push(shP, high[swRight])
+    array.push(shI, bar_index - swRight)
+if isSL
+    array.push(slP, low[swRight])
+    array.push(slI, bar_index - swRight)
+
+// окно анализа: движок видит только последние winBars баров
+lim = bar_index - winBars + 1
+while array.size(shI) > 0 and array.get(shI, 0) < lim
+    array.shift(shI)
+    array.shift(shP)
+while array.size(slI) > 0 and array.get(slI, 0) < lim
+    array.shift(slI)
+    array.shift(slP)
+
+nSH = array.size(shP)
+nSL = array.size(slP)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  СТРУКТУРА
+// ─────────────────────────────────────────────────────────────────────────────
+int trend = 0
+if nSH >= 2 and nSL >= 2
+    bool hh = array.get(shP, nSH - 1) > array.get(shP, nSH - 2)
+    bool hl = array.get(slP, nSL - 1) > array.get(slP, nSL - 2)
+    trend := hh and hl ? 1 : (not hh and not hl ? -1 : 0)
+if trend == 0
+    trend := close >= close[math.min(bar_index, winBars - 1)] ? 1 : -1
+
+// слом структуры
+bool  brkOk   = false
+int   brkKind = 0          // 1 = BOS, 2 = CHOCH
+int   brkDir  = 0          // 1 = BULL, -1 = BEAR
+bool  brkBody = false
+float bodyLo  = math.min(open, close)
+float bodyHi  = math.max(open, close)
+
+if nSH > 0 and nSL > 0
+    if trend == 1
+        float hhP  = array.get(shP, 0)
+        int   hhIx = array.get(shI, 0)
+        for k = 0 to nSH - 1
+            if array.get(shP, k) > hhP
+                hhP  := array.get(shP, k)
+                hhIx := array.get(shI, k)
+        float keyP = na
+        for k = 0 to nSL - 1
+            if array.get(slI, k) < hhIx
+                keyP := array.get(slP, k)
+        if na(keyP)
+            keyP := array.get(slP, 0)
+            for k = 0 to nSL - 1
+                if array.get(slP, k) < keyP
+                    keyP := array.get(slP, k)
+        if close > hhP + eps
+            brkOk   := true
+            brkKind := 1
+            brkDir  := 1
+            brkBody := bodyLo > hhP + eps
+        else if close < keyP - eps
+            brkOk   := true
+            brkKind := 2
+            brkDir  := -1
+            brkBody := bodyHi < keyP - eps
+    else
+        float llP  = array.get(slP, 0)
+        int   llIx = array.get(slI, 0)
+        for k = 0 to nSL - 1
+            if array.get(slP, k) < llP
+                llP  := array.get(slP, k)
+                llIx := array.get(slI, k)
+        float keyP = na
+        for k = 0 to nSH - 1
+            if array.get(shI, k) < llIx
+                keyP := array.get(shP, k)
+        if na(keyP)
+            keyP := array.get(shP, 0)
+            for k = 0 to nSH - 1
+                if array.get(shP, k) > keyP
+                    keyP := array.get(shP, k)
+        if close < llP - eps
+            brkOk   := true
+            brkKind := 1
+            brkDir  := -1
+            brkBody := bodyHi < llP - eps
+        else if close > keyP + eps
+            brkOk   := true
+            brkKind := 2
+            brkDir  := 1
+            brkBody := bodyLo > keyP + eps
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ИМПУЛЬС
+// ─────────────────────────────────────────────────────────────────────────────
+bool  impOk    = false
+int   impSide  = 0
+float impS     = na
+float impE     = na
+bool  impSwept = false
+bool  impClean = false
+
+if brkOk
+    impSide := brkDir == -1 ? -1 : 1
+    float sPrice = na
+    int   sIx    = na
+    // ближайший к слому свинг нужной стороны (а не экстремум за всё окно)
+    if impSide == -1
+        for k = 0 to nSH - 1
+            if array.get(shI, k) < bar_index
+                sPrice := array.get(shP, k)
+                sIx    := array.get(shI, k)
+    else
+        for k = 0 to nSL - 1
+            if array.get(slI, k) < bar_index
+                sPrice := array.get(slP, k)
+                sIx    := array.get(slI, k)
+
+    if not na(sIx)
+        int   back = bar_index - sIx
+        float ext  = impSide == -1 ? low : high
+        for k = 0 to back
+            ext := impSide == -1 ? math.min(ext, low[k]) : math.max(ext, high[k])
+        bool bigEnough = minImpATR <= 0 or atrS <= 0 or math.abs(sPrice - ext) >= minImpATR * atrS
+        if math.abs(sPrice - ext) > eps and bigEnough
+            impOk := true
+            impS  := sPrice
+            impE  := ext
+
+            // направленный свип: SHORT — только съём ХАЯ, LONG — только ЛОЯ
+            bool sw = false
+            for k = 0 to math.min(19, bar_index)
+                if impSide == -1
+                    if high[k] > sPrice and close[k] <= sPrice
+                        sw := true
+                else
+                    if low[k] < sPrice and close[k] >= sPrice
+                        sw := true
+            impSwept := sw
+
+            // чистота импульса: средняя доля тени <= 0.33
+            float acc = 0.0
+            int   cnt = 0
+            for k = 0 to back
+                float rng = high[k] - low[k]
+                if rng > 0
+                    acc += 1.0 - math.abs(close[k] - open[k]) / rng
+                    cnt += 1
+            impClean := cnt > 0 and acc / cnt <= 0.33
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  КОНФЛЮЭНС
+// ─────────────────────────────────────────────────────────────────────────────
+// FVG у входа: бонус даётся, если есть хоть одна НЕинвертированная зона рядом
+f_fvgValid(float entryPx) =>
+    bool valid = false
+    if not na(entryPx) and bar_index > 4
+        float band = 0.5 * atrS
+        int   lb   = math.min(100, bar_index - 2)
+        for i = 2 to lb
+            if not valid
+                float t = na
+                float b = na
+                if low[i] > high[i + 2]
+                    t := low[i]
+                    b := high[i + 2]
+                else if high[i] < low[i + 2]
+                    t := low[i + 2]
+                    b := high[i]
+                if not na(t) and b - band <= entryPx and entryPx <= t + band
+                    bool inv = false
+                    for j = 0 to i - 1
+                        if math.min(open[j], close[j]) <= b and math.max(open[j], close[j]) >= t
+                            inv := true
+                    if not inv
+                        valid := true
+    valid
+
+// EQH/EQL: два СОСЕДНИХ однотипных свинга в пределах 0.1*ATR
+bool hasEq = false
+if nSH >= 2
+    for k = 1 to nSH - 1
+        if math.abs(array.get(shP, k) - array.get(shP, k - 1)) <= 0.1 * atrS
+            hasEq := true
+if nSL >= 2 and not hasEq
+    for k = 1 to nSL - 1
+        if math.abs(array.get(slP, k) - array.get(slP, k - 1)) <= 0.1 * atrS
+            hasEq := true
+
+// окно NY на ЗАКРЫТИИ бара (zoneinfo/DST учитывается самой биржевой зоной)
+nyMin      = hour(time_close, "America/New_York") * 60 + minute(time_close, "America/New_York")
+inNyWindow = nyMin >= 420 and nyMin < 840
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  HTF-КОНТЕКСТ
+// ─────────────────────────────────────────────────────────────────────────────
+f_htfPack() =>
+    bool okH = bar_index >= swLeft + swRight
+    bool okL = okH
+    if okH
+        float ch = high[swRight]
+        for k = 1 to swLeft
+            if not (ch > high[swRight + k])
+                okH := false
+        for k = 1 to swRight
+            if not (ch >= high[swRight - k])
+                okH := false
+        float cl = low[swRight]
+        for k = 1 to swLeft
+            if not (cl < low[swRight + k])
+                okL := false
+        for k = 1 to swRight
+            if not (cl <= low[swRight - k])
+                okL := false
+    float h1 = ta.valuewhen(okH, high[swRight], 0)
+    float h2 = ta.valuewhen(okH, high[swRight], 1)
+    float l1 = ta.valuewhen(okL, low[swRight],  0)
+    float l2 = ta.valuewhen(okL, low[swRight],  1)
+    int confirmed = 0
+    if not na(h1) and not na(h2) and not na(l1) and not na(l2)
+        bool hh = h1 > h2
+        bool hl = l1 > l2
+        confirmed := hh and hl ? 1 : (not hh and not hl ? -1 : 0)
+    int ms = confirmed != 0 ? confirmed : (close >= close[math.min(bar_index, 199)] ? 1 : -1)
+    [confirmed, ms]
+
+[htfConfirmed, htfMS] = request.security(syminfo.tickerid, htfTF, f_htfPack(), lookahead = barmerge.lookahead_off)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  BIAS / CONFIDENCE
+// ─────────────────────────────────────────────────────────────────────────────
+float drLo = na
+float drHi = na
+if nSL > 0
+    drLo := array.get(slP, 0)
+    for k = 0 to nSL - 1
+        drLo := math.min(drLo, array.get(slP, k))
+if nSH > 0
+    drHi := array.get(shP, 0)
+    for k = 0 to nSH - 1
+        drHi := math.max(drHi, array.get(shP, k))
+
+f_biasScore(int side, float entryPx) =>
+    float sc = 0.5
+    sc += htfMS == side ? 0.25 : -0.25
+    if not na(drLo) and not na(drHi)
+        float mid       = (drLo + drHi) / 2.0
+        bool  inPremium = entryPx > mid
+        bool  rightZone = (side == -1 and inPremium) or (side == 1 and not inPremium)
+        sc += rightZone ? 0.25 : -0.25
+    math.max(0.0, math.min(sc, 1.0))
+
+f_confluence(float entryPx, bool inWindow) =>
+    float sc = 0.0
+    if f_fvgValid(entryPx)
+        sc += 0.4
+    if hasEq
+        sc += 0.3
+    if inWindow
+        sc += 0.2
+    if impClean
+        sc += 0.1
+    math.min(sc, 1.0)
+
+trigScore  = impOk and brkBody  ? 1.0 : 0.5
+sweepScore = impOk and impSwept ? 1.0 : 0.0
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  СЕТАП 6226 — свип → слом → фибо 1 / 0.62 / 0 / -0.26
+// ─────────────────────────────────────────────────────────────────────────────
+bool  s6Ok    = false
+float s6Entry = na
+float s6Stop  = na
+float s6Take  = na
+float s6Conf  = na
+
+if useSetup6226 and impOk and (not useTimeFilt or inNyWindow)
+    float span = impS - impE
+    float e    = impE + 0.62 * span
+    float bias = f_biasScore(impSide, e)
+    float cfl  = f_confluence(e, useTimeFilt and inNyWindow)
+    float conf = 0.30 * bias + 0.30 * trigScore + 0.20 * sweepScore + 0.20 * cfl
+    if conf >= minConf
+        s6Ok    := true
+        s6Entry := e
+        s6Stop  := impS
+        s6Take  := impE - 0.26 * span
+        s6Conf  := conf
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  СЕТАП LTF-BB / LTF-OB — слом → откат в блок → вход от MT 50%
+// ─────────────────────────────────────────────────────────────────────────────
+bool   sLOk    = false
+float  sLEntry = na
+float  sLStop  = na
+float  sLTake  = na
+float  sLConf  = na
+float  sLzTop  = na
+float  sLzBot  = na
+string sLKind  = ""
+
+if useSetupLTF and impOk
+    // origin рывка в окне 10 баров перед сломом; при равенстве берём САМЫЙ РАННИЙ (argmax)
+    int   w    = math.min(10, bar_index)
+    int   org  = w
+    float best = impSide == -1 ? high[w] : low[w]
+    for k = w to 0
+        bool better = impSide == -1 ? high[k] > best : low[k] < best
+        if better
+            best := impSide == -1 ? high[k] : low[k]
+            org  := k
+    float zT   = high[org]
+    float zB   = low[org]
+    float e    = zB + 0.5 * (zT - zB)
+    float st   = impSide == -1 ? zT : zB
+    float risk = impSide == -1 ? st - e : e - st
+    if risk > 0
+        float bias = htfMS == impSide ? 0.75 : 0.5
+        float cfl  = f_confluence(e, false)
+        float conf = 0.30 * bias + 0.30 * trigScore + 0.20 * sweepScore + 0.20 * cfl
+        if conf >= minConf
+            sLOk    := true
+            sLEntry := e
+            sLStop  := st
+            sLTake  := impSide == -1 ? e - 3.0 * risk : e + 3.0 * risk
+            sLConf  := conf
+            sLzTop  := zT
+            sLzBot  := zB
+            sLKind  := brkKind == 2 ? "LTF-BB" : "LTF-OB"
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ЛУЧШИЙ КАНДИДАТ + ГЕЙТЫ
+// ─────────────────────────────────────────────────────────────────────────────
+bool   sigOk    = false
+float  sigEntry = na
+float  sigStop  = na
+float  sigTake  = na
+float  sigConf  = na
+string sigName  = ""
+int    sigSide  = 0
+
+if s6Ok and (not sLOk or s6Conf >= sLConf)
+    sigOk    := true
+    sigEntry := s6Entry
+    sigStop  := s6Stop
+    sigTake  := s6Take
+    sigConf  := s6Conf
+    sigName  := "6226"
+    sigSide  := impSide
+else if sLOk
+    sigOk    := true
+    sigEntry := sLEntry
+    sigStop  := sLStop
+    sigTake  := sLTake
+    sigConf  := sLConf
+    sigName  := sLKind
+    sigSide  := impSide
+
+float stopPct = sigOk and sigEntry > 0 ? math.abs(sigEntry - sigStop) / sigEntry * 100.0 : na
+
+// костовый гейт
+if sigOk and minStopPct > 0 and (na(stopPct) or stopPct < minStopPct)
+    sigOk := false
+// блок контртренда от ПОДТВЕРЖДЁННОЙ структуры HTF
+if sigOk and htfBlock and htfConfirmed != 0 and htfConfirmed != sigSide
+    sigOk := false
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ИСПОЛНЕНИЕ: лимитный вход, выход ТОЛЬКО по трейлингу
+// ─────────────────────────────────────────────────────────────────────────────
+var float pStop     = na
+var float pRisk     = na
+var float pCurStop  = na
+var float pPeak     = na
+var int   pOrderBar = na
+var int   pFillBar  = na
+var string pName    = ""
+var bool  pending   = false
+
+inPos = strategy.position_size != 0
+
+// заявка: только когда нет позиции и нет живой лимитки
+if sigOk and not inPos and not pending and barstate.isconfirmed
+    float risk = math.abs(sigEntry - sigStop)
+    if risk > 0
+        float qty = (strategy.equity * riskPct / 100.0) / risk
+        if sigSide == 1
+            strategy.entry("L", strategy.long, qty = qty, limit = sigEntry, comment = sigName)
+        else
+            strategy.entry("S", strategy.short, qty = qty, limit = sigEntry, comment = sigName)
+        pending   := true
+        pOrderBar := bar_index
+        pStop     := sigStop
+        pRisk     := risk
+        pCurStop  := sigStop            // стоп известен сразу — позиция не остаётся голой
+        pPeak     := na
+        pName     := sigName
+
+// лимитка не исполнилась за окно — снимаем (аналог статуса «expired»)
+if pending and not inPos and not na(pOrderBar) and bar_index - pOrderBar >= maxWaitBar
+    strategy.cancel("L")
+    strategy.cancel("S")
+    pending := false
+
+// зафиксировать бар исполнения
+if pending and inPos
+    pending  := false
+    pFillBar := bar_index
+
+// сопровождение
+if inPos and not na(pRisk) and pRisk > 0
+    float entryPx = strategy.position_avg_price
+    bool  isLong  = strategy.position_size > 0
+    float mfe     = isLong ? (high - entryPx) / pRisk : (entryPx - low) / pRisk
+    if mfe >= trailActR
+        pPeak    := isLong ? math.max(nz(pPeak, high), high) : math.min(nz(pPeak, low), low)
+        float tr = isLong ? pPeak - trailDistR * pRisk : pPeak + trailDistR * pRisk
+        pCurStop := isLong ? math.max(nz(pCurStop, pStop), tr) : math.min(nz(pCurStop, pStop), tr)
+    // трейлинг вступает в силу со СЛЕДУЮЩЕГО бара — как в Python (стоп проверяется первым)
+    strategy.exit(isLong ? "X-L" : "X-S", from_entry = isLong ? "L" : "S", stop = pCurStop)
+    if not na(pFillBar) and bar_index - pFillBar >= maxHoldBar
+        strategy.close_all(comment = "timeout")
+
+if not inPos and not pending
+    pCurStop := na
+    pPeak    := na
+    pFillBar := na
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ОФОРМЛЕНИЕ
+// ─────────────────────────────────────────────────────────────────────────────
+plotshape(showSwings and isSH ? high[swRight] : na, title = "Свинг-хай",
+     location = location.absolute, style = shape.circle, size = size.tiny,
+     color = color.new(cMuted, 30), offset = -swRight)
+plotshape(showSwings and isSL ? low[swRight] : na, title = "Свинг-лой",
+     location = location.absolute, style = shape.circle, size = size.tiny,
+     color = color.new(cMuted, 30), offset = -swRight)
+
+if showZones and sigOk and sigName != "6226" and not na(sLzTop)
+    box.new(bar_index - 10, sLzTop, bar_index + maxWaitBar, sLzBot,
+         border_color = color.new(sigSide == 1 ? cLong : cShort, 40), border_width = 1,
+         bgcolor = sigSide == 1 ? cLongBg : cShortBg)
+
+if showLevels and sigOk
+    line.new(bar_index, sigEntry, bar_index + maxWaitBar, sigEntry, color = cEntry, width = 2)
+    line.new(bar_index, sigStop,  bar_index + maxWaitBar, sigStop,  color = cStop, width = 1, style = line.style_dashed)
+    if showTP
+        line.new(bar_index, sigTake, bar_index + maxWaitBar, sigTake, color = color.new(cTake, 35), width = 1, style = line.style_dotted)
+
+if showLabels and sigOk
+    string txt = (sigSide == 1 ? "▲  " : "▼  ") + sigName +
+         "\nconf " + str.tostring(sigConf, "#.00") + "   стоп " + str.tostring(stopPct, "#.00") + "%" +
+         "\nвход " + str.tostring(sigEntry, format.mintick)
+    label.new(bar_index, sigSide == 1 ? low - atrS * 0.6 : high + atrS * 0.6, txt,
+         style = sigSide == 1 ? label.style_label_up : label.style_label_down,
+         color = color.new(sigSide == 1 ? cLong : cShort, 12), textcolor = color.white,
+         size = size.small, textalign = text.align_left)
+
+plot(inPos and not na(pCurStop) ? pCurStop : na, title = "Трейлинг-стоп",
+     color = cTrail, style = plot.style_linebr, linewidth = 2)
+
+bgcolor(useTimeFilt and inNyWindow ? color.new(cEntry, 96) : na, title = "Окно NY 07:00-14:00")
+
+// ── панель ──
+tblPos = panelPos == "Справа сверху" ? position.top_right : panelPos == "Справа снизу" ? position.bottom_right : panelPos == "Слева сверху" ? position.top_left : position.bottom_left
+var table pnl = table.new(tblPos, 2, 12, border_width = 1, border_color = color.new(cMuted, 70))
+
+f_row(int r, string k, string v, color vc) =>
+    table.cell(pnl, 0, r, k, text_color = cMuted, text_size = size.small, text_halign = text.align_left,  bgcolor = cPanelBg)
+    table.cell(pnl, 1, r, v, text_color = vc,     text_size = size.small, text_halign = text.align_right, bgcolor = cPanelBg)
+
+if showPanel and barstate.islast
+    float pf   = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
+    int   tot  = strategy.closedtrades
+    float wr   = tot > 0 ? strategy.wintrades / tot * 100 : na
+    float net  = strategy.netprofit
+    float netP = strategy.initial_capital > 0 ? net / strategy.initial_capital * 100 : na
+
+    table.cell(pnl, 0, 0, "SMC 6226 + LTF", text_color = cInk, text_size = size.normal, bgcolor = cPanelHd)
+    table.cell(pnl, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = cInk, text_size = size.normal, bgcolor = cPanelHd)
+
+    f_row(1, "Тренд HTF (" + htfTF + ")",
+         htfConfirmed == 1 ? "BULL ▲" : htfConfirmed == -1 ? "BEAR ▼" : "не подтверждён",
+         htfConfirmed == 1 ? cLong : htfConfirmed == -1 ? cShort : cMuted)
+    f_row(2, "Структура фрейма", trend == 1 ? "BULL" : "BEAR", trend == 1 ? cLong : cShort)
+    f_row(3, "Слом", brkOk ? (brkKind == 1 ? "BOS" : "CHOCH") + (brkBody ? " · тело" : " · закрытие") : "—", brkOk ? cInk : cMuted)
+    f_row(4, "Окно NY 07:00-14:00", inNyWindow ? "открыто" : "закрыто", inNyWindow ? cLong : cMuted)
+    f_row(5, "Позиция", inPos ? (strategy.position_size > 0 ? "LONG " : "SHORT ") + pName : pending ? "лимитка ждёт" : "вне рынка", inPos ? cEntry : cMuted)
+    f_row(6, "Трейлинг-стоп", inPos and not na(pCurStop) ? str.tostring(pCurStop, format.mintick) : "—", inPos ? cTrail : cMuted)
+    f_row(7, "Сделок", str.tostring(tot), cInk)
+    f_row(8, "Winrate", na(wr) ? "—" : str.tostring(wr, "#.0") + "%", na(wr) ? cMuted : wr >= 40 ? cLong : cShort)
+    f_row(9, "Profit factor", na(pf) ? "—" : str.tostring(pf, "#.00"), na(pf) ? cMuted : pf >= 1.2 ? cLong : pf >= 1.0 ? cEntry : cShort)
+    f_row(10, "Прибыль", str.tostring(net, "#.##") + (na(netP) ? "" : "  (" + str.tostring(netP, "#.#") + "%)"), net >= 0 ? cLong : cShort)
+    f_row(11, "Макс. просадка", str.tostring(strategy.max_drawdown_percent, "#.#") + "%", strategy.max_drawdown_percent > 25 ? cShort : cInk)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  АЛЕРТ
+// ─────────────────────────────────────────────────────────────────────────────
+if sigOk and barstate.isconfirmed
+    alert(syminfo.ticker + " " + timeframe.period + " · " + (sigSide == 1 ? "LONG " : "SHORT ") + sigName +
+         " · conf " + str.tostring(sigConf, "#.00") +
+         "\nвход " + str.tostring(sigEntry, format.mintick) +
+         " · стоп " + str.tostring(sigStop, format.mintick) +
+         " (" + str.tostring(stopPct, "#.00") + "%)" +
+         "\nцель " + str.tostring(sigTake, format.mintick) + " — ОРИЕНТИР, по ней не закрываем" +
+         "\nвыход по трейлингу: старт " + str.tostring(trailActR, "#.0") + "R, дистанция " + str.tostring(trailDistR, "#.0") + "R",
+         alert.freq_once_per_bar_close)

@@ -30,7 +30,9 @@ select = ["E", "F", "I", "UP", "B"]
 "app/delivery/graphics.py" = ["E501"]
 
 [tool.mypy]
-python_version = "3.9"
+# 3.11 = прод (Hetzner /opt/cpython-3.11.15 и маковский .venv); 3.9 был локальным
+# системным питоном до венв-эпохи и давно не поддерживается mypy
+python_version = "3.11"
 ignore_missing_imports = true
 warn_unused_ignores = true
 
