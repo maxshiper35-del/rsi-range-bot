@@ -15,8 +15,11 @@ ssh root@135.181.32.158 systemctl restart rsirange-bot
 ## Деплой правок кода
 
 ```bash
-make deploy        # git archive HEAD -> сервер -> pytest ТАМ -> рестарт только при зелёных
+zsh scripts/deploy.sh   # git archive HEAD -> сервер -> pytest ТАМ -> рестарт при зелёных
 ```
+
+(`make deploy` — то же самое, но на этом маке `/usr/bin/make` — шим Xcode и падает
+из-за непринятой лицензии; прямой вызов zsh работает всегда.)
 
 Красные тесты на сервере = рестарта не было, прод крутит прежний код. `.env` и `data/`
 деплой не трогает. Удалённые из репо файлы на сервере не удаляются (tar поверх).
@@ -54,6 +57,7 @@ ssh root@135.181.32.158 systemctl show rsirange-bot -p NRestarts
 
 - Маковский `rsync` — это openrsync: GNU-флаги молча ломаются. Для передач — tar по ssh
   (так и работает `deploy.sh` через `git archive`).
-- `/usr/bin/python3` на маке ломается лицензией Xcode — всё через `.venv`/`make`.
+- `/usr/bin/python3` И `/usr/bin/make` на маке — шимы Xcode, ломаются непринятой
+  лицензией. Питон — только `.venv/bin/python`, деплой — `zsh scripts/deploy.sh`.
 - Первый `launchctl bootstrap` сразу после `bootout` может упасть с
   «Input/output error» — подождать ~3с и повторить.
