@@ -1,0 +1,24 @@
+# systemd-юнит RSI Range бота — замена launchd com.rsirange.bot (переезд с мака 11.08.2026).
+# Управление:  systemctl status|restart|stop rsirange-bot
+# Логи:        сам процесс пишет ротируемый logs/bot.log (LOG_FILE, 10МБ×5);
+#              stdout/stderr (некаугнутые краши до инициализации логгера) — в journald:
+#              journalctl -u rsirange-bot -n 50
+[Unit]
+Description=RSI Range signal bot (@rsirange_bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/home/bot/rsirange
+Environment=PYTHONUNBUFFERED=1
+Environment=LOG_FILE=/home/bot/rsirange/logs/bot.log
+ExecStart=/home/bot/rsirange/.venv/bin/python -m app.delivery.bot
+Restart=always
+RestartSec=10
+# при жёстком зависании даём 30с на graceful, потом SIGKILL
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

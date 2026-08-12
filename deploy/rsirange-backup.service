@@ -1,0 +1,9 @@
+# Ночной бэкап БД журнала — замена launchd com.rsirange.backup (04:00 UTC, ротация 14).
+[Unit]
+Description=RSI Range DB backup
+
+[Service]
+Type=oneshot
+User=bot
+WorkingDirectory=/home/bot/rsirange
+ExecStart=/home/bot/rsirange/.venv/bin/python -m scripts.backup_db
