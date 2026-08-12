@@ -3,79 +3,130 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>RSI Range — живой дашборд</title>
+<title>RSI Range — живой терминал</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-/* Палитра — валидированный референс dataviz-скилла (обе темы прошли валидатор):
-   одиночная серия/позитив = синий, негатив = красный (дивергентная пара), поверхности
-   карточек фиксированы, фон страницы — из темы Telegram. Числа — tabular-nums,
-   текст только в текстовых токенах, цвет несут метки рядом. */
+/* Направление: терминальный финтех, dark-first. Данные — валидированная пара
+   blue↔red на прежних чартовых поверхностях (валидатор пройден ранее, поверхности
+   не менялись). Один акцент. Числа — IBM Plex Mono, tabular. Никаких карточек-
+   коробочек: hairline-сетка, зерно на фоне, асимметрия в хиро. */
 :root{
   color-scheme:light;
-  --surface:#fcfcfb; --text-1:#0b0b0b; --text-2:#52514e; --text-3:#8a897f;
-  --grid:#e7e6e2; --pos:#2a78d6; --neg:#e34948; --zero:#b9b8b3;
-  --card-line:#eceae6;
+  --bg:#f1f0ec; --surface:#fcfcfb; --ink:#111110; --ink-2:#5b5a55; --ink-3:#96948c;
+  --line:#dddbd4; --grid:#e7e6e2; --pos:#2a78d6; --neg:#e34948; --zero:#b9b8b3;
 }
 :root[data-theme="dark"]{
   color-scheme:dark;
-  --surface:#1a1a19; --text-1:#ffffff; --text-2:#c3c2b7; --text-3:#84837a;
-  --grid:#33322f; --pos:#3987e5; --neg:#e66767; --zero:#5a5955;
-  --card-line:#262624;
+  --bg:#121211; --surface:#1a1a19; --ink:#f4f3ef; --ink-2:#b9b8ae; --ink-3:#75746b;
+  --line:#2b2b28; --grid:#33322f; --pos:#3987e5; --neg:#e66767; --zero:#5a5955;
 }
 *{margin:0;box-sizing:border-box}
-body{font:15px/1.45 -apple-system,system-ui,Roboto,sans-serif;
-     background:var(--tg-theme-bg-color,var(--surface));color:var(--text-1);
-     padding:12px 12px 30px;font-variant-numeric:tabular-nums}
-.hdr{display:flex;align-items:baseline;justify-content:space-between;margin:2px 2px 12px}
-h1{font-size:18px;letter-spacing:-.2px}
-.upd{font-size:11px;color:var(--text-3)}
-.card{background:var(--surface);border:1px solid var(--card-line);border-radius:16px;
-      padding:14px 14px 12px;margin-bottom:10px;box-shadow:0 1px 2px rgba(0,0,0,.07)}
-.row{display:flex;gap:8px;margin-bottom:10px}
-.seg{flex:1;text-align:center;padding:9px 4px;border-radius:12px;font-size:14px;
-     background:var(--surface);color:var(--text-2);border:1px solid var(--card-line);cursor:pointer}
-.seg.on{color:var(--text-1);border-color:var(--pos);font-weight:600;
-        box-shadow:inset 0 0 0 1px var(--pos)}
-.tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
-.tile{background:var(--surface);border:1px solid var(--card-line);border-radius:16px;
-      padding:12px 14px;box-shadow:0 1px 2px rgba(0,0,0,.07)}
-.tile .v{font-size:22px;font-weight:700;letter-spacing:-.4px;display:flex;
-         align-items:center;gap:7px}
-.tile.hero .v{font-size:31px}
-.tile .k{font-size:11px;color:var(--text-2);margin-top:3px;text-transform:uppercase;
-         letter-spacing:.4px}
-.mk{width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent}
-.mk.up{border-bottom:9px solid var(--pos)}
-.mk.dn{border-top:9px solid var(--neg)}
-h2{font-size:11px;color:var(--text-2);font-weight:700;margin:0 0 2px;
-   text-transform:uppercase;letter-spacing:.6px}
-.sub{font-size:12px;color:var(--text-3);margin-bottom:8px}
+html{scroll-behavior:smooth}
+body{font:14px/1.5 -apple-system,system-ui,Roboto,sans-serif;background:var(--bg);
+     color:var(--ink);padding:0 0 40px;font-variant-numeric:tabular-nums}
+/* зерно: ломает цифровую плоскость, не отвлекая */
+body::before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.05;z-index:0;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='.6'/%3E%3C/svg%3E")}
+.wrap{max-width:620px;margin:0 auto;padding:0 16px;position:relative;z-index:1}
+.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+
+header{display:flex;align-items:center;gap:10px;padding:18px 0 14px}
+.wordmark{font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:700;
+  font-size:15px;letter-spacing:.14em}
+.live{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-3);
+  margin-left:auto}
+.live i{width:7px;height:7px;border-radius:50%;background:var(--pos);
+  animation:pulse 2.2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+.tabs{display:flex;border-bottom:1px solid var(--line);margin-bottom:0}
+.tab{padding:9px 2px;margin-right:22px;font-size:13px;color:var(--ink-3);cursor:pointer;
+  border-bottom:2px solid transparent;transition:color .2s,border-color .2s;user-select:none}
+.tab:hover{color:var(--ink-2)}
+.tab.on{color:var(--ink);border-bottom-color:var(--pos);font-weight:600}
+
+/* хиро: асимметрия — доминирующее число слева, колонка метрик справа */
+.hero{display:grid;grid-template-columns:1.25fr 1fr;gap:0;border-bottom:1px solid var(--line)}
+.hero-main{padding:22px 8px 20px 0}
+.hero-num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:700;
+  font-size:clamp(44px,13vw,58px);line-height:1;letter-spacing:-.04em}
+.hero-num.up{color:var(--pos)} .hero-num.dn{color:var(--neg)}
+.hero-sub{font-size:12px;color:var(--ink-3);margin-top:8px}
+.hero-side{border-left:1px solid var(--line);display:flex;flex-direction:column;justify-content:center}
+.mrow{display:flex;justify-content:space-between;align-items:baseline;
+  padding:9px 0 9px 14px;border-top:1px solid var(--line)}
+.mrow:first-child{border-top:none}
+.mrow b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:15px;font-weight:600}
+.mrow span{font-size:11px;color:var(--ink-3)}
+
+.strip{display:flex;gap:0;border-bottom:1px solid var(--line)}
+.cell{flex:1;padding:12px 0 12px;text-align:left;border-left:1px solid var(--line)}
+.cell:first-child{border-left:none;padding-left:0}
+.cell:not(:first-child){padding-left:12px}
+.cell b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:16px;font-weight:600;display:block}
+.cell span{font-size:10.5px;color:var(--ink-3);letter-spacing:.04em}
+
+section{padding:20px 0 6px}
+.sec-h{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.sec-h h2{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px;
+  font-weight:600;letter-spacing:.16em;color:var(--ink-2)}
+.sec-h .note{font-size:11px;color:var(--ink-3)}
+.plot{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 8px 6px}
 svg{display:block;width:100%}
-table{width:100%;border-collapse:collapse;font-size:14px}
-td{padding:7px 4px;border-top:1px solid var(--card-line)}
-tr:first-child td{border-top:none}
-td.r{text-align:right;color:var(--text-2);font-size:13px}
-.foot{font-size:11.5px;color:var(--text-3);margin-top:14px;line-height:1.55}
-.tip{position:fixed;pointer-events:none;background:var(--text-1);color:var(--surface);
-     font-size:12px;padding:4px 9px;border-radius:7px;opacity:0;transition:opacity .1s;z-index:9}
-.err{text-align:center;color:var(--text-2);padding:36px 0}
-.dots{display:flex;gap:6px;align-items:center;padding:4px 0 2px}
-.dot{width:14px;height:14px;border-radius:50%;border:2px solid var(--surface)}
-.netline{font-size:13px;color:var(--text-2);margin-left:auto}
+
+.sq{display:flex;gap:5px;align-items:center;padding:2px 0 6px}
+.sq i{width:16px;height:16px;border-radius:4px;transition:transform .15s}
+.sq i:hover{transform:translateY(-2px)}
+.sq .net{margin-left:auto;font-family:"IBM Plex Mono",ui-monospace,monospace;
+  font-size:13px;color:var(--ink-2)}
+
+.pos-t{width:100%;border-collapse:collapse}
+.pos-t td{padding:9px 2px;border-top:1px solid var(--line);font-size:13.5px;transition:background .15s}
+.pos-t tr:first-child td{border-top:none}
+.pos-t tr:hover td{background:color-mix(in srgb,var(--surface) 60%,transparent)}
+.pos-t .sym{font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:600}
+.pos-t .dim{text-align:right;color:var(--ink-3);font-size:12px}
+.side-tag{display:inline-block;min-width:14px;text-align:center;margin-right:8px;
+  font-family:ui-monospace,monospace;font-weight:700}
+.side-tag.l{color:var(--pos)} .side-tag.s{color:var(--neg)}
+
+.foot{font-size:11px;color:var(--ink-3);line-height:1.6;padding-top:18px;
+  border-top:1px solid var(--line);margin-top:18px}
+.foot a{color:var(--ink-2)}
+.tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--bg);
+  font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px;padding:5px 9px;
+  border-radius:6px;opacity:0;transition:opacity .12s;z-index:9;white-space:nowrap}
+.warn{font-size:11.5px;color:var(--ink-3);margin-top:8px}
+
+/* стаггер-вход: секции всплывают каскадом */
+.fx{opacity:0;transform:translateY(10px);animation:in .45s cubic-bezier(.2,.7,.3,1) forwards}
+@keyframes in{to{opacity:1;transform:none}}
+/* скелетон */
+.skel{height:74px;border-radius:10px;margin:14px 0;background:
+  linear-gradient(100deg,var(--surface) 40%,color-mix(in srgb,var(--surface) 70%,var(--ink-3)) 50%,var(--surface) 60%);
+  background-size:200% 100%;animation:sh 1.2s linear infinite}
+@keyframes sh{to{background-position:-200% 0}}
+@media (prefers-reduced-motion: reduce){.fx,.live i,.skel{animation:none;opacity:1;transform:none}}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>📊 RSI Range</h1><div class="upd" id="upd"></div></div>
-<div class="row" id="scope">
-  <div class="seg on" data-s="epoch">Новый код</div>
-  <div class="seg" data-s="all">Всё время</div>
+<div class="wrap">
+<header>
+  <div class="wordmark">RSI&thinsp;RANGE</div>
+  <div class="live"><i></i><span id="upd">подключение…</span></div>
+</header>
+<div class="tabs" id="scope">
+  <div class="tab on" data-s="epoch">новый код</div>
+  <div class="tab" data-s="all">всё время</div>
 </div>
-<div id="app"><div class="err">Загрузка…</div></div>
+<div id="app"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
 <div class="tip" id="tip"></div>
+</div>
 <script>
 "use strict";
 const tg = window.Telegram && Telegram.WebApp;
-/* SDK объявляет window.Telegram и ВНЕ Telegram — реальный клиент отличаем по platform */
 const inTg = !!(tg && tg.platform && tg.platform !== "unknown");
 const setTheme = d => document.documentElement.dataset.theme = d ? "dark" : "light";
 if (inTg) { tg.ready(); tg.expand(); setTheme(tg.colorScheme === "dark");
@@ -86,9 +137,8 @@ if (inTg) { tg.ready(); tg.expand(); setTheme(tg.colorScheme === "dark");
 let DATA = null, SCOPE = "epoch";
 const $ = s => document.querySelector(s);
 const esc = t => String(t).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const fmtR = (v, d) => (v > 0 ? "+" : "") + (+v).toFixed(d ?? (Math.abs(v) >= 100 ? 0 : 1)) + "R";
+const fmtR = (v, d) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(+v).toFixed(d ?? (Math.abs(v) >= 100 ? 0 : 1)) + "R";
 
-/* всё богатство — из дельт эквити: publичный CSV содержит те же по-сделочные R */
 function derive(eq) {
   const tr = []; let prev = 0;
   for (const p of eq) { tr.push({ t: p.t, r: +(p.r - prev).toFixed(2) }); prev = p.r; }
@@ -99,9 +149,9 @@ function derive(eq) {
   const weeks = new Map();
   for (const x of tr) {
     const d = new Date(x.t + "T00:00Z"), y = new Date(d);
-    y.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));   /* понедельник недели */
+    y.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
     const k = y.toISOString().slice(5, 10);
-    weeks.set(k, +( (weeks.get(k) || 0) + x.r ).toFixed(2));
+    weeks.set(k, +(((weeks.get(k) || 0) + x.r)).toFixed(2));
   }
   return { tr, pf: lSum ? Math.abs(wSum / lSum) : (wSum ? 99 : 0), maxDD: dd,
            weeks: [...weeks.entries()].slice(-8), last: tr.slice(-10) };
@@ -117,75 +167,89 @@ function pick() {
 function render() {
   const { st, eq, hold } = pick(), d = derive(eq);
   const wr = st.trades ? Math.round(st.winrate * 100) : 0;
-  const mark = v => `<span class="mk ${v >= 0 ? "up" : "dn"}"></span>`;
-  let h = `<div class="tiles">
-    <div class="tile hero"><div class="v">${mark(st.expectancy_r)}${fmtR(st.expectancy_r || 0, 2)}</div>
-      <div class="k">матожидание / сделку</div></div>
-    <div class="tile hero"><div class="v">${mark(st.total_r)}${fmtR(st.total_r || 0)}</div>
-      <div class="k">итог${DATA.epoch_since && SCOPE === "epoch" ? " с " + DATA.epoch_since : ""}</div></div>
-    <div class="tile"><div class="v">${wr}%</div><div class="k">winrate</div></div>
-    <div class="tile"><div class="v">${d.pf ? d.pf.toFixed(2) : "—"}</div><div class="k">профит-фактор</div></div>
-    <div class="tile"><div class="v">−${d.maxDD.toFixed(1)}R</div><div class="k">макс. просадка</div></div>
-    <div class="tile"><div class="v">${st.trades || 0}</div>
-      <div class="k">закрыто · открыто ${DATA.all.open ?? 0}${hold ? " · ~" + Math.round(hold) + "ч в сделке" : ""}</div></div>
-  </div>`;
-  h += `<div class="card"><h2>Эквити, R</h2>
-    <div class="sub">по закрытиям · просадка максимум −${d.maxDD.toFixed(1)}R</div>${equitySVG(eq)}`;
-  if ((st.trades || 0) < 100) h += `<div class="sub" style="margin:6px 0 0">⚠️ выборка мала (n=${st.trades}) — цифры шумят</div>`;
-  h += `</div>`;
-  h += `<div class="card"><h2>R по неделям</h2><div class="sub">понедельник — начало недели</div>${weeksSVG(d.weeks)}</div>`;
-  h += `<div class="card"><h2>Последние ${d.last.length} сделок</h2>
-    <div class="dots">${d.last.map(x =>
-      `<span class="dot" style="background:var(--${x.r > 0 ? "pos" : "neg"})" title="${x.t} ${fmtR(x.r)}"></span>`).join("")}
-    <span class="netline">суммарно ${fmtR(d.last.reduce((s, x) => s + x.r, 0))}</span></div></div>`;
-  h += `<div class="card"><h2>Распределение исходов</h2><div class="sub">сделок в диапазоне R</div>${histSVG(d.tr)}</div>`;
+  const tot = st.total_r || 0, exp = st.expectancy_r || 0;
+  let fx = 0;
+  const sec = inner => `<div class="fx" style="animation-delay:${(fx++) * 70}ms">${inner}</div>`;
+  let h = "";
+  h += sec(`<div class="hero">
+    <div class="hero-main">
+      <div class="hero-num mono ${tot >= 0 ? "up" : "dn"}">${fmtR(tot)}</div>
+      <div class="hero-sub">итог${SCOPE === "epoch" && DATA.epoch_since ? " с " + DATA.epoch_since : " за всю историю"} · ${st.trades || 0} закрытых</div>
+    </div>
+    <div class="hero-side">
+      <div class="mrow"><span>на сделку</span><b>${fmtR(exp, 2)}</b></div>
+      <div class="mrow"><span>профит-фактор</span><b>${d.pf ? d.pf.toFixed(2) : "—"}</b></div>
+      <div class="mrow"><span>просадка max</span><b>−${d.maxDD.toFixed(1)}R</b></div>
+    </div></div>`);
+  h += sec(`<div class="strip">
+    <div class="cell"><b>${wr}%</b><span>winrate</span></div>
+    <div class="cell"><b>${DATA.all.open ?? 0}</b><span>открыто</span></div>
+    <div class="cell"><b>${hold ? "~" + Math.round(hold) + "ч" : "—"}</b><span>в сделке</span></div>
+  </div>`);
+  h += sec(`<section><div class="sec-h"><h2>ЭКВИТИ · R</h2>
+    <span class="note">по закрытиям</span></div>
+    <div class="plot">${equitySVG(eq)}</div>
+    ${(st.trades || 0) < 100 ? `<div class="warn">⚠ выборка мала (n=${st.trades}) — цифры шумят</div>` : ""}
+    </section>`);
+  h += sec(`<section><div class="sec-h"><h2>R ПО НЕДЕЛЯМ</h2>
+    <span class="note">пн — начало недели</span></div>
+    <div class="plot">${weeksSVG(d.weeks)}</div></section>`);
+  h += sec(`<section><div class="sec-h"><h2>ПОСЛЕДНИЕ ${d.last.length}</h2></div>
+    <div class="sq">${d.last.map(x =>
+      `<i style="background:var(--${x.r > 0 ? "pos" : "neg"})" title="${x.t} ${fmtR(x.r)}"></i>`).join("")}
+      <span class="net">${fmtR(d.last.reduce((s, x) => s + x.r, 0))}</span></div></section>`);
+  h += sec(`<section><div class="sec-h"><h2>РАСПРЕДЕЛЕНИЕ</h2>
+    <span class="note">сделок в диапазоне R</span></div>
+    <div class="plot">${histSVG(d.tr)}</div></section>`);
   if (DATA.open_signals.length) {
-    h += `<div class="card"><h2>Открытые сейчас</h2><div class="sub">уровни входа и стопа — по подписке</div><table>`;
-    for (const o of DATA.open_signals)
-      h += `<tr><td>${o.side === "LONG" ? "🟢" : "🔴"} <b>${esc(o.symbol)}</b></td>
-            <td class="r">${esc(o.tf)}</td><td class="r">${o.age_h != null ? Math.round(o.age_h) + "ч" : ""}</td></tr>`;
-    h += `</table></div>`;
+    h += sec(`<section><div class="sec-h"><h2>ОТКРЫТЫ СЕЙЧАС</h2>
+      <span class="note">уровни — по подписке</span></div><table class="pos-t">${
+      DATA.open_signals.map(o =>
+        `<tr><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span></td>
+         <td class="dim">${esc(o.tf)}</td><td class="dim">${o.age_h != null ? Math.round(o.age_h) + "ч" : ""}</td></tr>`).join("")
+      }</table></section>`);
   }
-  h += `<div class="foot">Каждая сделка — в проверяемом журнале: /trackrecord у @rsirange_bot
-    (CSV + SHA-256, историю нельзя переписать задним числом). Минусовые периоды не скрываются.<br>
-    ⚠️ Не финансовый совет. Прошлые результаты не определяют будущие. 18+</div>`;
+  h += sec(`<div class="foot">Каждая сделка — в проверяемом журнале: /trackrecord у
+    @rsirange_bot (CSV + SHA-256, историю нельзя переписать задним числом).
+    Минусовые периоды не скрываются.<br>⚠ Не финансовый совет. Прошлые результаты
+    не определяют будущие. 18+</div>`);
   $("#app").innerHTML = h;
   wireTip();
 }
 
 function equitySVG(eq) {
-  if (!eq || eq.length < 2) return `<div class="err">мало закрытий для кривой</div>`;
-  const W = 640, H = 250, P = {l: 36, r: 52, t: 12, b: 20};
+  if (!eq || eq.length < 2) return `<div class="warn" style="padding:24px 8px">мало закрытий для кривой</div>`;
+  const W = 640, H = 250, P = {l: 34, r: 54, t: 14, b: 22};
   const ys = eq.map(p => p.r), yMin = Math.min(0, ...ys), yMax = Math.max(0, ...ys);
   const X = i => P.l + i * (W - P.l - P.r) / (eq.length - 1);
   const Y = v => P.t + (yMax - v) * (H - P.t - P.b) / (yMax - yMin || 1);
   let g = `<defs><linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
-    <stop offset="0" stop-color="var(--pos)" stop-opacity=".16"/>
+    <stop offset="0" stop-color="var(--pos)" stop-opacity=".14"/>
     <stop offset="1" stop-color="var(--pos)" stop-opacity="0"/></linearGradient></defs>`;
   for (let k = 0; k <= 3; k++) {
     const v = yMin + k * (yMax - yMin) / 3, y = Y(v);
     g += `<line x1="${P.l}" x2="${W - P.r}" y1="${y}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>
-          <text x="${P.l - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="var(--text-3)">${v.toFixed(0)}</text>`;
+          <text x="${P.l - 6}" y="${y + 4}" text-anchor="end" font-size="10" font-family="IBM Plex Mono,monospace" fill="var(--ink-3)">${v.toFixed(0)}</text>`;
   }
   if (yMin < 0) g += `<line x1="${P.l}" x2="${W - P.r}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--zero)" stroke-width="1" stroke-dasharray="3 3"/>`;
   const pts = eq.map((p, i) => X(i).toFixed(1) + " " + Y(p.r).toFixed(1));
   const path = "M" + pts.join("L");
-  g += `<path d="${path}L${X(eq.length - 1)} ${Y(Math.max(yMin, 0) === 0 ? Math.min(0, yMax) : yMin)}L${X(0)} ${Y(Math.max(yMin, 0) === 0 ? Math.min(0, yMax) : yMin)}Z"
-        fill="url(#fade)" stroke="none" opacity="1"/>`;
+  const base = Y(yMin);
+  g += `<path d="${path}L${X(eq.length - 1)} ${base}L${X(0)} ${base}Z" fill="url(#fade)"/>`;
   g += `<path d="${path}" fill="none" stroke="var(--pos)" stroke-width="2" stroke-linejoin="round"/>`;
   const last = eq[eq.length - 1];
   g += `<circle cx="${X(eq.length - 1)}" cy="${Y(last.r)}" r="3.5" fill="var(--pos)"/>
-        <text x="${X(eq.length - 1) + 7}" y="${Y(last.r) + 4}" font-size="12" font-weight="700" fill="var(--text-1)">${fmtR(last.r)}</text>`;
-  g += `<text x="${P.l}" y="${H - 4}" font-size="10" fill="var(--text-3)">${eq[0].t}</text>
-        <text x="${W - P.r}" y="${H - 4}" text-anchor="end" font-size="10" fill="var(--text-3)">${last.t}</text>`;
+        <text x="${X(eq.length - 1) + 7}" y="${Y(last.r) + 4}" font-size="12" font-weight="700" font-family="IBM Plex Mono,monospace" fill="var(--ink)">${fmtR(last.r)}</text>`;
+  g += `<text x="${P.l}" y="${H - 5}" font-size="9.5" font-family="IBM Plex Mono,monospace" fill="var(--ink-3)">${eq[0].t}</text>
+        <text x="${W - P.r}" y="${H - 5}" text-anchor="end" font-size="9.5" font-family="IBM Plex Mono,monospace" fill="var(--ink-3)">${last.t}</text>`;
   return `<svg viewBox="0 0 ${W} ${H}" id="eq" data-n="${eq.length}">${g}
     <line id="xh" y1="${P.t}" y2="${H - P.b}" stroke="var(--zero)" stroke-width="1" opacity="0"/>
     <rect x="${P.l}" y="${P.t}" width="${W - P.l - P.r}" height="${H - P.t - P.b}" fill="transparent"/></svg>`;
 }
 
 function weeksSVG(weeks) {
-  if (!weeks.length) return `<div class="err">нет данных</div>`;
-  const W = 640, H = 190, P = {l: 36, r: 10, t: 16, b: 22};
+  if (!weeks.length) return `<div class="warn" style="padding:24px 8px">нет данных</div>`;
+  const W = 640, H = 190, P = {l: 30, r: 8, t: 18, b: 22};
   const vals = weeks.map(w => w[1]), vMin = Math.min(0, ...vals), vMax = Math.max(0, ...vals);
   const Y = v => P.t + (vMax - v) * (H - P.t - P.b) / (vMax - vMin || 1);
   const bw = Math.min(44, (W - P.l - P.r) / weeks.length - 8);
@@ -194,36 +258,32 @@ function weeksSVG(weeks) {
     const [k, v] = w, x = P.l + (i + .5) * (W - P.l - P.r) / weeks.length - bw / 2;
     const y0 = Y(0), y1 = Y(v), pos = v >= 0;
     const yTop = pos ? y1 : y0 + 2, hgt = Math.max(Math.abs(y0 - y1) - 2, 2);
-    /* подпись минусовой недели — НАД осью (в её колонке там пусто), не под баром:
-       под баром она сталкивалась с подписью даты */
     g += `<rect x="${x}" y="${yTop}" width="${bw}" height="${hgt}" rx="4" fill="var(--${pos ? "pos" : "neg"})"/>
-      <text x="${x + bw / 2}" y="${pos ? y1 - 5 : y0 - 5}" text-anchor="middle" font-size="11" font-weight="600" fill="var(--text-1)">${fmtR(v)}</text>
-      <text x="${x + bw / 2}" y="${H - 6}" text-anchor="middle" font-size="9.5" fill="var(--text-3)">${k}</text>`;
+      <text x="${x + bw / 2}" y="${pos ? y1 - 5 : y0 - 5}" text-anchor="middle" font-size="10.5" font-weight="600" font-family="IBM Plex Mono,monospace" fill="var(--ink)">${fmtR(v)}</text>
+      <text x="${x + bw / 2}" y="${H - 6}" text-anchor="middle" font-size="9" font-family="IBM Plex Mono,monospace" fill="var(--ink-3)">${k}</text>`;
   });
   return `<svg viewBox="0 0 ${W} ${H}">${g}</svg>`;
 }
 
 function histSVG(tr) {
-  if (!tr.length) return `<div class="err">нет данных</div>`;
+  if (!tr.length) return `<div class="warn" style="padding:24px 8px">нет данных</div>`;
   const edges = [-1.01, -0.5, 0, 0.5, 1, 2, 3, 1e9];
-  const labels = ["−1", "−1…−0.5", "−0.5…0", "0…0.5", "0.5…1", "1…2", "2…3", "3+"];
+  const labels = ["−1", "−1…−.5", "−.5…0", "0….5", ".5…1", "1…2", "2…3", "3+"];
   const bins = new Array(labels.length).fill(0);
   for (const x of tr) {
     if (x.r <= -1) { bins[0]++; continue; }
-    for (let i = 1; i < edges.length; i++)
-      if (x.r <= edges[i]) { bins[i]++; break; }
+    for (let i = 1; i < edges.length; i++) if (x.r <= edges[i]) { bins[i]++; break; }
   }
-  const W = 640, H = 180, P = {l: 10, r: 10, t: 18, b: 26};
+  const W = 640, H = 180, P = {l: 8, r: 8, t: 18, b: 24};
   const maxN = Math.max(...bins, 1), bw = (W - P.l - P.r) / bins.length - 8;
   let g = "";
   bins.forEach((n, i) => {
     const x = P.l + (i + .5) * (W - P.l - P.r) / bins.length - bw / 2;
     const hgt = Math.max(n / maxN * (H - P.t - P.b), n ? 4 : 1);
     const y = H - P.b - hgt, neg = i <= 2;
-    g += `<rect x="${x}" y="${y}" width="${bw}" height="${hgt}" rx="4"
-        fill="var(--${neg ? "neg" : "pos"})" opacity="${n ? 1 : .25}"/>
-      ${n ? `<text x="${x + bw / 2}" y="${y - 4}" text-anchor="middle" font-size="11" font-weight="600" fill="var(--text-1)">${n}</text>` : ""}
-      <text x="${x + bw / 2}" y="${H - 8}" text-anchor="middle" font-size="9.5" fill="var(--text-3)">${labels[i]}</text>`;
+    g += `<rect x="${x}" y="${y}" width="${bw}" height="${hgt}" rx="4" fill="var(--${neg ? "neg" : "pos"})" opacity="${n ? 1 : .22}"/>
+      ${n ? `<text x="${x + bw / 2}" y="${y - 4}" text-anchor="middle" font-size="10.5" font-weight="600" font-family="IBM Plex Mono,monospace" fill="var(--ink)">${n}</text>` : ""}
+      <text x="${x + bw / 2}" y="${H - 8}" text-anchor="middle" font-size="9" font-family="IBM Plex Mono,monospace" fill="var(--ink-3)">${labels[i]}</text>`;
   });
   return `<svg viewBox="0 0 ${W} ${H}">${g}</svg>`;
 }
@@ -234,20 +294,20 @@ function wireTip() {
   const { eq } = pick(), n = eq.length;
   const move = ev => {
     const r = svg.getBoundingClientRect();
-    const fx = (ev.clientX - r.left) / r.width * 640;
-    const i = Math.max(0, Math.min(n - 1, Math.round((fx - 36) / (640 - 36 - 52) * (n - 1))));
-    const xh = $("#xh"), x = 36 + i * (640 - 36 - 52) / (n - 1);
+    const fx2 = (ev.clientX - r.left) / r.width * 640;
+    const i = Math.max(0, Math.min(n - 1, Math.round((fx2 - 34) / (640 - 34 - 54) * (n - 1))));
+    const xh = $("#xh"), x = 34 + i * (640 - 34 - 54) / (n - 1);
     xh.setAttribute("x1", x); xh.setAttribute("x2", x); xh.setAttribute("opacity", ".6");
     tip.textContent = `${eq[i].t} · ${fmtR(eq[i].r)}`;
-    tip.style.left = Math.min(ev.clientX + 10, innerWidth - 130) + "px";
-    tip.style.top = (ev.clientY - 34) + "px"; tip.style.opacity = "1";
+    tip.style.left = Math.min(ev.clientX + 12, innerWidth - 140) + "px";
+    tip.style.top = (ev.clientY - 36) + "px"; tip.style.opacity = "1";
   };
   svg.addEventListener("pointermove", move);
   svg.addEventListener("pointerleave", () => { tip.style.opacity = "0"; $("#xh").setAttribute("opacity", "0"); });
 }
 
-document.querySelectorAll(".seg").forEach(el => el.onclick = () => {
-  document.querySelectorAll(".seg").forEach(x => x.classList.remove("on"));
+document.querySelectorAll(".tab").forEach(el => el.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
   el.classList.add("on"); SCOPE = el.dataset.s; render();
 });
 
@@ -255,9 +315,9 @@ fetch("api/stats").then(r => r.json()).then(d => {
   DATA = d;
   if (!d.epoch) { SCOPE = "all"; $("#scope").style.display = "none"; }
   const t = (d.generated_at || "").slice(11, 16);
-  $("#upd").textContent = t ? `обновлено ${t} UTC` : "";
+  $("#upd").textContent = t ? `live · ${t} UTC` : "live";
   render();
-}).catch(() => $("#app").innerHTML = `<div class="err">Не удалось загрузить данные — попробуйте позже</div>`);
+}).catch(() => $("#app").innerHTML = `<div class="warn" style="padding:30px 0;text-align:center">Не удалось загрузить данные — попробуйте позже</div>`);
 </script>
 </body>
 </html>

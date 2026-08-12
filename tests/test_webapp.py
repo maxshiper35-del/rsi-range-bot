@@ -37,4 +37,4 @@ def test_index_served(fresh_db):
         r = c.get("/")
         assert r.status_code == 200
         body = r.get_data(as_text=True)
-        assert "живой дашборд" in body and "Не финансовый совет" in body
+        assert "живой терминал" in body and "Не финансовый совет" in body
