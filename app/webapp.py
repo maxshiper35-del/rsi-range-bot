@@ -41,32 +41,35 @@ def _equity(since_created: str | None = None) -> list:
 
 
 def _open_signals_public() -> list:
-    """Открытые сигналы БЕЗ уровней (вход/стоп/цели — платный контент)."""
+    """Открытые сигналы БЕЗ уровней и БЕЗ тегов сетапов: уровни — платный контент,
+    таксономия сетапов — стратегическая собственность (публичный CSV /trackrecord
+    сознательно не содержит setup — дашборд держит ту же границу публикации)."""
     now = clock.utcnow()
     out = []
-    for r in db.query("SELECT symbol, side, timeframe, snapshot_json, created_at "
+    for r in db.query("SELECT symbol, side, timeframe, created_at "
                       "FROM signals WHERE status='open' AND result_r IS NULL "
                       "ORDER BY created_at DESC"):
-        try:
-            setup = json.loads(r["snapshot_json"] or "{}").get("setup", "?")
-        except (ValueError, TypeError):
-            setup = "?"
         age_h = None
         if r["created_at"]:
             from datetime import datetime
             age_h = round((now - datetime.fromisoformat(r["created_at"]))
                           .total_seconds() / 3600, 1)
         out.append({"symbol": r["symbol"].split("/")[0], "side": r["side"],
-                    "tf": r["timeframe"], "setup": setup, "age_h": age_h})
+                    "tf": r["timeframe"], "age_h": age_h})
     return out
 
 
-def _setup_rows(since: str | None) -> list:
-    by = journal.stats_by_setup(since_created=since)
-    rows = [{"setup": k, "trades": v.get("trades", 0),
-             "total_r": round(v.get("total_r", 0.0), 2)}
-            for k, v in by.items() if v.get("trades")]
-    return sorted(rows, key=lambda x: -abs(x["total_r"]))
+def _avg_hold_hours(since_created: str | None = None) -> float | None:
+    """Среднее удержание закрытых сделок (филл -> закрытие), часов."""
+    q = ("SELECT AVG((julianday(closed_at) - julianday(filled_at)) * 24.0) AS h "
+         "FROM signals WHERE filled_at IS NOT NULL AND closed_at IS NOT NULL "
+         "AND result_r IS NOT NULL ")
+    args: tuple = ()
+    if since_created:
+        q += "AND created_at >= ?"
+        args = (since_created,)
+    row = db.query_one(q, args)
+    return round(row["h"], 1) if row and row["h"] is not None else None
 
 
 @app.get("/api/stats")
@@ -77,8 +80,8 @@ def api_stats() -> Response:
         "epoch_since": (epoch or "")[:10],
         "all": journal.stats(),
         "epoch": journal.stats_since_created(epoch) if epoch else None,
-        "by_setup_epoch": _setup_rows(epoch),
-        "by_setup_all": _setup_rows(None),
+        "hold_all": _avg_hold_hours(),
+        "hold_epoch": _avg_hold_hours(epoch) if epoch else None,
         "equity_all": _equity(),
         "equity_epoch": _equity(epoch) if epoch else [],
         "open_signals": _open_signals_public(),

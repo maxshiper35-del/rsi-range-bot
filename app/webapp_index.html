@@ -6,52 +6,66 @@
 <title>RSI Range — живой дашборд</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-/* Палитра — валидированный референс dataviz-скилла: одиночная серия = синий,
-   знак P&L = дивергентная пара blue↔red; поверхности карточек фиксированы
-   (#fcfcfb / #1a1a19), фон страницы — из темы Telegram. */
+/* Палитра — валидированный референс dataviz-скилла (обе темы прошли валидатор):
+   одиночная серия/позитив = синий, негатив = красный (дивергентная пара), поверхности
+   карточек фиксированы, фон страницы — из темы Telegram. Числа — tabular-nums,
+   текст только в текстовых токенах, цвет несут метки рядом. */
 :root{
-  color-scheme: light;
-  --surface:#fcfcfb; --text-1:#0b0b0b; --text-2:#52514e; --grid:#e7e6e2;
-  --pos:#2a78d6; --neg:#e34948; --zero:#b9b8b3;
+  color-scheme:light;
+  --surface:#fcfcfb; --text-1:#0b0b0b; --text-2:#52514e; --text-3:#8a897f;
+  --grid:#e7e6e2; --pos:#2a78d6; --neg:#e34948; --zero:#b9b8b3;
+  --card-line:#eceae6;
 }
 :root[data-theme="dark"]{
-  color-scheme: dark;
-  --surface:#1a1a19; --text-1:#ffffff; --text-2:#c3c2b7; --grid:#33322f;
-  --pos:#3987e5; --neg:#e66767; --zero:#5a5955;
+  color-scheme:dark;
+  --surface:#1a1a19; --text-1:#ffffff; --text-2:#c3c2b7; --text-3:#84837a;
+  --grid:#33322f; --pos:#3987e5; --neg:#e66767; --zero:#5a5955;
+  --card-line:#262624;
 }
 *{margin:0;box-sizing:border-box}
 body{font:15px/1.45 -apple-system,system-ui,Roboto,sans-serif;
      background:var(--tg-theme-bg-color,var(--surface));color:var(--text-1);
-     padding:12px 12px 28px}
-h1{font-size:17px;margin:2px 2px 10px}
-.badge{font-size:12px;color:var(--text-2);font-weight:400}
-.card{background:var(--surface);border-radius:14px;padding:14px;margin-bottom:12px;
-      box-shadow:0 1px 3px rgba(0,0,0,.12)}
-.row{display:flex;gap:8px;margin-bottom:12px}
-.seg{flex:1;text-align:center;padding:8px 4px;border-radius:10px;font-size:14px;
-     background:var(--surface);color:var(--text-2);border:1px solid var(--grid);cursor:pointer}
-.seg.on{color:var(--text-1);border-color:var(--pos);font-weight:600}
-.tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.tile{background:var(--surface);border-radius:14px;padding:12px 14px;
-      box-shadow:0 1px 3px rgba(0,0,0,.12)}
-.tile .v{font-size:24px;font-weight:700;letter-spacing:-.3px}
-.tile .k{font-size:12px;color:var(--text-2);margin-top:2px}
-.hero .v{font-size:32px}
-h2{font-size:13px;color:var(--text-2);font-weight:600;margin:0 0 8px}
+     padding:12px 12px 30px;font-variant-numeric:tabular-nums}
+.hdr{display:flex;align-items:baseline;justify-content:space-between;margin:2px 2px 12px}
+h1{font-size:18px;letter-spacing:-.2px}
+.upd{font-size:11px;color:var(--text-3)}
+.card{background:var(--surface);border:1px solid var(--card-line);border-radius:16px;
+      padding:14px 14px 12px;margin-bottom:10px;box-shadow:0 1px 2px rgba(0,0,0,.07)}
+.row{display:flex;gap:8px;margin-bottom:10px}
+.seg{flex:1;text-align:center;padding:9px 4px;border-radius:12px;font-size:14px;
+     background:var(--surface);color:var(--text-2);border:1px solid var(--card-line);cursor:pointer}
+.seg.on{color:var(--text-1);border-color:var(--pos);font-weight:600;
+        box-shadow:inset 0 0 0 1px var(--pos)}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.tile{background:var(--surface);border:1px solid var(--card-line);border-radius:16px;
+      padding:12px 14px;box-shadow:0 1px 2px rgba(0,0,0,.07)}
+.tile .v{font-size:22px;font-weight:700;letter-spacing:-.4px;display:flex;
+         align-items:center;gap:7px}
+.tile.hero .v{font-size:31px}
+.tile .k{font-size:11px;color:var(--text-2);margin-top:3px;text-transform:uppercase;
+         letter-spacing:.4px}
+.mk{width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent}
+.mk.up{border-bottom:9px solid var(--pos)}
+.mk.dn{border-top:9px solid var(--neg)}
+h2{font-size:11px;color:var(--text-2);font-weight:700;margin:0 0 2px;
+   text-transform:uppercase;letter-spacing:.6px}
+.sub{font-size:12px;color:var(--text-3);margin-bottom:8px}
 svg{display:block;width:100%}
-.bar-lbl{font-size:12px}
 table{width:100%;border-collapse:collapse;font-size:14px}
-td{padding:6px 4px;border-top:1px solid var(--grid)}
+td{padding:7px 4px;border-top:1px solid var(--card-line)}
+tr:first-child td{border-top:none}
 td.r{text-align:right;color:var(--text-2);font-size:13px}
-.foot{font-size:11.5px;color:var(--text-2);margin-top:14px;line-height:1.5}
+.foot{font-size:11.5px;color:var(--text-3);margin-top:14px;line-height:1.55}
 .tip{position:fixed;pointer-events:none;background:var(--text-1);color:var(--surface);
-     font-size:12px;padding:4px 8px;border-radius:7px;opacity:0;transition:opacity .1s}
-.err{text-align:center;color:var(--text-2);padding:40px 0}
-.small-n{font-size:12px;color:var(--text-2);margin-top:6px}
+     font-size:12px;padding:4px 9px;border-radius:7px;opacity:0;transition:opacity .1s;z-index:9}
+.err{text-align:center;color:var(--text-2);padding:36px 0}
+.dots{display:flex;gap:6px;align-items:center;padding:4px 0 2px}
+.dot{width:14px;height:14px;border-radius:50%;border:2px solid var(--surface)}
+.netline{font-size:13px;color:var(--text-2);margin-left:auto}
 </style>
 </head>
 <body>
-<h1>📊 RSI Range <span class="badge" id="epoch-badge"></span></h1>
+<div class="hdr"><h1>📊 RSI Range</h1><div class="upd" id="upd"></div></div>
 <div class="row" id="scope">
   <div class="seg on" data-s="epoch">Новый код</div>
   <div class="seg" data-s="all">Всё время</div>
@@ -61,57 +75,79 @@ td.r{text-align:right;color:var(--text-2);font-size:13px}
 <script>
 "use strict";
 const tg = window.Telegram && Telegram.WebApp;
-/* SDK объявляет window.Telegram и ВНЕ Telegram (colorScheme там всегда 'light') —
-   отличаем реальный клиент по platform, иначе браузерным гостям ломается тёмная тема */
+/* SDK объявляет window.Telegram и ВНЕ Telegram — реальный клиент отличаем по platform */
 const inTg = !!(tg && tg.platform && tg.platform !== "unknown");
-const setTheme = dark =>
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
-if (inTg) { tg.ready(); tg.expand();
-  setTheme(tg.colorScheme === "dark");
+const setTheme = d => document.documentElement.dataset.theme = d ? "dark" : "light";
+if (inTg) { tg.ready(); tg.expand(); setTheme(tg.colorScheme === "dark");
   tg.onEvent("themeChanged", () => setTheme(tg.colorScheme === "dark"));
-} else {
-  const mq = matchMedia("(prefers-color-scheme: dark)");
-  setTheme(mq.matches);
-  mq.addEventListener("change", e => setTheme(e.matches));
-}
+} else { const mq = matchMedia("(prefers-color-scheme: dark)");
+  setTheme(mq.matches); mq.addEventListener("change", e => setTheme(e.matches)); }
+
 let DATA = null, SCOPE = "epoch";
 const $ = s => document.querySelector(s);
 const esc = t => String(t).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const fmtR = v => (v > 0 ? "+" : "") + (+v).toFixed(v >= 100 || v <= -100 ? 0 : 1) + "R";
+const fmtR = (v, d) => (v > 0 ? "+" : "") + (+v).toFixed(d ?? (Math.abs(v) >= 100 ? 0 : 1)) + "R";
+
+/* всё богатство — из дельт эквити: publичный CSV содержит те же по-сделочные R */
+function derive(eq) {
+  const tr = []; let prev = 0;
+  for (const p of eq) { tr.push({ t: p.t, r: +(p.r - prev).toFixed(2) }); prev = p.r; }
+  const wins = tr.filter(x => x.r > 0), losses = tr.filter(x => x.r <= 0);
+  const wSum = wins.reduce((s, x) => s + x.r, 0), lSum = losses.reduce((s, x) => s + x.r, 0);
+  let peak = 0, dd = 0, cum = 0;
+  for (const x of tr) { cum += x.r; peak = Math.max(peak, cum); dd = Math.max(dd, peak - cum); }
+  const weeks = new Map();
+  for (const x of tr) {
+    const d = new Date(x.t + "T00:00Z"), y = new Date(d);
+    y.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));   /* понедельник недели */
+    const k = y.toISOString().slice(5, 10);
+    weeks.set(k, +( (weeks.get(k) || 0) + x.r ).toFixed(2));
+  }
+  return { tr, pf: lSum ? Math.abs(wSum / lSum) : (wSum ? 99 : 0), maxDD: dd,
+           weeks: [...weeks.entries()].slice(-8), last: tr.slice(-10) };
+}
 
 function pick() {
-  const st = SCOPE === "epoch" && DATA.epoch ? DATA.epoch : DATA.all;
-  const eq = SCOPE === "epoch" ? DATA.equity_epoch : DATA.equity_all;
-  const bs = SCOPE === "epoch" ? DATA.by_setup_epoch : DATA.by_setup_all;
-  return { st, eq, bs };
+  const useEpoch = SCOPE === "epoch" && DATA.epoch;
+  return { st: useEpoch ? DATA.epoch : DATA.all,
+           eq: useEpoch ? DATA.equity_epoch : DATA.equity_all,
+           hold: useEpoch ? DATA.hold_epoch : DATA.hold_all };
 }
 
 function render() {
-  const { st, eq, bs } = pick();
+  const { st, eq, hold } = pick(), d = derive(eq);
   const wr = st.trades ? Math.round(st.winrate * 100) : 0;
+  const mark = v => `<span class="mk ${v >= 0 ? "up" : "dn"}"></span>`;
   let h = `<div class="tiles">
-    <div class="tile hero"><div class="v">${fmtR(st.expectancy_r || 0)}</div>
-      <div class="k">матожидание на сделку</div></div>
-    <div class="tile hero"><div class="v">${fmtR(st.total_r || 0)}</div>
-      <div class="k">итог, R</div></div>
+    <div class="tile hero"><div class="v">${mark(st.expectancy_r)}${fmtR(st.expectancy_r || 0, 2)}</div>
+      <div class="k">матожидание / сделку</div></div>
+    <div class="tile hero"><div class="v">${mark(st.total_r)}${fmtR(st.total_r || 0)}</div>
+      <div class="k">итог${DATA.epoch_since && SCOPE === "epoch" ? " с " + DATA.epoch_since : ""}</div></div>
     <div class="tile"><div class="v">${wr}%</div><div class="k">winrate</div></div>
+    <div class="tile"><div class="v">${d.pf ? d.pf.toFixed(2) : "—"}</div><div class="k">профит-фактор</div></div>
+    <div class="tile"><div class="v">−${d.maxDD.toFixed(1)}R</div><div class="k">макс. просадка</div></div>
     <div class="tile"><div class="v">${st.trades || 0}</div>
-      <div class="k">закрыто · открыто ${DATA.all.open ?? 0}</div></div>
+      <div class="k">закрыто · открыто ${DATA.all.open ?? 0}${hold ? " · ~" + Math.round(hold) + "ч в сделке" : ""}</div></div>
   </div>`;
-  h += `<div class="card"><h2>Эквити, R (по закрытиям)</h2>${equitySVG(eq)}`;
-  if ((st.trades || 0) < 100) h += `<div class="small-n">⚠️ выборка мала (n=${st.trades}) — цифры шумят</div>`;
+  h += `<div class="card"><h2>Эквити, R</h2>
+    <div class="sub">по закрытиям · просадка максимум −${d.maxDD.toFixed(1)}R</div>${equitySVG(eq)}`;
+  if ((st.trades || 0) < 100) h += `<div class="sub" style="margin:6px 0 0">⚠️ выборка мала (n=${st.trades}) — цифры шумят</div>`;
   h += `</div>`;
-  h += `<div class="card"><h2>По сетапам, Σ R</h2>${barsSVG(bs)}</div>`;
+  h += `<div class="card"><h2>R по неделям</h2><div class="sub">понедельник — начало недели</div>${weeksSVG(d.weeks)}</div>`;
+  h += `<div class="card"><h2>Последние ${d.last.length} сделок</h2>
+    <div class="dots">${d.last.map(x =>
+      `<span class="dot" style="background:var(--${x.r > 0 ? "pos" : "neg"})" title="${x.t} ${fmtR(x.r)}"></span>`).join("")}
+    <span class="netline">суммарно ${fmtR(d.last.reduce((s, x) => s + x.r, 0))}</span></div></div>`;
+  h += `<div class="card"><h2>Распределение исходов</h2><div class="sub">сделок в диапазоне R</div>${histSVG(d.tr)}</div>`;
   if (DATA.open_signals.length) {
-    h += `<div class="card"><h2>Открытые сейчас (без уровней — они по подписке)</h2><table>`;
+    h += `<div class="card"><h2>Открытые сейчас</h2><div class="sub">уровни входа и стопа — по подписке</div><table>`;
     for (const o of DATA.open_signals)
       h += `<tr><td>${o.side === "LONG" ? "🟢" : "🔴"} <b>${esc(o.symbol)}</b></td>
-            <td class="r">${esc(o.tf)} · ${esc(o.setup)}</td>
-            <td class="r">${o.age_h != null ? o.age_h + "ч" : ""}</td></tr>`;
+            <td class="r">${esc(o.tf)}</td><td class="r">${o.age_h != null ? Math.round(o.age_h) + "ч" : ""}</td></tr>`;
     h += `</table></div>`;
   }
   h += `<div class="foot">Каждая сделка — в проверяемом журнале: /trackrecord у @rsirange_bot
-    (CSV + SHA-256, историю нельзя переписать). Минусовые периоды не скрываются.<br>
+    (CSV + SHA-256, историю нельзя переписать задним числом). Минусовые периоды не скрываются.<br>
     ⚠️ Не финансовый совет. Прошлые результаты не определяют будущие. 18+</div>`;
   $("#app").innerHTML = h;
   wireTip();
@@ -119,48 +155,75 @@ function render() {
 
 function equitySVG(eq) {
   if (!eq || eq.length < 2) return `<div class="err">мало закрытий для кривой</div>`;
-  const W = 640, H = 240, P = {l: 34, r: 46, t: 10, b: 20};
+  const W = 640, H = 250, P = {l: 36, r: 52, t: 12, b: 20};
   const ys = eq.map(p => p.r), yMin = Math.min(0, ...ys), yMax = Math.max(0, ...ys);
   const X = i => P.l + i * (W - P.l - P.r) / (eq.length - 1);
   const Y = v => P.t + (yMax - v) * (H - P.t - P.b) / (yMax - yMin || 1);
-  let g = "";
+  let g = `<defs><linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="var(--pos)" stop-opacity=".16"/>
+    <stop offset="1" stop-color="var(--pos)" stop-opacity="0"/></linearGradient></defs>`;
   for (let k = 0; k <= 3; k++) {
     const v = yMin + k * (yMax - yMin) / 3, y = Y(v);
     g += `<line x1="${P.l}" x2="${W - P.r}" y1="${y}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>
-          <text x="${P.l - 5}" y="${y + 4}" text-anchor="end" font-size="10" fill="var(--text-2)">${v.toFixed(0)}</text>`;
+          <text x="${P.l - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="var(--text-3)">${v.toFixed(0)}</text>`;
   }
   if (yMin < 0) g += `<line x1="${P.l}" x2="${W - P.r}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--zero)" stroke-width="1" stroke-dasharray="3 3"/>`;
-  const path = eq.map((p, i) => (i ? "L" : "M") + X(i).toFixed(1) + " " + Y(p.r).toFixed(1)).join("");
-  const last = eq[eq.length - 1];
+  const pts = eq.map((p, i) => X(i).toFixed(1) + " " + Y(p.r).toFixed(1));
+  const path = "M" + pts.join("L");
+  g += `<path d="${path}L${X(eq.length - 1)} ${Y(Math.max(yMin, 0) === 0 ? Math.min(0, yMax) : yMin)}L${X(0)} ${Y(Math.max(yMin, 0) === 0 ? Math.min(0, yMax) : yMin)}Z"
+        fill="url(#fade)" stroke="none" opacity="1"/>`;
   g += `<path d="${path}" fill="none" stroke="var(--pos)" stroke-width="2" stroke-linejoin="round"/>`;
+  const last = eq[eq.length - 1];
   g += `<circle cx="${X(eq.length - 1)}" cy="${Y(last.r)}" r="3.5" fill="var(--pos)"/>
         <text x="${X(eq.length - 1) + 7}" y="${Y(last.r) + 4}" font-size="12" font-weight="700" fill="var(--text-1)">${fmtR(last.r)}</text>`;
-  g += `<text x="${P.l}" y="${H - 4}" font-size="10" fill="var(--text-2)">${eq[0].t}</text>
-        <text x="${W - P.r}" y="${H - 4}" text-anchor="end" font-size="10" fill="var(--text-2)">${last.t}</text>`;
+  g += `<text x="${P.l}" y="${H - 4}" font-size="10" fill="var(--text-3)">${eq[0].t}</text>
+        <text x="${W - P.r}" y="${H - 4}" text-anchor="end" font-size="10" fill="var(--text-3)">${last.t}</text>`;
   return `<svg viewBox="0 0 ${W} ${H}" id="eq" data-n="${eq.length}">${g}
     <line id="xh" y1="${P.t}" y2="${H - P.b}" stroke="var(--zero)" stroke-width="1" opacity="0"/>
     <rect x="${P.l}" y="${P.t}" width="${W - P.l - P.r}" height="${H - P.t - P.b}" fill="transparent"/></svg>`;
 }
 
-function barsSVG(bs) {
-  if (!bs || !bs.length) return `<div class="err">нет закрытых сделок</div>`;
-  const W = 640, rowH = 34, P = {l: 76, r: 108}, H = bs.length * rowH + 6;
-  const maxAbs = Math.max(...bs.map(b => Math.abs(b.total_r)), 0.1);
-  const hasNeg = Math.min(...bs.map(b => Math.min(0, b.total_r))) < 0;
-  const zero = P.l + (W - P.l - P.r) * (hasNeg ? 0.4 : 0.02);
-  const scale = Math.min((W - zero - P.r) / maxAbs, hasNeg ? (zero - P.l - 4) / maxAbs : 1e9);
-  let g = `<line x1="${zero}" x2="${zero}" y1="0" y2="${H}" stroke="var(--zero)" stroke-width="1"/>`;
-  bs.forEach((b, i) => {
-    const y = i * rowH + 6, w = Math.max(Math.abs(b.total_r) * scale, 2), pos = b.total_r >= 0;
-    const x = pos ? zero + 2 : zero - 2 - w;             /* 2px зазор от нулевой оси */
-    /* подпись значения — на СВОБОДНОЙ стороне ряда: у минуса справа от оси (там в
-       этом ряду пусто), у плюса за концом бара — коллизий с именами сетапов нет */
-    const lx = pos ? x + w + 6 : zero + 8, anchor = "start";
-    g += `<text x="${P.l - 8}" y="${y + 15}" text-anchor="end" font-size="12" fill="var(--text-1)">${esc(b.setup)}</text>
-      <rect x="${x}" y="${y}" width="${w}" height="20" rx="4"
-        fill="var(--${pos ? "pos" : "neg"})"/>
-      <text x="${lx}" y="${y + 15}" font-size="12" font-weight="600"
-        text-anchor="${anchor}" fill="var(--text-1)">${fmtR(b.total_r)} · ${b.trades} сд</text>`;
+function weeksSVG(weeks) {
+  if (!weeks.length) return `<div class="err">нет данных</div>`;
+  const W = 640, H = 190, P = {l: 36, r: 10, t: 16, b: 22};
+  const vals = weeks.map(w => w[1]), vMin = Math.min(0, ...vals), vMax = Math.max(0, ...vals);
+  const Y = v => P.t + (vMax - v) * (H - P.t - P.b) / (vMax - vMin || 1);
+  const bw = Math.min(44, (W - P.l - P.r) / weeks.length - 8);
+  let g = `<line x1="${P.l}" x2="${W - P.r}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--zero)" stroke-width="1"/>`;
+  weeks.forEach((w, i) => {
+    const [k, v] = w, x = P.l + (i + .5) * (W - P.l - P.r) / weeks.length - bw / 2;
+    const y0 = Y(0), y1 = Y(v), pos = v >= 0;
+    const yTop = pos ? y1 : y0 + 2, hgt = Math.max(Math.abs(y0 - y1) - 2, 2);
+    /* подпись минусовой недели — НАД осью (в её колонке там пусто), не под баром:
+       под баром она сталкивалась с подписью даты */
+    g += `<rect x="${x}" y="${yTop}" width="${bw}" height="${hgt}" rx="4" fill="var(--${pos ? "pos" : "neg"})"/>
+      <text x="${x + bw / 2}" y="${pos ? y1 - 5 : y0 - 5}" text-anchor="middle" font-size="11" font-weight="600" fill="var(--text-1)">${fmtR(v)}</text>
+      <text x="${x + bw / 2}" y="${H - 6}" text-anchor="middle" font-size="9.5" fill="var(--text-3)">${k}</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}">${g}</svg>`;
+}
+
+function histSVG(tr) {
+  if (!tr.length) return `<div class="err">нет данных</div>`;
+  const edges = [-1.01, -0.5, 0, 0.5, 1, 2, 3, 1e9];
+  const labels = ["−1", "−1…−0.5", "−0.5…0", "0…0.5", "0.5…1", "1…2", "2…3", "3+"];
+  const bins = new Array(labels.length).fill(0);
+  for (const x of tr) {
+    if (x.r <= -1) { bins[0]++; continue; }
+    for (let i = 1; i < edges.length; i++)
+      if (x.r <= edges[i]) { bins[i]++; break; }
+  }
+  const W = 640, H = 180, P = {l: 10, r: 10, t: 18, b: 26};
+  const maxN = Math.max(...bins, 1), bw = (W - P.l - P.r) / bins.length - 8;
+  let g = "";
+  bins.forEach((n, i) => {
+    const x = P.l + (i + .5) * (W - P.l - P.r) / bins.length - bw / 2;
+    const hgt = Math.max(n / maxN * (H - P.t - P.b), n ? 4 : 1);
+    const y = H - P.b - hgt, neg = i <= 2;
+    g += `<rect x="${x}" y="${y}" width="${bw}" height="${hgt}" rx="4"
+        fill="var(--${neg ? "neg" : "pos"})" opacity="${n ? 1 : .25}"/>
+      ${n ? `<text x="${x + bw / 2}" y="${y - 4}" text-anchor="middle" font-size="11" font-weight="600" fill="var(--text-1)">${n}</text>` : ""}
+      <text x="${x + bw / 2}" y="${H - 8}" text-anchor="middle" font-size="9.5" fill="var(--text-3)">${labels[i]}</text>`;
   });
   return `<svg viewBox="0 0 ${W} ${H}">${g}</svg>`;
 }
@@ -172,11 +235,11 @@ function wireTip() {
   const move = ev => {
     const r = svg.getBoundingClientRect();
     const fx = (ev.clientX - r.left) / r.width * 640;
-    const i = Math.max(0, Math.min(n - 1, Math.round((fx - 34) / (640 - 34 - 46) * (n - 1))));
-    const xh = $("#xh"), x = 34 + i * (640 - 34 - 46) / (n - 1);
+    const i = Math.max(0, Math.min(n - 1, Math.round((fx - 36) / (640 - 36 - 52) * (n - 1))));
+    const xh = $("#xh"), x = 36 + i * (640 - 36 - 52) / (n - 1);
     xh.setAttribute("x1", x); xh.setAttribute("x2", x); xh.setAttribute("opacity", ".6");
     tip.textContent = `${eq[i].t} · ${fmtR(eq[i].r)}`;
-    tip.style.left = Math.min(ev.clientX + 10, innerWidth - 120) + "px";
+    tip.style.left = Math.min(ev.clientX + 10, innerWidth - 130) + "px";
     tip.style.top = (ev.clientY - 34) + "px"; tip.style.opacity = "1";
   };
   svg.addEventListener("pointermove", move);
@@ -191,7 +254,8 @@ document.querySelectorAll(".seg").forEach(el => el.onclick = () => {
 fetch("api/stats").then(r => r.json()).then(d => {
   DATA = d;
   if (!d.epoch) { SCOPE = "all"; $("#scope").style.display = "none"; }
-  $("#epoch-badge").textContent = d.epoch_since ? `новый код с ${d.epoch_since}` : "";
+  const t = (d.generated_at || "").slice(11, 16);
+  $("#upd").textContent = t ? `обновлено ${t} UTC` : "";
   render();
 }).catch(() => $("#app").innerHTML = `<div class="err">Не удалось загрузить данные — попробуйте позже</div>`);
 </script>
