@@ -716,6 +716,45 @@ def should_alert_poller_stale(last_tick_at: str | None, last_alert_at: str | Non
     return (now - datetime.fromisoformat(last_alert_at)).total_seconds() >= rethrottle_hours * 3600
 
 
+_healthcheck_ok_logged = False
+
+
+def healthcheck_ping(url: str | None, poller_fresh_seconds: float = 2 * 3600) -> bool:
+    """Dead-man's switch: пульс на healthchecks.io из maintenance-цикла (синхронная, звать
+    через to_thread). Дополняет should_alert_poller_stale с ДРУГОЙ стороны: watchdog жив
+    только пока жив процесс, а внешний сервис ловит именно смерть/зависание процесса —
+    урок простоя 30.07-09.08 («лежал 9 суток молча», все алерты жили внутри трупа).
+
+    Пульс НЕ шлётся, если последний тик поллера старше poller_fresh_seconds — тогда
+    молчание доносит до оператора и «процесс жив, но сигналов нет» (совместно с грейсом
+    healthchecks это единственный канал, работающий при сломанном Telegram-контуре).
+    Тика не было вовсе (свежая БД) — пульс идёт: поллер ещё не успел, это не поломка.
+    Ошибки сети глотаются: сбой доставки пульса не должен трогать обслуживание, а
+    «нет пульса» — это и есть сигнал, только на стороне сервиса. -> факт отправки."""
+    global _healthcheck_ok_logged
+    from app import runtime
+    from app.logging_conf import get_logger
+
+    log = get_logger("bot")
+    if not url:
+        return False
+    last = runtime.last_poller_tick_at()
+    if last is not None:
+        age = (clock.utcnow() - datetime.fromisoformat(last)).total_seconds()
+        if age >= poller_fresh_seconds:
+            return False                     # поллер завис — пусть молчание алертит
+    try:
+        import urllib.request
+        urllib.request.urlopen(url, timeout=10)
+    except Exception as e:                   # noqa: BLE001 — см. docstring
+        log.debug("healthcheck ping: %s", e)
+        return False
+    if not _healthcheck_ok_logged:
+        _healthcheck_ok_logged = True
+        log.info("dead-man's switch: пульс активен (%s)", url.split("/")[-1][:8] + "…")
+    return True
+
+
 _TRACKRECORD_COLS = ("id", "symbol", "side", "timeframe", "entry", "stop", "tp1", "tp2", "tp3",
                     "status", "result_r", "created_at", "closed_at")
 
@@ -3128,6 +3167,10 @@ def main() -> None:
         while True:
             try:
                 await _maintenance()
+                # пульс dead-man's switch ПОСЛЕ успешного цикла: упавшее обслуживание
+                # прекращает пульс -> внешний алерт (грейс healthchecks поглощает
+                # разовые сбои). Сеть/URL глотается внутри healthcheck_ping.
+                await asyncio.to_thread(healthcheck_ping, get_settings().healthcheck_url)
             except Exception:                          # noqa: BLE001 — цикл живёт всегда
                 log.exception("maintenance-цикл")
             await asyncio.sleep(60)

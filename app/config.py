@@ -57,6 +57,10 @@ class Settings:
     fernet_key: str | None
     signal_mode: str  # auto: сигнал сразу в журнал+алерт | semiauto: кандидат на подтверждение
     signals_channel: str  # @username или -100... id канала для постинга сигналов (пусто = выкл)
+    # dead-man's switch: ping-URL healthchecks.io; пусто = выключен (dev). Урок простоя
+    # 30.07-09.08: ВСЕ внутренние watchdog'и живут внутри процесса и умирают вместе с ним —
+    # «лежал 9 суток молча». Внешний сервис превращает молчание в пуш оператору.
+    healthcheck_url: str | None
 
 
 @lru_cache
@@ -87,4 +91,5 @@ def get_settings() -> Settings:
         fernet_key=_env("FERNET_KEY"),
         signal_mode=_env("SIGNAL_MODE", "auto"),
         signals_channel=_env("SIGNALS_CHANNEL", ""),
+        healthcheck_url=_env("HEALTHCHECK_URL"),
     )

@@ -345,6 +345,38 @@ def test_should_alert_backup_stale():
     assert bot.should_alert_backup_stale(stale, old_alert, now_iso) is True      # троттлинг истёк
 
 
+def test_healthcheck_ping_deadman_switch(fresh_db, monkeypatch):
+    """Dead-man's switch: пульс уходит при свежем поллере, молчит при зависшем.
+
+    Контр-урок простоя 30.07-09.08: внутренние watchdog'и умирают вместе с процессом,
+    внешний сервис ловит молчание. Гейт по свежести тика делает пульс сигналом
+    «жив ВЕСЬ конвейер», а не «жив maintenance»."""
+    from datetime import timedelta
+
+    from app import clock, runtime
+
+    calls: list[str] = []
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda url, timeout=10: calls.append(url))
+    url = "https://hc-ping.example/test"
+
+    assert bot.healthcheck_ping(None) is False           # выключен (dev) — нет запроса
+    assert calls == []
+    runtime.set_last_poller_tick_at(clock.utcnow_iso())  # поллер свежий -> пульс
+    assert bot.healthcheck_ping(url) is True
+    assert calls == [url]
+    stale = (clock.utcnow() - timedelta(hours=3)).isoformat()
+    runtime.set_last_poller_tick_at(stale)               # поллер завис -> молчание
+    assert bot.healthcheck_ping(url) is False
+    assert calls == [url]
+
+    def _boom(u, timeout=10):
+        raise OSError("network down")
+    runtime.set_last_poller_tick_at(clock.utcnow_iso())
+    monkeypatch.setattr("urllib.request.urlopen", _boom)
+    assert bot.healthcheck_ping(url) is False            # сбой сети глотается, не роняет
+
+
 def test_should_alert_poller_stale():
     from datetime import datetime, timedelta, timezone
 
