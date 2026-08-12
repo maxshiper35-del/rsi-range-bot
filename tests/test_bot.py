@@ -998,3 +998,15 @@ def test_render_result_trailing_exit_header():
     assert "трейлинг-выход" in win and "✅" in win and "🛑" not in win
     loss = templates.render_result({**base, "status": "stopped", "result_r": -1.0})
     assert "стоп" in loss and "🛑" in loss and "трейлинг-выход" not in loss
+
+
+def test_render_xray_hides_setup_tag():
+    """Граница публикации: тег сетапа не светится и в рентгене (фидбэк 13.08)."""
+    from app.delivery import templates
+    x = {"id": 9, "symbol": "BTC/USDT:USDT", "side": "SHORT", "timeframe": "1h",
+         "status": "stopped", "setup": "6226", "entry": 64000.0, "stop": 65000.0,
+         "exit_price": 62000.0, "result_r": 2.0, "confidence": 0.8, "stop_pct": 1.6,
+         "scores": None, "swept": True, "clean_impulse": True, "reasons": [],
+         "wait_hours": 1.0, "hold_hours": 5.0, "trail_moves": 1, "trail_peak_r": 2.1}
+    txt = templates.render_xray(x)
+    assert "6226" not in txt and "сетап" not in txt.lower()

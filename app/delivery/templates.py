@@ -406,8 +406,9 @@ def render_xray(x: dict) -> str:
         head_r = f"итог <b>{r:+.2f}R</b>" if r is not None else "итог —"
     lines = [
         f"🔬 <b>Рентген сделки #{x['id']}</b>",
-        f"{esc(x['symbol'])} {esc(x['side'])} {esc(x['timeframe'])}"
-        f" · сетап {esc(x['setup'])} · {head_r}",
+        # тег сетапа НЕ публикуется (собственность стратегии — фидбэк владельца 13.08;
+        # та же граница, что у публичного CSV и дашборда)
+        f"{esc(x['symbol'])} {esc(x['side'])} {esc(x['timeframe'])} · {head_r}",
         LINE,
         f"Вход <code>{_price(x['entry'])}</code> · стоп <code>{_price(x['stop'])}</code>"
         + (f" · выход <code>{_price(x['exit_price'])}</code>" if x.get("exit_price") else "")
