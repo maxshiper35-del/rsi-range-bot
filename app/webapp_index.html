@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>RSI Range — живой дашборд</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+/* Палитра — валидированный референс dataviz-скилла: одиночная серия = синий,
+   знак P&L = дивергентная пара blue↔red; поверхности карточек фиксированы
+   (#fcfcfb / #1a1a19), фон страницы — из темы Telegram. */
+:root{
+  color-scheme: light;
+  --surface:#fcfcfb; --text-1:#0b0b0b; --text-2:#52514e; --grid:#e7e6e2;
+  --pos:#2a78d6; --neg:#e34948; --zero:#b9b8b3;
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --surface:#1a1a19; --text-1:#ffffff; --text-2:#c3c2b7; --grid:#33322f;
+  --pos:#3987e5; --neg:#e66767; --zero:#5a5955;
+}
+*{margin:0;box-sizing:border-box}
+body{font:15px/1.45 -apple-system,system-ui,Roboto,sans-serif;
+     background:var(--tg-theme-bg-color,var(--surface));color:var(--text-1);
+     padding:12px 12px 28px}
+h1{font-size:17px;margin:2px 2px 10px}
+.badge{font-size:12px;color:var(--text-2);font-weight:400}
+.card{background:var(--surface);border-radius:14px;padding:14px;margin-bottom:12px;
+      box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.row{display:flex;gap:8px;margin-bottom:12px}
+.seg{flex:1;text-align:center;padding:8px 4px;border-radius:10px;font-size:14px;
+     background:var(--surface);color:var(--text-2);border:1px solid var(--grid);cursor:pointer}
+.seg.on{color:var(--text-1);border-color:var(--pos);font-weight:600}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.tile{background:var(--surface);border-radius:14px;padding:12px 14px;
+      box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.tile .v{font-size:24px;font-weight:700;letter-spacing:-.3px}
+.tile .k{font-size:12px;color:var(--text-2);margin-top:2px}
+.hero .v{font-size:32px}
+h2{font-size:13px;color:var(--text-2);font-weight:600;margin:0 0 8px}
+svg{display:block;width:100%}
+.bar-lbl{font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td{padding:6px 4px;border-top:1px solid var(--grid)}
+td.r{text-align:right;color:var(--text-2);font-size:13px}
+.foot{font-size:11.5px;color:var(--text-2);margin-top:14px;line-height:1.5}
+.tip{position:fixed;pointer-events:none;background:var(--text-1);color:var(--surface);
+     font-size:12px;padding:4px 8px;border-radius:7px;opacity:0;transition:opacity .1s}
+.err{text-align:center;color:var(--text-2);padding:40px 0}
+.small-n{font-size:12px;color:var(--text-2);margin-top:6px}
+</style>
+</head>
+<body>
+<h1>📊 RSI Range <span class="badge" id="epoch-badge"></span></h1>
+<div class="row" id="scope">
+  <div class="seg on" data-s="epoch">Новый код</div>
+  <div class="seg" data-s="all">Всё время</div>
+</div>
+<div id="app"><div class="err">Загрузка…</div></div>
+<div class="tip" id="tip"></div>
+<script>
+"use strict";
+const tg = window.Telegram && Telegram.WebApp;
+/* SDK объявляет window.Telegram и ВНЕ Telegram (colorScheme там всегда 'light') —
+   отличаем реальный клиент по platform, иначе браузерным гостям ломается тёмная тема */
+const inTg = !!(tg && tg.platform && tg.platform !== "unknown");
+const setTheme = dark =>
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+if (inTg) { tg.ready(); tg.expand();
+  setTheme(tg.colorScheme === "dark");
+  tg.onEvent("themeChanged", () => setTheme(tg.colorScheme === "dark"));
+} else {
+  const mq = matchMedia("(prefers-color-scheme: dark)");
+  setTheme(mq.matches);
+  mq.addEventListener("change", e => setTheme(e.matches));
+}
+let DATA = null, SCOPE = "epoch";
+const $ = s => document.querySelector(s);
+const esc = t => String(t).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmtR = v => (v > 0 ? "+" : "") + (+v).toFixed(v >= 100 || v <= -100 ? 0 : 1) + "R";
+
+function pick() {
+  const st = SCOPE === "epoch" && DATA.epoch ? DATA.epoch : DATA.all;
+  const eq = SCOPE === "epoch" ? DATA.equity_epoch : DATA.equity_all;
+  const bs = SCOPE === "epoch" ? DATA.by_setup_epoch : DATA.by_setup_all;
+  return { st, eq, bs };
+}
+
+function render() {
+  const { st, eq, bs } = pick();
+  const wr = st.trades ? Math.round(st.winrate * 100) : 0;
+  let h = `<div class="tiles">
+    <div class="tile hero"><div class="v">${fmtR(st.expectancy_r || 0)}</div>
+      <div class="k">матожидание на сделку</div></div>
+    <div class="tile hero"><div class="v">${fmtR(st.total_r || 0)}</div>
+      <div class="k">итог, R</div></div>
+    <div class="tile"><div class="v">${wr}%</div><div class="k">winrate</div></div>
+    <div class="tile"><div class="v">${st.trades || 0}</div>
+      <div class="k">закрыто · открыто ${DATA.all.open ?? 0}</div></div>
+  </div>`;
+  h += `<div class="card"><h2>Эквити, R (по закрытиям)</h2>${equitySVG(eq)}`;
+  if ((st.trades || 0) < 100) h += `<div class="small-n">⚠️ выборка мала (n=${st.trades}) — цифры шумят</div>`;
+  h += `</div>`;
+  h += `<div class="card"><h2>По сетапам, Σ R</h2>${barsSVG(bs)}</div>`;
+  if (DATA.open_signals.length) {
+    h += `<div class="card"><h2>Открытые сейчас (без уровней — они по подписке)</h2><table>`;
+    for (const o of DATA.open_signals)
+      h += `<tr><td>${o.side === "LONG" ? "🟢" : "🔴"} <b>${esc(o.symbol)}</b></td>
+            <td class="r">${esc(o.tf)} · ${esc(o.setup)}</td>
+            <td class="r">${o.age_h != null ? o.age_h + "ч" : ""}</td></tr>`;
+    h += `</table></div>`;
+  }
+  h += `<div class="foot">Каждая сделка — в проверяемом журнале: /trackrecord у @rsirange_bot
+    (CSV + SHA-256, историю нельзя переписать). Минусовые периоды не скрываются.<br>
+    ⚠️ Не финансовый совет. Прошлые результаты не определяют будущие. 18+</div>`;
+  $("#app").innerHTML = h;
+  wireTip();
+}
+
+function equitySVG(eq) {
+  if (!eq || eq.length < 2) return `<div class="err">мало закрытий для кривой</div>`;
+  const W = 640, H = 240, P = {l: 34, r: 46, t: 10, b: 20};
+  const ys = eq.map(p => p.r), yMin = Math.min(0, ...ys), yMax = Math.max(0, ...ys);
+  const X = i => P.l + i * (W - P.l - P.r) / (eq.length - 1);
+  const Y = v => P.t + (yMax - v) * (H - P.t - P.b) / (yMax - yMin || 1);
+  let g = "";
+  for (let k = 0; k <= 3; k++) {
+    const v = yMin + k * (yMax - yMin) / 3, y = Y(v);
+    g += `<line x1="${P.l}" x2="${W - P.r}" y1="${y}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>
+          <text x="${P.l - 5}" y="${y + 4}" text-anchor="end" font-size="10" fill="var(--text-2)">${v.toFixed(0)}</text>`;
+  }
+  if (yMin < 0) g += `<line x1="${P.l}" x2="${W - P.r}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--zero)" stroke-width="1" stroke-dasharray="3 3"/>`;
+  const path = eq.map((p, i) => (i ? "L" : "M") + X(i).toFixed(1) + " " + Y(p.r).toFixed(1)).join("");
+  const last = eq[eq.length - 1];
+  g += `<path d="${path}" fill="none" stroke="var(--pos)" stroke-width="2" stroke-linejoin="round"/>`;
+  g += `<circle cx="${X(eq.length - 1)}" cy="${Y(last.r)}" r="3.5" fill="var(--pos)"/>
+        <text x="${X(eq.length - 1) + 7}" y="${Y(last.r) + 4}" font-size="12" font-weight="700" fill="var(--text-1)">${fmtR(last.r)}</text>`;
+  g += `<text x="${P.l}" y="${H - 4}" font-size="10" fill="var(--text-2)">${eq[0].t}</text>
+        <text x="${W - P.r}" y="${H - 4}" text-anchor="end" font-size="10" fill="var(--text-2)">${last.t}</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" id="eq" data-n="${eq.length}">${g}
+    <line id="xh" y1="${P.t}" y2="${H - P.b}" stroke="var(--zero)" stroke-width="1" opacity="0"/>
+    <rect x="${P.l}" y="${P.t}" width="${W - P.l - P.r}" height="${H - P.t - P.b}" fill="transparent"/></svg>`;
+}
+
+function barsSVG(bs) {
+  if (!bs || !bs.length) return `<div class="err">нет закрытых сделок</div>`;
+  const W = 640, rowH = 34, P = {l: 76, r: 108}, H = bs.length * rowH + 6;
+  const maxAbs = Math.max(...bs.map(b => Math.abs(b.total_r)), 0.1);
+  const hasNeg = Math.min(...bs.map(b => Math.min(0, b.total_r))) < 0;
+  const zero = P.l + (W - P.l - P.r) * (hasNeg ? 0.4 : 0.02);
+  const scale = Math.min((W - zero - P.r) / maxAbs, hasNeg ? (zero - P.l - 4) / maxAbs : 1e9);
+  let g = `<line x1="${zero}" x2="${zero}" y1="0" y2="${H}" stroke="var(--zero)" stroke-width="1"/>`;
+  bs.forEach((b, i) => {
+    const y = i * rowH + 6, w = Math.max(Math.abs(b.total_r) * scale, 2), pos = b.total_r >= 0;
+    const x = pos ? zero + 2 : zero - 2 - w;             /* 2px зазор от нулевой оси */
+    /* подпись значения — на СВОБОДНОЙ стороне ряда: у минуса справа от оси (там в
+       этом ряду пусто), у плюса за концом бара — коллизий с именами сетапов нет */
+    const lx = pos ? x + w + 6 : zero + 8, anchor = "start";
+    g += `<text x="${P.l - 8}" y="${y + 15}" text-anchor="end" font-size="12" fill="var(--text-1)">${esc(b.setup)}</text>
+      <rect x="${x}" y="${y}" width="${w}" height="20" rx="4"
+        fill="var(--${pos ? "pos" : "neg"})"/>
+      <text x="${lx}" y="${y + 15}" font-size="12" font-weight="600"
+        text-anchor="${anchor}" fill="var(--text-1)">${fmtR(b.total_r)} · ${b.trades} сд</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}">${g}</svg>`;
+}
+
+function wireTip() {
+  const svg = $("#eq"), tip = $("#tip");
+  if (!svg) return;
+  const { eq } = pick(), n = eq.length;
+  const move = ev => {
+    const r = svg.getBoundingClientRect();
+    const fx = (ev.clientX - r.left) / r.width * 640;
+    const i = Math.max(0, Math.min(n - 1, Math.round((fx - 34) / (640 - 34 - 46) * (n - 1))));
+    const xh = $("#xh"), x = 34 + i * (640 - 34 - 46) / (n - 1);
+    xh.setAttribute("x1", x); xh.setAttribute("x2", x); xh.setAttribute("opacity", ".6");
+    tip.textContent = `${eq[i].t} · ${fmtR(eq[i].r)}`;
+    tip.style.left = Math.min(ev.clientX + 10, innerWidth - 120) + "px";
+    tip.style.top = (ev.clientY - 34) + "px"; tip.style.opacity = "1";
+  };
+  svg.addEventListener("pointermove", move);
+  svg.addEventListener("pointerleave", () => { tip.style.opacity = "0"; $("#xh").setAttribute("opacity", "0"); });
+}
+
+document.querySelectorAll(".seg").forEach(el => el.onclick = () => {
+  document.querySelectorAll(".seg").forEach(x => x.classList.remove("on"));
+  el.classList.add("on"); SCOPE = el.dataset.s; render();
+});
+
+fetch("api/stats").then(r => r.json()).then(d => {
+  DATA = d;
+  if (!d.epoch) { SCOPE = "all"; $("#scope").style.display = "none"; }
+  $("#epoch-badge").textContent = d.epoch_since ? `новый код с ${d.epoch_since}` : "";
+  render();
+}).catch(() => $("#app").innerHTML = `<div class="err">Не удалось загрузить данные — попробуйте позже</div>`);
+</script>
+</body>
+</html>

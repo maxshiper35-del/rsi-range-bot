@@ -1,0 +1,19 @@
+# Mini App «Живой дашборд» (app/webapp.py) — waitress за Caddy (127.0.0.1:8091).
+# Caddy терминирует HTTPS на rDNS-имени Hetzner (авто-Let's Encrypt), см. /etc/caddy/Caddyfile.
+# Управление: systemctl status|restart rsirange-webapp. После деплоя правок webapp —
+# рестартовать ОТДЕЛЬНО от бота (scripts/deploy.sh рестартует только rsirange-bot).
+[Unit]
+Description=RSI Range Mini App dashboard (Flask/waitress)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/home/bot/rsirange
+ExecStart=/home/bot/rsirange/.venv/bin/waitress-serve --listen=127.0.0.1:8091 app.webapp:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

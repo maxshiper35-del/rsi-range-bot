@@ -4,6 +4,7 @@ numpy>=1.24
 ccxt>=4.0
 aiogram>=3.0
 Flask>=3.0
+waitress>=3.0    # прод-сервер Mini App (app/webapp.py, systemd rsirange-webapp)
 cryptography>=42.0
 python-dotenv>=1.0
 playwright>=1.40   # рендер карточки недели (app/delivery/graphics.py); после установки
