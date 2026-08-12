@@ -61,3 +61,6 @@ ssh root@135.181.32.158 systemctl show rsirange-bot -p NRestarts
   лицензией. Питон — только `.venv/bin/python`, деплой — `zsh scripts/deploy.sh`.
 - Первый `launchctl bootstrap` сразу после `bootout` может упасть с
   «Input/output error» — подождать ~3с и повторить.
+- BingX API whitelist не принимает IPv6, а Hetzner по умолчанию ходил наружу по v6 —
+  на сервере в `/etc/gai.conf` добавлена строка `precedence ::ffff:0:0/96 100`
+  (исходящие предпочитают IPv4 = 135.181.32.158, он в whitelist ключа). НЕ удалять.
