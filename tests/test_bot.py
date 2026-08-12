@@ -345,6 +345,26 @@ def test_should_alert_backup_stale():
     assert bot.should_alert_backup_stale(stale, old_alert, now_iso) is True      # троттлинг истёк
 
 
+def test_channel_cta_markup():
+    """CTA под постом канала: deep-link с атрибуцией источника; без username — None
+    (пост не должен блокироваться, если get_me не отработал)."""
+    kb = bot.channel_cta_markup("rsirange_bot", "chsig")
+    btn = kb.inline_keyboard[0][0]
+    assert btn.url == "https://t.me/rsirange_bot?start=src_chsig"
+    assert "личку" in btn.text
+    # у каждой поверхности свой src — конверсия поверхностей сравнима по /sources
+    assert bot.channel_cta_markup("rsirange_bot", "chres").inline_keyboard[0][0].url.endswith(
+        "src_chres")
+    assert bot.channel_cta_markup(None, "chsig") is None
+
+
+def test_channel_cta_runtime_toggle(fresh_db):
+    from app import runtime
+    assert runtime.channel_cta_enabled() is True       # дефолт вкл (аудит воронки 12.08)
+    runtime.set_value("channel_cta_enabled", "0")
+    assert runtime.channel_cta_enabled() is False
+
+
 def test_healthcheck_ping_deadman_switch(fresh_db, monkeypatch):
     """Dead-man's switch: пульс уходит при свежем поллере, молчит при зависшем.
 

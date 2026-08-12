@@ -350,12 +350,20 @@ def test_acquisition_breakdown_promo_not_counted_as_paid(fresh_db):
 
 
 # --- USDT через CryptoBot (мок API) ---
-def test_cryptobot_enabled_via_runtime_token(fresh_db):
+def test_cryptobot_enabled_via_runtime_token(fresh_db, monkeypatch):
     from app import runtime
+    from app.config import get_settings
     from app.delivery import payments
-    assert payments.cryptobot_enabled() is False         # ни env, ни override
-    runtime.set_value("cryptobot_token", "tok_x")        # админ ввёл из Telegram
-    assert payments.cryptobot_enabled() is True          # без .env и рестарта
+    # «ни env» тест обеспечивает сам: в дев-.env с 12.08.2026 живёт реальный токен
+    # (резерв отката прода). setenv(""), не delenv — load_dotenv вернул бы удалённую.
+    monkeypatch.setenv("CRYPTOBOT_TOKEN", "")
+    get_settings.cache_clear()
+    try:
+        assert payments.cryptobot_enabled() is False     # ни env, ни override
+        runtime.set_value("cryptobot_token", "tok_x")    # админ ввёл из Telegram
+        assert payments.cryptobot_enabled() is True      # без .env и рестарта
+    finally:
+        get_settings.cache_clear()
 
 
 def test_poll_cryptobot_adds_bonus_days(fresh_db, monkeypatch):

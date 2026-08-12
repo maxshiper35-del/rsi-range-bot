@@ -53,8 +53,9 @@ def test_effective_snapshot(fresh_db):
         assert k in eff
 
 
-def test_new_runtime_keys(fresh_db):
+def test_new_runtime_keys(fresh_db, monkeypatch):
     from app import runtime
+    from app.config import get_settings
     # cornix: дефолт выключен
     assert runtime.cornix_block_enabled() is False
     runtime.set_value("cornix_block_enabled", "1")
@@ -63,10 +64,19 @@ def test_new_runtime_keys(fresh_db):
     assert runtime.usdt_bonus_days() == 2
     runtime.set_value("usdt_bonus_days", "5")
     assert runtime.usdt_bonus_days() == 5
-    # cryptobot_token: без override и без env — пусто
-    assert runtime.cryptobot_token() == ""
-    runtime.set_value("cryptobot_token", "tok123")
-    assert runtime.cryptobot_token() == "tok123"
+    # cryptobot_token: без override и без env — пусто. Условие «без env» тест обязан
+    # обеспечить САМ: в дев-.env с 12.08.2026 лежит РЕАЛЬНЫЙ токен (резерв отката
+    # прода), и полагаться на пустоту окружения больше нельзя. setenv(""), а не delenv:
+    # load_dotenv(override=False) при пересборке настроек вернул бы УДАЛЁННУЮ переменную
+    # из .env, а существующую (пусть пустую) не трогает.
+    monkeypatch.setenv("CRYPTOBOT_TOKEN", "")
+    get_settings.cache_clear()
+    try:
+        assert runtime.cryptobot_token() == ""
+        runtime.set_value("cryptobot_token", "tok123")
+        assert runtime.cryptobot_token() == "tok123"
+    finally:
+        get_settings.cache_clear()      # не отдавать соседним тестам кэш с пустым env
     # trial_days: дефолт 5 (нет .env-фолбэка, дефолт зашит в runtime.py), override
     assert runtime.trial_days() == 5
     runtime.set_value("trial_days", "7")

@@ -102,6 +102,12 @@ def cornix_block_enabled() -> bool:
     return (_raw("cornix_block_enabled") or "0").lower() in _TRUE
 
 
+def channel_cta_enabled() -> bool:
+    """CTA-кнопка «в личку» под постами канала (bot.channel_cta_markup). Дефолт вкл:
+    аудит воронки 12.08.2026 — посты канала были тупиком без единой кнопки."""
+    return (_raw("channel_cta_enabled") or "1").lower() in _TRUE
+
+
 def min_confidence() -> float:
     return _num("min_confidence", float, 0.5)
 

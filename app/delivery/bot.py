@@ -755,6 +755,25 @@ def healthcheck_ping(url: str | None, poller_fresh_seconds: float = 2 * 3600) ->
     return True
 
 
+def channel_cta_markup(bot_username: str | None, src: str):
+    """Инлайн-CTA под постом КАНАЛА: единственная кнопка-ссылка в бота с deep-link
+    атрибуцией (/start src_<src> -> payments.set_acquisition_source, first-touch).
+
+    Зачем (аудит воронки 12.08.2026): в full-режиме посты канала не имели ни одной
+    кнопки — зритель упирался в тупик, и 17 из 18 юзеров пришли с «неизвестного»
+    источника. Кнопка = и путь в бота, и измеримость канала как источника.
+    src на каждую поверхность свой: chsig (сигнал), chres (результат/филл), chcard
+    (карточка недели) — конверсию поверхностей можно сравнивать по /sources.
+    -> InlineKeyboardMarkup | None (нет username — кнопки нет, пост не блокируем)."""
+    if not bot_username:
+        return None
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup  # ленивый импорт
+
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="⚡ Получать сигналы в личку",
+        url=f"https://t.me/{bot_username}?start=src_{src}")]])
+
+
 _TRACKRECORD_COLS = ("id", "symbol", "side", "timeframe", "entry", "stop", "tp1", "tp2", "tp3",
                     "status", "result_r", "created_at", "closed_at")
 
@@ -1206,6 +1225,15 @@ def main() -> None:
     cfg = get_settings()
     bot = Bot(token=cfg.tg_bot_token)
     dp = Dispatcher()
+    # username бота для deep-link CTA под постами канала; заполняется в _main() после
+    # get_me() — до этого кнопки просто нет (channel_cta_markup(None) -> None)
+    bot_info: dict = {"username": None}
+
+    def _channel_kb(src: str):
+        """CTA-кнопка для поста канала либо None (выключено/username ещё неизвестен)."""
+        if not runtime.channel_cta_enabled():
+            return None
+        return channel_cta_markup(bot_info["username"], src)
 
     async def _reward_referrer(tg_id: int, paid_days: float) -> None:
         """Реф-награда за РЕАЛЬНЫЙ платёж приглашённого + уведомление реферера. Best-effort:
@@ -2567,6 +2595,7 @@ def main() -> None:
     async def _send_lifecycle_post(channel, sid, text, want_chart):
         """Пост цикла сделки (филл/результат) с картой, если want_chart. Любой сбой рендера
         /биржи -> откат на чистый текст (карта не критична, пост не теряется). -> Message."""
+        kb = _channel_kb("chres")
         photo = None
         if want_chart:
             try:
@@ -2574,16 +2603,17 @@ def main() -> None:
             except Exception as e:                     # noqa: BLE001 — биржа/рендер
                 log.warning("карта поста #%s: %s", sid, e)
         if photo is None:
-            return await bot.send_message(channel, text, parse_mode="HTML")
+            return await bot.send_message(channel, text, parse_mode="HTML", reply_markup=kb)
         file = BufferedInputFile(photo, filename=f"signal_{sid}.png")
         try:
             if caption_fits(text):
-                return await bot.send_photo(channel, file, caption=text, parse_mode="HTML")
+                return await bot.send_photo(channel, file, caption=text, parse_mode="HTML",
+                                            reply_markup=kb)
             await bot.send_photo(channel, file)        # подпись не влезла — фото отдельно
         except Exception as e:                         # noqa: BLE001 — сбой ОТПРАВКИ фото
             # тоже откат на текст: раньше терялся весь пост (аудит-2 UX [10])
             log.warning("фото поста #%s: %s", sid, e)
-        return await bot.send_message(channel, text, parse_mode="HTML")
+        return await bot.send_message(channel, text, parse_mode="HTML", reply_markup=kb)
 
     def _watchlist_gate(symbol: str) -> tuple:
         # бэктест-гейт кандидата в авто-watchlist: 6 мес 1h на включённых сетапах
@@ -2671,7 +2701,8 @@ def main() -> None:
                 if photo is not None and caption_fits(ch_text):
                     msg = await bot.send_photo(
                         channel, BufferedInputFile(photo, filename=f"signal_{sid}.png"),
-                        caption=ch_text, parse_mode="HTML")
+                        caption=ch_text, parse_mode="HTML",
+                        reply_markup=_channel_kb("chsig"))
                     log.info("сигнал #%s: пост в канал OK (фото, msg_id=%s)", sid, msg.message_id)
                 else:
                     if photo is not None:               # подпись не влезла — фото отдельно
@@ -2679,7 +2710,7 @@ def main() -> None:
                             channel, BufferedInputFile(photo, filename=f"signal_{sid}.png"))
                     msg = await bot.send_message(
                         channel, ch_text, parse_mode="HTML",
-                        reply_markup=unlock_kb if ch_is_teaser else None)
+                        reply_markup=unlock_kb if ch_is_teaser else _channel_kb("chsig"))
                     log.info("сигнал #%s: пост в канал OK (msg_id=%s%s)", sid, msg.message_id,
                              ", фото отдельно" if photo is not None else "")
             except Exception as e:                     # noqa: BLE001 — канал не роняет рассылку
@@ -2974,7 +3005,8 @@ def main() -> None:
                     }
                     png_bytes = await asyncio.to_thread(graphics.render_weekly_card, card_data)
                     await bot.send_photo(
-                        channel, BufferedInputFile(png_bytes, filename="weekly_card.png"))
+                        channel, BufferedInputFile(png_bytes, filename="weekly_card.png"),
+                        reply_markup=_channel_kb("chcard"))
                 except Exception as e:                      # noqa: BLE001
                     log.warning("карточка недели: %s", e)
                 try:
@@ -3063,7 +3095,8 @@ def main() -> None:
                     log.info("сигнал #%s: пост filled OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] == "expired":
                     msg = await bot.send_message(channel, templates.render_expired(c),
-                                                 parse_mode="HTML")
+                                                 parse_mode="HTML",
+                                                 reply_markup=_channel_kb("chres"))
                     log.info("сигнал #%s: пост expired OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] in ("tp1", "tp2", "tp3", "stopped"):
                     want_chart = lifecycle_chart_wanted(
@@ -3202,6 +3235,10 @@ def main() -> None:
             await register_bot_profile(bot)
         except Exception as e:                         # noqa: BLE001 — меню не критично для работы
             log.warning("register_bot_commands: %s", e)
+        try:
+            bot_info["username"] = (await bot.get_me()).username   # для CTA-кнопок канала
+        except Exception as e:                         # noqa: BLE001 — кнопки не критичны
+            log.warning("get_me (CTA-кнопки канала будут без ссылки): %s", e)
         poller = asyncio.create_task(_poller(), name="poller")
         poller.add_done_callback(_task_died)
         # реалтайм-стрим (за флагом stream_enabled; при выключенном флаге тихо спит)
