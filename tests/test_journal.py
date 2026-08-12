@@ -778,3 +778,51 @@ def test_trail_max_hold_closes_by_timeout(fresh_db):
     ev = fresh_db.query_one(
         "SELECT event FROM signal_events WHERE signal_id=1 ORDER BY id DESC LIMIT 1")
     assert ev["event"] == "timeout"
+
+
+def test_signal_xray_closed_only(fresh_db):
+    """Рентген отдаёт анатомию ТОЛЬКО закрытых сигналов; открытые/чужие id -> None."""
+    from app import db
+    from app.brain import journal
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, reasons_json, status, result_r, created_at, "
+        "filled_at, closed_at, exit_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (42, "BTC/USDT:USDT", "SHORT", "1h", 64000, 65000, 2.26, 0.78,
+         '{"setup":"6226","scores":{"bias":0.75,"trigger":1.0,"sweep":1.0,"confl":0.55},'
+         '"swept":true,"clean_impulse":false}',
+         '["свип хая"]', "stopped", 1.42,
+         "2026-08-10T10:00:00+00:00", "2026-08-10T13:00:00+00:00",
+         "2026-08-11T03:00:00+00:00", 62100.0))
+    db.execute("INSERT INTO signal_events(signal_id, event, price, r_at_event, created_at) "
+               "VALUES (42,'trail',63000,1.1,'2026-08-10T20:00:00+00:00')")
+    db.execute("INSERT INTO signal_events(signal_id, event, price, r_at_event, created_at) "
+               "VALUES (42,'trail',62500,2.1,'2026-08-10T23:00:00+00:00')")
+    x = journal.signal_xray(42)
+    assert x["setup"] == "6226" and x["result_r"] == 1.42
+    assert x["scores"]["trigger"] == 1.0
+    assert x["wait_hours"] == 3.0 and x["hold_hours"] == 14.0
+    assert x["trail_moves"] == 2 and x["trail_peak_r"] == 2.1
+    assert x["stop_pct"] == 1.56
+    # открытый сигнал рентгену не отдаётся (уровни живой позиции не публикуем)
+    db.execute("UPDATE signals SET status='open', result_r=NULL WHERE id=42")
+    assert journal.signal_xray(42) is None
+    assert journal.signal_xray(999999) is None
+
+
+def test_signal_xray_hides_expired_candidates(fresh_db):
+    """TTL-истёкший КАНДИДАТ (semiauto, не публиковался) недоступен перебором xray-id —
+    та же граница публикации, что у export_public_trades."""
+    from app import db
+    from app.brain import journal
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, result_r, created_at, closed_at) "
+        "VALUES (77,'BTC/USDT:USDT','LONG','1h',100,90,2.0,0.7,'{}','expired',NULL,"
+        "'2026-08-01T00:00:00+00:00','2026-08-03T00:00:00+00:00')")
+    db.execute("INSERT INTO signal_events(signal_id, event, created_at) "
+               "VALUES (77,'candidate','2026-08-01T00:00:00+00:00')")
+    assert journal.signal_xray(77) is None              # кандидат без confirm — скрыт
+    db.execute("INSERT INTO signal_events(signal_id, event, created_at) "
+               "VALUES (77,'confirmed','2026-08-01T01:00:00+00:00')")
+    assert journal.signal_xray(77) is not None          # подтверждённый — публичен

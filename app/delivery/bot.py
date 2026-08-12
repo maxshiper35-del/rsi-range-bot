@@ -546,6 +546,49 @@ _UNLOCK_DENIALS = {
 MILESTONES = (10, 25, 50, 100, 250, 500, 1000)
 
 
+def parse_alert_args(text: str) -> tuple | None:
+    """'/alert BTC 65000' -> ('BTC', 65000.0); '/alert' -> ('list',); None — формат неверный.
+    Резолв тикера в unified-символ — в хэндлере (нужен живой вотчлист из runtime)."""
+    import math
+    parts = (text or "").split()
+    if len(parts) == 1:
+        return ("list",)
+    if len(parts) != 3:
+        return None
+    try:
+        price = float(parts[2].replace(",", "."))
+    except ValueError:
+        return None
+    # isfinite: '/alert BTC inf|nan' проходил float() и вешал мёртвый алерт в слоте лимита
+    if not math.isfinite(price) or not (0 < price <= 1e9):
+        return None
+    return (parts[1], price)
+
+
+def parse_depo_args(text: str) -> tuple | None:
+    """'/depo 500 1.5' -> (500.0, 1.5); '/depo 500' -> (500.0, 1.0); '/depo off' -> ('off',);
+    '/depo' -> ('show',); None — формат/диапазон неверный. Риск капится 5%: сайзинг от
+    риска теряет смысл, когда «риск на сделку» превращается в «депозит за три стопа»."""
+    parts = (text or "").split()
+    if len(parts) == 1:
+        return ("show",)
+    if len(parts) == 2 and parts[1].lower() in ("off", "выкл", "-"):
+        return ("off",)
+    import math
+    try:
+        depo = float(parts[1].replace(",", "."))
+        risk = float(parts[2].replace(",", ".")) if len(parts) > 2 else 1.0
+    except (ValueError, IndexError):
+        return None
+    # isfinite: '/depo inf' давал «объём inf ≈ $inf, плечо ×nan» без предупреждения
+    # (nan > max_leverage == False — гейт плеча молча пропускал)
+    if not (math.isfinite(depo) and math.isfinite(risk)):
+        return None
+    if not (0 < depo <= 1e9 and 0 < risk <= 5):
+        return None
+    return (depo, risk)
+
+
 def parse_vipchannel_args(text: str) -> tuple | None:
     """'/vipchannel @rsi_range_vip 300' -> ('@rsi_range_vip', 300); None если формат неверный
     или цена вне диапазона Telegram (1-10000 Stars — createChatSubscriptionInviteLink)."""
@@ -774,6 +817,22 @@ def channel_cta_markup(bot_username: str | None, src: str):
         url=f"https://t.me/{bot_username}?start=src_{src}")]])
 
 
+def xray_channel_markup(bot_username: str | None, sid: int):
+    """Кнопки под постом РЕЗУЛЬТАТА в канале: «Рентген сделки» (deep-link xray_<sid> ->
+    анатомия в личке: суб-скоры, путь трейлинга) + стандартный CTA. Рентген — двойной
+    агент: уникальный трест-артефакт И вход в воронку (юзер попадает в бота)."""
+    if not bot_username:
+        return None
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup  # ленивый импорт
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔬 Рентген сделки — почему вход и как вели",
+                              url=f"https://t.me/{bot_username}?start=xray_{sid}")],
+        [InlineKeyboardButton(text="⚡ Получать сигналы в личку",
+                              url=f"https://t.me/{bot_username}?start=src_chres")],
+    ])
+
+
 _TRACKRECORD_COLS = ("id", "symbol", "side", "timeframe", "entry", "stop", "tp1", "tp2", "tp3",
                     "status", "result_r", "created_at", "closed_at")
 
@@ -891,6 +950,8 @@ USER_COMMANDS = [
     ("subscribe", "подписка — все сигналы"),
     ("promo", "применить промокод: /promo <код>"),
     ("referral", "пригласить друга и получить дни подписки"),
+    ("depo", "твой объём в каждом сигнале: /depo <депозит$> [риск%]"),
+    ("alert", "бесплатный прайс-алерт: /alert BTC 65000"),
     ("notify", "уведомления: мьют и тихие часы"),
     ("cancel", "отменить текущий пошаговый ввод"),
     ("about", "как устроен сервис, честный дисклеймер"),
@@ -1341,6 +1402,19 @@ def main() -> None:
         elif arg.startswith("ref_") and arg[4:].isdecimal():  # isdecimal: '²³' роняют int()
             await asyncio.to_thread(payments.set_referrer, m.from_user.id, int(arg[4:]))
             await asyncio.to_thread(payments.set_acquisition_source, m.from_user.id, "referral")
+        elif arg.startswith("xray_") and arg[5:].isdecimal():
+            # «Рентген сделки» из канала: показать анатомию ЗАКРЫТОГО сигнала и НЕ
+            # вываливать следом весь онбординг — юзер пришёл за конкретной вещью.
+            # Атрибуция first-touch: рентген = самостоятельная поверхность воронки.
+            await asyncio.to_thread(payments.set_acquisition_source, m.from_user.id, "xray")
+            x = await asyncio.to_thread(journal.signal_xray, int(arg[5:]))
+            if x is not None:
+                await m.answer(templates.render_xray(x), parse_mode="HTML",
+                               reply_markup=_main_menu_kb(m.from_user.id in cfg.admin_ids))
+                return
+            await m.answer("Сделка ещё открыта или не найдена — рентген доступен "
+                           "после закрытия. Пока: /stats")
+            return
         trial_days = runtime.trial_days()
         applied = await asyncio.to_thread(payments.grant_trial, m.from_user.id, trial_days)
         text = (
@@ -1437,6 +1511,84 @@ def main() -> None:
                 else f"🌙 Тихие часы {_QUIET_PRESET[0]:02d}–{_QUIET_PRESET[1]:02d} UTC",
                 callback_data="notif_quiet")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @dp.message(Command("alert"))
+    async def _alert(m):
+        from app.delivery import alerts
+        await asyncio.to_thread(payments.register_user, m.from_user.id, m.from_user.username)
+        parsed = parse_alert_args(m.text)
+        watchlist = runtime.symbols()
+        names = ", ".join(sorted(alerts.base_of(s) for s in watchlist))
+        if parsed is None:
+            await m.answer(f"Формат: <code>/alert BTC 65000</code> — пинг, когда цена "
+                           f"коснётся уровня.\nДоступны сейчас: {templates.esc(names)}",
+                           parse_mode="HTML")
+            return
+        if parsed[0] == "list":
+            act = await asyncio.to_thread(alerts.active_alerts, m.from_user.id)
+            if not act:
+                await m.answer(f"Алертов нет. <code>/alert BTC 65000</code> — поставить.\n"
+                               f"Доступны сейчас: {templates.esc(names)}", parse_mode="HTML")
+                return
+            rows_txt = "\n".join(
+                f" • #{a['id']} {alerts.base_of(a['symbol'])} @ {templates._price(a['price'])}"
+                f"  (снять: /delalert_{a['id']})" for a in act)
+            await m.answer(f"⏰ Твои алерты:\n{rows_txt}\n\nОдин алерт срабатывает один раз.",
+                           parse_mode="HTML")
+            return
+        token, price = parsed
+        symbol = alerts.resolve_symbol(token, watchlist)
+        if symbol is None:
+            await m.answer(f"Не слежу за «{templates.esc(token)}». Доступны сейчас: "
+                           f"{templates.esc(names)}\n(список меняется с ротацией вотчлиста)",
+                           parse_mode="HTML")
+            return
+        res = await asyncio.to_thread(alerts.create_alert, m.from_user.id, symbol, price)
+        if not res["ok"]:
+            await m.answer(f"Лимит {alerts.MAX_ACTIVE_PER_USER} активных алертов — "
+                           "сними лишние: /alert")
+            return
+        await m.answer(f"⏰ Готово: пингую, когда {alerts.base_of(symbol)} коснётся "
+                       f"<code>{templates._price(price)}</code>. Сработает один раз.\n"
+                       "Слежу, пока монета в нашем вотчлисте (он ротируется — актуальный "
+                       "список: /alert).", parse_mode="HTML")
+
+    @dp.message(F.text.regexp(r"^/delalert[_ ](\d+)$"))
+    async def _delalert(m):
+        from app.delivery import alerts
+        aid = int(re.search(r"(\d+)$", m.text).group(1))
+        ok = await asyncio.to_thread(alerts.delete_alert, m.from_user.id, aid)
+        await m.answer("Снят." if ok else "Не нашёл такой алерт (или он уже сработал).")
+
+    @dp.message(Command("depo"))
+    async def _depo(m):
+        parsed = parse_depo_args(m.text)
+        if parsed is None:
+            await m.answer("Формат: <code>/depo 500 1</code> — депозит $500, риск 1% "
+                           "на сделку (риск не выше 5%). Выключить: <code>/depo off</code>",
+                           parse_mode="HTML")
+            return
+        if parsed[0] == "off":
+            await asyncio.to_thread(payments.set_depo, m.from_user.id, None, None)
+            await m.answer("💼 Персональный объём выключен — сигналы снова без расчёта.")
+            return
+        if parsed[0] == "show":
+            cur = await asyncio.to_thread(payments.depo_prefs, m.from_user.id)
+            if cur is None:
+                await m.answer("Персональный объём не настроен.\n"
+                               "<code>/depo 500 1</code> — и каждый полный сигнал будет "
+                               "приходить с твоим размером позиции (риск 1% от $500).",
+                               parse_mode="HTML")
+            else:
+                await m.answer(f"💼 Настроено: депозит ${cur[0]:g}, риск {cur[1]:g}% "
+                               f"на сделку.\nИзменить: <code>/depo 800 1.5</code>, "
+                               f"выключить: <code>/depo off</code>", parse_mode="HTML")
+            return
+        depo, risk = parsed
+        await asyncio.to_thread(payments.set_depo, m.from_user.id, depo, risk)
+        await m.answer(f"💼 Готово: депозит ${depo:g}, риск {risk:g}% (${depo * risk / 100:.2f} "
+                       f"на сделку).\nТеперь каждый полный сигнал придёт с твоим объёмом "
+                       f"позиции. Выключить: /depo off")
 
     @dp.message(Command("notify"))
     async def _notify(m):
@@ -1571,9 +1723,17 @@ def main() -> None:
 
     @dp.purchased_paid_media()
     async def _paid_media_bought(p):
-        # учёт: Stars зачисляются на баланс бота платформой; здесь — только след в логе
+        # учёт: Stars зачисляются на баланс бота платформой; здесь — след в логе +
+        # перепометка доставки: купленный сигнал не должен попадать в «что ты упустил»
         log.info("unlock куплен: юзер %s, payload=%s",
                  p.from_user.id, p.paid_media_payload)
+        try:
+            parts = (p.paid_media_payload or "").split(":")
+            if len(parts) >= 2 and parts[0] == "unlock" and parts[1].isdigit():
+                await asyncio.to_thread(payments.mark_delivery_unlocked,
+                                        p.from_user.id, int(parts[1]))
+        except Exception as e:                          # noqa: BLE001 — учёт не критичен
+            log.warning("mark_delivery_unlocked: %s", e)
 
     def _signal_actions_kb(sid: int) -> InlineKeyboardMarkup:
         """Инлайн-панель под полным DM-сигналом: быстрый график и расчёт риска без набора команд."""
@@ -2592,10 +2752,12 @@ def main() -> None:
             return None
         return _signal_chart_png(journal.row_to_signal(row), sid)
 
-    async def _send_lifecycle_post(channel, sid, text, want_chart):
+    async def _send_lifecycle_post(channel, sid, text, want_chart, kb=None):
         """Пост цикла сделки (филл/результат) с картой, если want_chart. Любой сбой рендера
-        /биржи -> откат на чистый текст (карта не критична, пост не теряется). -> Message."""
-        kb = _channel_kb("chres")
+        /биржи -> откат на чистый текст (карта не критична, пост не теряется). -> Message.
+        kb — переопределение клавиатуры (результат несёт «Рентген», филл — только CTA)."""
+        if kb is None:
+            kb = _channel_kb("chres")
         photo = None
         if want_chart:
             try:
@@ -2727,9 +2889,19 @@ def main() -> None:
                 continue
             # под полным сигналом — инлайн-панель (график/риск); под тизером — кнопка разблокировки
             markup = _signal_actions_kb(sid) if kind == "full" else unlock_kb
+            text = full if kind == "full" else teaser
+            if kind == "full":
+                # персональный объём (/depo): строка ТОЛЬКО в полной версии — по тизеру
+                # без уровней размер позиции не посчитать. Сбой расчёта не роняет доставку.
+                try:
+                    prefs = await asyncio.to_thread(payments.depo_prefs, uid)
+                    if prefs is not None:
+                        text = text + templates.personal_size_line(
+                            sig, prefs[0], prefs[1], cfg.max_leverage)
+                except Exception as e:                 # noqa: BLE001
+                    log.warning("depo-строка %s: %s", uid, e)
             try:
-                await bot.send_message(uid, full if kind == "full" else teaser,
-                                       parse_mode="HTML", reply_markup=markup)
+                await bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
                 await asyncio.to_thread(payments.record_delivery, uid, sid, kind)
                 sent += 1
             except Exception as e:                     # noqa: BLE001 — один получатель не роняет рассылку
@@ -3033,6 +3205,14 @@ def main() -> None:
         if should_post_weekly(runtime.weekly_digest_last_week(), d_week_key):
             await asyncio.to_thread(runtime.set_weekly_digest_last_week, d_week_key)
             try:
+                # заодно раз в неделю чистим давно сработавшие прайс-алерты
+                from app.delivery import alerts as alerts_mod
+                purged = await asyncio.to_thread(alerts_mod.purge_old_triggered)
+                if purged:
+                    log.info("прайс-алерты: вычищено %d старых сработавших", purged)
+            except Exception as e:                          # noqa: BLE001
+                log.warning("purge алертов: %s", e)
+            try:
                 d_start, d_end = weekly_report_period(d_now)
                 d_wk = await asyncio.to_thread(
                     journal.stats_for_period, d_start.isoformat(), d_end.isoformat())
@@ -3040,16 +3220,61 @@ def main() -> None:
                 d_label = (f"{d_start.strftime('%d.%m')}"
                            f"–{(d_end - timedelta(days=1)).strftime('%d.%m')}")
                 d_text = templates.render_weekly_digest(d_label, d_wk, d_st)
-                sent = 0
-                for uid in await asyncio.to_thread(payments.active_subscriber_ids):
-                    try:
-                        await bot.send_message(uid, d_text, parse_mode="HTML")
-                        sent += 1
-                    except Exception as e:                  # noqa: BLE001 — заблокировал бота
-                        log.warning("дайджест -> %s: %s", uid, e)
-                log.info("недельный дайджест разослан: %d подписчикам", sent)
+                # рассылка — ОТДЕЛЬНОЙ таской: она растёт с аудиторией, а внутри
+                # _maintenance блокировала бы 60с-цикл (пульс dead-man's switch, watchdog
+                # поллера, активацию оплат) на минуты (ревью 12.08). Маркер недели уже
+                # стоит — повторный вход в _maintenance рассылку не продублирует.
+                asyncio.create_task(_send_digests(
+                    d_text, d_label, d_wk, d_st,
+                    d_start.isoformat(), d_end.isoformat()))
             except Exception as e:                          # noqa: BLE001
                 log.warning("недельный дайджест: %s", e)
+
+    async def _send_digests(d_text, d_label, d_wk, d_st, start_iso, end_iso):
+        """Рассылка недельного дайджеста ВНЕ maintenance-цикла (create_task).
+
+        Подписчикам — общий текст; free-юзерам — с блоком «что ты упустил»
+        (payments.missed_teaser_r). Мьют (/notify) уважается: непрошеный маркетинговый
+        пуш замьютившему = прямой путь к блокировке бота. Мёртвые получатели
+        списываются mark_blocked — не молотить по ним каждую неделю."""
+        def _dead(e: Exception) -> bool:
+            low_ = str(e).lower()
+            return "blocked" in low_ or "chat not found" in low_ or "deactivated" in low_
+
+        async def _muted(uid: int) -> bool:
+            prefs = await asyncio.to_thread(payments.notify_prefs, uid)
+            return bool(prefs.get("muted"))
+
+        sent = f_sent = 0
+        try:
+            for uid in await asyncio.to_thread(payments.active_subscriber_ids):
+                try:
+                    if await _muted(uid):
+                        continue
+                    await bot.send_message(uid, d_text, parse_mode="HTML")
+                    sent += 1
+                except Exception as e:                  # noqa: BLE001
+                    log.warning("дайджест -> %s: %s", uid, e)
+                    if _dead(e):
+                        await asyncio.to_thread(payments.mark_blocked, uid)
+            # тизерных закрытий не было — блок молча отсутствует, дайджест уходит всё равно
+            for uid in await asyncio.to_thread(payments.free_active_ids):
+                try:
+                    if await _muted(uid):
+                        continue
+                    missed = await asyncio.to_thread(
+                        payments.missed_teaser_r, uid, start_iso, end_iso)
+                    await bot.send_message(
+                        uid, templates.render_weekly_digest(d_label, d_wk, d_st, missed),
+                        parse_mode="HTML")
+                    f_sent += 1
+                except Exception as e:                  # noqa: BLE001
+                    log.warning("дайджест(free) -> %s: %s", uid, e)
+                    if _dead(e):
+                        await asyncio.to_thread(payments.mark_blocked, uid)
+            log.info("недельный дайджест разослан: %d подписчикам + %d free", sent, f_sent)
+        except Exception as e:                          # noqa: BLE001 — таска не роняет процесс
+            log.warning("рассылка дайджеста: %s", e)
 
     async def _on_close(closed):
         # мягкое уведомление АДМИНУ (не в канал): серия стопов подряд на ВКЛЮЧЁННОМ сетапе —
@@ -3101,11 +3326,14 @@ def main() -> None:
                 elif c["status"] in ("tp1", "tp2", "tp3", "stopped"):
                     want_chart = lifecycle_chart_wanted(
                         runtime.lifecycle_chart_enabled(), runtime.channel_mode())
+                    # под результатом — «Рентген сделки» (анатомия по deep-link) + CTA
+                    xray_kb = (xray_channel_markup(bot_info["username"], c["id"])
+                               if runtime.channel_cta_enabled() else None)
                     msg = await _send_lifecycle_post(
                         channel, c["id"],
                         templates.render_result(c, runtime.display_leverage(),
                                                 streak=journal.recent_streak(10)),
-                        want_chart)
+                        want_chart, kb=xray_kb)
                     log.info("сигнал #%s: пост result(%s) OK (msg_id=%s)",
                              c["id"], c["status"], msg.message_id)
             except Exception as e:                     # noqa: BLE001
@@ -3141,14 +3369,56 @@ def main() -> None:
                 log.exception("не удалось отправить алерт об ошибке хендлера админу %s", admin_id)
         return True
 
-    async def _on_intrabar(symbol_ws: str, high: float, low: float):
+    # последняя цена по символу (WS) — кроссинг-окно прайс-алертов между тиками
+    _last_price: dict[str, float] = {}
+
+    async def _push_alerts(fired: list) -> None:
+        """Пуши сработавших алертов ВНЕ горячего цикла стрима (create_task): send_message
+        с его RTT и ретраями не должен тормозить детект реалтайм-филлов и ping WS.
+        Транзиентный сбой (не блокировка) перевзводит алерт — «one-shot пинг» это
+        обещание доставить один раз, а не сжечь молча (ревью 12.08: at-most-once)."""
+        from app.delivery import alerts as alerts_mod
+        for a in fired:
+            try:
+                await bot.send_message(
+                    a["tg_id"],
+                    f"⏰ <b>{alerts_mod.base_of(a['symbol'])} коснулся "
+                    f"{templates._price(a['price'])}</b>\nАлерт сработал и снят. "
+                    "Новый: /alert · сигналы по этой монете: /subscribe",
+                    parse_mode="HTML")
+            except Exception as e:                     # noqa: BLE001
+                low_ = str(e).lower()
+                if "blocked" in low_ or "chat not found" in low_ or "deactivated" in low_:
+                    log.warning("alert push %s: юзер недоступен", a["tg_id"])
+                else:
+                    await asyncio.to_thread(alerts_mod.rearm, a["id"])
+                    log.warning("alert push %s: %s — алерт перевзведён", a["tg_id"], e)
+
+    async def _on_intrabar(symbol_ws: str, high: float, low: float, close: float):
         # реалтайм-филл: касание entry внутри бара -> мгновенный «вход исполнен».
         # Гонку с bar-скорингом решает атомарный try_mark_filled; официальный исход
         # сделки по-прежнему считает ТОЛЬКО bar-скоринг (контракт трек-рекорда).
         from app.data.stream import entry_touched, ws_symbol
+        from app.delivery import alerts as alerts_mod
         for symbol in runtime.symbols():
             if ws_symbol(symbol) != symbol_ws:
                 continue
+            # прайс-алерты (/alert): триггер по КРОССИНГУ уровня последней ценой между
+            # тиками, НЕ по экстремумам бара — high/low включают движение ДО постановки
+            # алерта, и алерт «на уровень, где бар уже был» стрелял бы мгновенно и ложно
+            # (ревью 12.08). Цена первого тика после старта — только сид, без выстрела.
+            # Отправка — отдельной таской, горячий цикл стрима не ждёт Telegram.
+            try:
+                prev = _last_price.get(symbol_ws)
+                _last_price[symbol_ws] = close
+                if prev is not None and prev != close:
+                    fired = await asyncio.to_thread(
+                        alerts_mod.check_and_trigger, symbol,
+                        max(prev, close), min(prev, close))
+                    if fired:
+                        asyncio.create_task(_push_alerts(fired))
+            except Exception as e:                     # noqa: BLE001
+                log.warning("alerts %s: %s", symbol, e)
             rows = await asyncio.to_thread(journal.unfilled_open_signals, symbol)
             for row in rows:
                 if not entry_touched(row["entry"], high, low):

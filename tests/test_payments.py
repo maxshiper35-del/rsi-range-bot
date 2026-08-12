@@ -780,3 +780,53 @@ def test_mark_refunded_inside_transaction(fresh_db):
     from datetime import datetime, timezone
     until = datetime.fromisoformat(payments.get_user(990)["paid_until"])
     assert abs((until - datetime.now(timezone.utc)).total_seconds()) < 120
+
+
+def test_depo_prefs_roundtrip(fresh_db):
+    from app.delivery import payments
+    assert payments.depo_prefs(111) is None              # неизвестный юзер
+    payments.set_depo(111, 500.0, 1.5)
+    assert payments.depo_prefs(111) == (500.0, 1.5)
+    payments.set_depo(111, None, None)                   # /depo off
+    assert payments.depo_prefs(111) is None
+
+
+def test_missed_teaser_r_counts_only_teasers_closed_in_window(fresh_db):
+    """«Что ты упустил»: только тизерные доставки юзера × закрытия в окне недели;
+    полные доставки и чужие сигналы не считаются; знак минусовой недели не прячется."""
+    from app import db
+    from app.delivery import payments
+    payments.register_user(50)
+
+    def mk_signal(sid, r, closed):
+        db.execute(
+            "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+            "confidence, snapshot_json, status, result_r, created_at, closed_at) "
+            "VALUES (?, 'BTC/USDT:USDT', 'LONG', '1h', 100, 90, 2.0, 0.7, '{}', "
+            "'stopped', ?, ?, ?)",
+            (sid, r, f"2026-08-01T0{sid}:00:00+00:00", closed))   # uniq created_at на бар
+
+    mk_signal(1, 2.26, "2026-08-05T10:00:00+00:00")   # тизер, закрыт в окне -> считается
+    mk_signal(2, -1.0, "2026-08-06T10:00:00+00:00")   # тизер, в окне -> минус честно
+    mk_signal(3, 3.0, "2026-08-20T10:00:00+00:00")    # тизер, закрыт ПОСЛЕ окна -> нет
+    mk_signal(4, 5.0, "2026-08-05T12:00:00+00:00")    # доставлен ПОЛНЫМ -> нет
+    payments.record_delivery(50, 1, "teaser")
+    payments.record_delivery(50, 2, "teaser")
+    payments.record_delivery(50, 3, "teaser")
+    payments.record_delivery(50, 4, "full")
+    res = payments.missed_teaser_r(50, "2026-08-03T00:00:00+00:00",
+                                   "2026-08-10T00:00:00+00:00")
+    assert res == {"n": 2, "total_r": 1.26}
+    assert payments.missed_teaser_r(999, "2026-08-03T00:00:00+00:00",
+                                    "2026-08-10T00:00:00+00:00") == {"n": 0, "total_r": 0.0}
+
+
+def test_free_active_ids_includes_lapsed_paid(fresh_db):
+    from app import db
+    from app.delivery import payments
+    payments.register_user(60)                                    # free
+    payments.grant_subscription(61, "stars", 1, "XTR", 30, "c6")  # активный paid -> НЕ в списке
+    payments.grant_subscription(62, "stars", 1, "XTR", 30, "c7")  # истёкший paid -> в списке
+    db.execute("UPDATE users SET paid_until='2020-01-01T00:00:00+00:00' WHERE tg_id=62")
+    ids = set(payments.free_active_ids())
+    assert 60 in ids and 62 in ids and 61 not in ids

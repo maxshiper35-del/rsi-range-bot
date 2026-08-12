@@ -822,3 +822,63 @@ def consecutive_losses(setup: str, n: int = 5) -> int:
         else:
             break
     return streak
+
+
+def signal_xray(sid: int) -> dict | None:
+    """«Рентген сделки» — анатомия ЗАКРЫТОГО сигнала для deep-link /start xray_<sid>.
+
+    Всё из БД, без походов на биржу (мгновенный ответ по клику из канала):
+    строка сигнала + суб-скоры confidence из снапшота (пишутся с 11.08.2026, у старых
+    сигналов их нет — рендер обязан это переживать) + путь трейлинга из signal_events
+    (счётчик подтяжек и максимум зафиксированного R). Открытые/кандидаты -> None:
+    рентген публикует уровни и механику, до закрытия это не для публики.
+    """
+    row = db.query_one("SELECT * FROM signals WHERE id=?", (sid,))
+    if row is None or row["status"] not in ("tp1", "tp2", "tp3", "stopped", "expired"):
+        return None
+    if row["status"] == "expired":
+        # тот же фильтр, что у export_public_trades: TTL-истёкший КАНДИДАТ (semiauto,
+        # видел только оператор) никогда не публиковался — deep-link перебором id не
+        # должен доставать приватную когорту, которой нет в публичном трек-рекорде
+        was_candidate = db.query_one(
+            "SELECT 1 AS x FROM signal_events WHERE signal_id=? AND event='candidate'", (sid,))
+        confirmed = db.query_one(
+            "SELECT 1 AS x FROM signal_events WHERE signal_id=? AND event='confirmed'", (sid,))
+        if was_candidate and not confirmed:
+            return None
+    try:
+        snapshot = json.loads(row["snapshot_json"] or "{}")
+    except (ValueError, TypeError):
+        snapshot = {}
+    try:
+        reasons = json.loads(row["reasons_json"] or "[]")
+    except (ValueError, TypeError):
+        reasons = []
+    trail = db.query("SELECT price, r_at_event FROM signal_events "
+                     "WHERE signal_id=? AND event='trail' ORDER BY id", (sid,))
+
+    def _hours(a: str | None, b: str | None) -> float | None:
+        if not a or not b:
+            return None
+        from datetime import datetime
+        return round((datetime.fromisoformat(b) - datetime.fromisoformat(a))
+                     .total_seconds() / 3600, 1)
+
+    entry, stop = float(row["entry"]), float(row["stop"])
+    return {
+        "id": row["id"], "symbol": row["symbol"], "side": row["side"],
+        "timeframe": row["timeframe"], "status": row["status"],
+        "setup": snapshot.get("setup", "?"),
+        "entry": entry, "stop": stop, "exit_price": row["exit_price"],
+        "result_r": row["result_r"], "confidence": row["confidence"],
+        "stop_pct": round(abs(entry - stop) / entry * 100, 2) if entry else None,
+        "scores": snapshot.get("scores"),           # None у сигналов до 11.08.2026
+        "swept": snapshot.get("swept"),
+        "clean_impulse": snapshot.get("clean_impulse"),
+        "reasons": reasons,
+        "wait_hours": _hours(row["created_at"], row["filled_at"]),
+        "hold_hours": _hours(row["filled_at"], row["closed_at"]),
+        "trail_moves": len(trail),
+        "trail_peak_r": max((float(t["r_at_event"]) for t in trail
+                             if t["r_at_event"] is not None), default=None),
+    }

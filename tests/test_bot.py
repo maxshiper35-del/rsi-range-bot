@@ -906,3 +906,95 @@ def test_format_admin_status_cooldown_line(fresh_db):
     txt = bot.format_admin_status(eff, users, {"LONG": 2, "SHORT": 1},
                                   cooldowns={"LONG": 4})
     assert "⛔ Тормоз стороны: LONG (4 стопов)" in txt
+
+
+def test_parse_depo_args():
+    assert bot.parse_depo_args("/depo 500 1.5") == (500.0, 1.5)
+    assert bot.parse_depo_args("/depo 500") == (500.0, 1.0)      # риск по умолчанию 1%
+    assert bot.parse_depo_args("/depo 500,5 2") == (500.5, 2.0)  # запятая как в РФ-локали
+    assert bot.parse_depo_args("/depo off") == ("off",)
+    assert bot.parse_depo_args("/depo") == ("show",)
+    assert bot.parse_depo_args("/depo -5 1") is None             # депозит > 0
+    assert bot.parse_depo_args("/depo 500 9") is None            # риск капится 5%
+    assert bot.parse_depo_args("/depo abc") is None
+    assert bot.parse_depo_args("/depo inf") is None          # isfinite: «плечо ×nan»
+    assert bot.parse_depo_args("/depo 500 nan") is None
+
+
+def test_personal_size_line_in_dm():
+    """Строка объёма: количество/нотионал/риск от calculate_position; тизеру не положена
+    (проверяется в _broadcast только для kind=full — здесь контракт шаблона)."""
+    from types import SimpleNamespace
+
+    from app.delivery import templates
+    s = SimpleNamespace(symbol="ETH/USDT:USDT", entry=2000.0, stop=1900.0)
+    line = templates.personal_size_line(s, 1000.0, 1.0)
+    assert "0.1 ETH" in line and "риск $10" in line and "/depo" in line
+    # мелкий альт: количество полной записью, не экспонентой ({:g} давал бы 2.5e+07)
+    pepe = SimpleNamespace(symbol="1000PEPE/USDT:USDT", entry=0.0000125, stop=0.0000121)
+    small = templates.personal_size_line(pepe, 1000.0, 1.0)
+    assert "e" not in small.split("1000PEPE")[0].split("объём:</b>")[1].lower()
+    # плечо выше лимита -> предупреждение вместо объёма (не подталкивать к пересиживанию)
+    t2 = SimpleNamespace(symbol="ETH/USDT:USDT", entry=2000.0, stop=1999.0)
+    warn = templates.personal_size_line(t2, 100.0, 5.0, max_leverage=20)
+    assert "⚠️" in warn and ("плечо" in warn.lower())
+
+
+def test_weekly_digest_missed_block():
+    from app.delivery import templates
+    wk = {"trades": 5, "wins": 2, "losses": 3, "winrate": 0.4, "total_r": 1.2}
+    st = {"open": 3, "trades": 100, "expectancy_r": 0.2, "total_r": 20.0}
+    plain = templates.render_weekly_digest("04.08–10.08", wk, st)
+    assert "упустил" not in plain and "тизерами" not in plain     # подписчику блока нет
+    with_missed = templates.render_weekly_digest("04.08–10.08", wk, st,
+                                                 {"n": 3, "total_r": 4.2})
+    assert "3" in with_missed and "+4.2R" in with_missed and "/subscribe" in with_missed
+    # минусовая неделя не прячется (честность > конверсия)
+    neg = templates.render_weekly_digest("04.08–10.08", wk, st, {"n": 2, "total_r": -1.5})
+    assert "-1.5R" in neg
+    # нет тизерных закрытий -> блока нет
+    empty = templates.render_weekly_digest("04.08–10.08", wk, st, {"n": 0, "total_r": 0.0})
+    assert "тизерами" not in empty
+
+
+def test_xray_channel_markup():
+    kb = bot.xray_channel_markup("rsirange_bot", 315)
+    urls = [b.url for row in kb.inline_keyboard for b in row]
+    assert "https://t.me/rsirange_bot?start=xray_315" in urls[0]
+    assert urls[1].endswith("src_chres")
+    assert bot.xray_channel_markup(None, 315) is None
+
+
+def test_render_xray_without_scores_survives():
+    """Сигналы до 11.08.2026 не имеют суб-скоров — рендер обязан работать и без них."""
+    from app.delivery import templates
+    x = {"id": 7, "symbol": "ETH/USDT:USDT", "side": "LONG", "timeframe": "4h",
+         "status": "expired", "setup": "LTF-BB", "entry": 2000.0, "stop": 1900.0,
+         "exit_price": None, "result_r": None, "confidence": 0.61, "stop_pct": 5.0,
+         "scores": None, "swept": False, "clean_impulse": False, "reasons": [],
+         "wait_hours": None, "hold_hours": None, "trail_moves": 0, "trail_peak_r": None}
+    txt = templates.render_xray(x)
+    assert "не исполнился" in txt and "до 11.08.2026" in txt
+
+
+def test_parse_alert_args():
+    assert bot.parse_alert_args("/alert BTC 65000") == ("BTC", 65000.0)
+    assert bot.parse_alert_args("/alert btc 64999,5") == ("btc", 64999.5)
+    assert bot.parse_alert_args("/alert") == ("list",)
+    assert bot.parse_alert_args("/alert BTC") is None
+    assert bot.parse_alert_args("/alert BTC ноль") is None
+    assert bot.parse_alert_args("/alert BTC -5") is None
+    assert bot.parse_alert_args("/alert BTC inf") is None    # isfinite-гейт
+    assert bot.parse_alert_args("/alert BTC nan") is None
+
+
+def test_render_result_trailing_exit_header():
+    """Прибыльный «стоп» = выход по подтянутому трейлингу — заголовок не должен пугать
+    (живой вопрос владельца по #315: «как может быть стоп и +2.60R?»)."""
+    from app.delivery import templates
+    base = {"id": 315, "symbol": "BEAT/USDT:USDT", "side": "SHORT", "timeframe": "1h",
+            "entry": 1.2665, "price_move_pct": 27.38}
+    win = templates.render_result({**base, "status": "stopped", "result_r": 2.6})
+    assert "трейлинг-выход" in win and "✅" in win and "🛑" not in win
+    loss = templates.render_result({**base, "status": "stopped", "result_r": -1.0})
+    assert "стоп" in loss and "🛑" in loss and "трейлинг-выход" not in loss

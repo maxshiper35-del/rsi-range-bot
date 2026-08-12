@@ -216,19 +216,32 @@ def render_referral_invite(link: str, ref: dict, reward_days: int) -> str:
     )
 
 
-def render_weekly_digest(period_label: str, wk: dict, st: dict) -> str:
-    """Недельный личный дайджест подписчику: итоги ЭТОЙ недели (stats_for_period) + всё время.
+def render_weekly_digest(period_label: str, wk: dict, st: dict,
+                         missed: dict | None = None) -> str:
+    """Недельный личный дайджест: итоги ЭТОЙ недели (stats_for_period) + всё время.
 
     Личное касание-ретеншн, дублирует канальную карточку текстом. Только факты по журналу,
-    без обещаний. wk — journal.stats_for_period, st — journal.stats."""
+    без обещаний. wk — journal.stats_for_period, st — journal.stats.
+    missed (только free-юзерам, payments.missed_teaser_r) — блок «что ты упустил»:
+    итог полной версии сигналов, которые юзер видел тизерами. Знак ЧЕСТНЫЙ — минусовая
+    неделя показывается минусом; блока нет, если тизерных закрытий не было."""
     wr = wk.get("winrate", 0) * 100
+    missed_block = ""
+    if missed and missed.get("n"):
+        missed_block = (
+            f"{LINE}\n"
+            f"🔒 Ты видел <b>{missed['n']}</b> "
+            f"сигнал(ов) этой недели тизерами.\n"
+            f"Их итог в полной версии: <b>{missed['total_r']:+.1f}R</b>\n"
+            "Полные сигналы без лимита: /subscribe\n"
+        )
     return (
         f"🗓 <b>Итоги недели {esc(period_label)}</b>\n{LINE}\n"
         f"Закрыто: <b>{wk.get('trades', 0)}</b>  "
         f"(✅ {wk.get('wins', 0)} / 🛑 {wk.get('losses', 0)})\n"
         f"Winrate недели: <b>{wr:.0f}%</b> · итог <b>{wk.get('total_r', 0):+.1f}R</b>\n"
         f"Открыто сейчас: {st.get('open', 0)}\n"
-        f"{LINE}\n"
+        f"{missed_block}{LINE}\n"
         f"За всё время: {st.get('trades', 0)} сделок · матож. "
         f"<b>{st.get('expectancy_r', 0):+.2f}R</b> · итог {st.get('total_r', 0):+.1f}R\n"
         "Полная статистика и журнал: /stats\n"
@@ -319,7 +332,12 @@ def render_result(c: dict, display_leverage: float = 0.0, streak: dict | None = 
     исполняет); сырое движение цены остаётся вторым числом. R — всегда.
     streak (journal.recent_streak()) — футер серии последних N сделок."""
     r = c["result_r"] or 0.0
-    if c["status"] == "stopped":
+    if c["status"] == "stopped" and r > 0:
+        # выход по ПОДТЯНУТОМУ трейлинг-стопу в прибыли: с 25.07 фиксированных тейков
+        # нет, победители закрываются ТОЛЬКО так — «🛑 стоп 📉» на +2.6R путал даже
+        # владельца (живой вопрос по #315, 12.08.2026), не то что подписчиков
+        head, emoji = f"✅ <b>Сигнал #{c['id']} — трейлинг-выход</b>", "📈"
+    elif c["status"] == "stopped":
         head, emoji = f"🛑 <b>Сигнал #{c['id']} — стоп</b>", "📉"
     else:
         head, emoji = f"✅ <b>Сигнал #{c['id']} — {esc(c['status'].upper())}</b>", "📈"
@@ -341,3 +359,87 @@ def render_result(c: dict, display_leverage: float = 0.0, streak: dict | None = 
         f"{_streak_footer(streak)}"
         "Вся статистика честно: /stats у @rsirange_bot"
     )
+
+
+def personal_size_line(sig, depo_usd: float, risk_pct: float, max_leverage: int = 20) -> str:
+    """Персональная строка объёма под ПОЛНЫМ DM-сигналом (юзер задал /depo).
+
+    Считает calculate_position (риск от депозита): при срабатывании стопа юзер теряет
+    ровно risk_pct% депозита. Превышение лимита плеча — предупреждение вместо объёма:
+    показать «удобный» объём с недостижимым плечом = подтолкнуть к пересиживанию риска.
+    """
+    from app.brain.risk import calculate_position
+
+    pos = calculate_position(depo_usd, risk_pct, sig.entry, sig.stop, max_leverage)
+    if pos.get("error"):
+        return ""
+    base = sig.symbol.split("/")[0]
+    if pos["warning"]:
+        return (f"\n💼 <b>Твой объём</b> (депо ${depo_usd:g}, риск {risk_pct:g}%): "
+                f"⚠️ {esc(pos['warning'])}")
+    # объём — через _price: {:g} уводил бы количества мелких альтов в экспоненту
+    # (0.0000025 -> «2.5e-06 PEPE»), а нотионал/риск в долларах безопасны для {:g}
+    return (f"\n💼 <b>Твой объём:</b> {_price(pos['position_qty'])} {esc(base)}"
+            f" ≈ ${pos['notional_usd']:g} (риск ${pos['risk_amount']:g},"
+            f" плечо ×{pos['implied_leverage']:g})"
+            f"\n   Настроено /depo: ${depo_usd:g}, {risk_pct:g}% на сделку")
+
+
+_XRAY_SCORE_LABELS = (
+    ("bias", "контекст старшего ТФ"),
+    ("trigger", "качество слома структуры"),
+    ("sweep", "съём ликвидности"),
+    ("confl", "конфлюэнс зоны входа"),
+)
+
+
+def render_xray(x: dict) -> str:
+    """«Рентген сделки» (deep-link из канала): почему движок вошёл и как вёл позицию.
+
+    Никто на рынке не показывает «почему» — все показывают «что». Рентген = наше УТП
+    честности: суб-скоры confidence, путь трейлинга, тайминги. Только факты журнала.
+    x — journal.signal_xray; scores может не быть (сигналы до 11.08.2026)."""
+    r = x.get("result_r")
+    if x["status"] == "expired":
+        head_r = "не исполнился (лимитка истекла)"
+    else:
+        head_r = f"итог <b>{r:+.2f}R</b>" if r is not None else "итог —"
+    lines = [
+        f"🔬 <b>Рентген сделки #{x['id']}</b>",
+        f"{esc(x['symbol'])} {esc(x['side'])} {esc(x['timeframe'])}"
+        f" · сетап {esc(x['setup'])} · {head_r}",
+        LINE,
+        f"Вход <code>{_price(x['entry'])}</code> · стоп <code>{_price(x['stop'])}</code>"
+        + (f" · выход <code>{_price(x['exit_price'])}</code>" if x.get("exit_price") else "")
+        + (f"\nСтоп-дистанция {x['stop_pct']:g}% цены" if x.get("stop_pct") else ""),
+    ]
+    if x.get("wait_hours") is not None:
+        lines.append(f"Лимитка ждала филла {x['wait_hours']:g}ч"
+                     + (f", в позиции {x['hold_hours']:g}ч"
+                        if x.get("hold_hours") is not None else ""))
+    scores = x.get("scores")
+    if scores:
+        lines.append(f"{LINE}\nПочему вход (confidence {x['confidence']:.2f}):")
+        for key, label in _XRAY_SCORE_LABELS:
+            if key in scores:
+                v = float(scores[key])
+                bar = "█" * round(v * 5) + "░" * (5 - round(v * 5))
+                lines.append(f" {bar} {label}: {v:.2f}")
+    else:
+        lines.append(f"{LINE}\nConfidence {x['confidence']:.2f} "
+                     "(суб-скоры не записывались — сигнал до 11.08.2026)")
+    flags = []
+    if x.get("swept"):
+        flags.append("свип ликвидности перед входом — был")
+    if x.get("clean_impulse"):
+        flags.append("импульс чистый (малые тени)")
+    if flags:
+        lines.append(" · ".join(flags))
+    if x.get("trail_moves"):
+        peak = (f", максимум зафиксированного <b>+{x['trail_peak_r']:.2f}R</b>"
+                if x.get("trail_peak_r") is not None else "")
+        lines.append(f"Трейлинг: {x['trail_moves']} подтяжек стопа{peak}")
+    lines += [LINE,
+              "Так выглядит каждая наша сделка изнутри. Полные сигналы: /subscribe",
+              "⚠️ Не финсовет. Прошлые результаты не определяют будущие."]
+    return "\n".join(lines)

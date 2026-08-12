@@ -42,6 +42,7 @@ class KlineEvt:
     symbol_ws: str          # 'BTCUSDT'
     high: float
     low: float
+    close: float            # последняя цена тика — для кроссинг-семантики прайс-алертов
     confirm: bool           # True = бар закрыт
 
 
@@ -56,6 +57,7 @@ def parse_kline(raw: str) -> list:
         symbol_ws = topic.split(".")[-1]
         return [KlineEvt(symbol_ws=symbol_ws,
                          high=float(d["high"]), low=float(d["low"]),
+                         close=float(d["close"]),
                          confirm=bool(d.get("confirm")))
                 for d in msg.get("data", [])]
     except Exception:                                   # noqa: BLE001
@@ -114,7 +116,7 @@ async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log) -> None:
                         if '"success":false' in frame.data.replace(" ", ""):
                             log.warning("стрим: отказ операции: %.200s", frame.data)
                         for evt in parse_kline(frame.data):
-                            await on_intrabar(evt.symbol_ws, evt.high, evt.low)
+                            await on_intrabar(evt.symbol_ws, evt.high, evt.low, evt.close)
             if planned:
                 backoff = 1.0                           # штатное соединение отжило свой срок
             else:

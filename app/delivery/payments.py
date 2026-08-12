@@ -67,6 +67,41 @@ def active_subscriber_ids() -> list[int]:
         "SELECT tg_id FROM users WHERE tier='paid' AND paid_until > ? AND is_active=1", (now,))]
 
 
+def free_active_ids() -> list[int]:
+    """tg_id живых free-юзеров (недельный дайджест с блоком «что ты упустил»)."""
+    now = clock.utcnow_iso()
+    return [r["tg_id"] for r in db.query(
+        "SELECT tg_id FROM users WHERE is_active=1 AND (tier='free' "
+        "OR (tier='paid' AND paid_until <= ?))", (now,))]
+
+
+def missed_teaser_r(tg_id: int, start_iso: str, end_iso: str) -> dict:
+    """«Что ты упустил»: итог ПОЛНОЙ версии сигналов, которые юзер получил ТИЗЕРАМИ,
+    а их сделка закрылась на этой неделе [start, end).
+
+    Считается по факту доставок (deliveries.kind='teaser') × закрытым исходам журнала —
+    никаких гипотетических «мог бы»: ровно те сигналы, что юзер реально видел без уровней.
+    Знак честный: минусовая неделя показывается минусом (доверие дороже конверсии).
+    -> {'n': int, 'total_r': float}"""
+    row = db.query_one(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(s.result_r), 0) AS total_r "
+        "FROM deliveries d JOIN signals s ON s.id = d.signal_id "
+        "WHERE d.tg_id = ? AND d.kind = 'teaser' AND s.result_r IS NOT NULL "
+        "AND s.closed_at >= ? AND s.closed_at < ?", (tg_id, start_iso, end_iso))
+    if row is None:                     # COUNT всегда отдаёт строку; ветка — для mypy
+        return {"n": 0, "total_r": 0.0}
+    return {"n": int(row["n"]), "total_r": round(float(row["total_r"]), 2)}
+
+
+def mark_delivery_unlocked(tg_id: int, signal_id: int) -> bool:
+    """Разовая покупка сигнала (paid media): тизерная доставка становится 'unlock' —
+    иначе «что ты упустил» показывал бы юзеру как упущенный сигнал, который он КУПИЛ
+    (ревью 12.08). -> была ли тизерная запись."""
+    return bool(db.execute("UPDATE deliveries SET kind='unlock' "
+                           "WHERE tg_id=? AND signal_id=? AND kind='teaser'",
+                           (tg_id, signal_id)))
+
+
 def grant_subscription(tg_id: int, method: str, amount: float, currency: str,
                        days: float, invoice_id: str) -> bool:
     """Идемпотентно выдать/продлить подписку. -> True если применено, False если дубль платежа.
@@ -635,6 +670,21 @@ def set_quiet_hours(tg_id: int, start: int | None, end: int | None) -> None:
     register_user(tg_id)
     db.execute("UPDATE users SET quiet_start=?, quiet_end=?, updated_at=? WHERE tg_id=?",
                (start, end, clock.utcnow_iso(), tg_id))
+
+
+def set_depo(tg_id: int, depo_usd: float | None, risk_pct: float | None) -> None:
+    """Персональный сайзинг для DM-сигналов (/depo). None/None — выключить."""
+    register_user(tg_id)
+    db.execute("UPDATE users SET depo_usd=?, depo_risk_pct=?, updated_at=? WHERE tg_id=?",
+               (depo_usd, risk_pct, clock.utcnow_iso(), tg_id))
+
+
+def depo_prefs(tg_id: int) -> tuple[float, float] | None:
+    """(депозит, риск%) юзера или None (фича выключена/юзер неизвестен)."""
+    u = get_user(tg_id)
+    if u is None or u["depo_usd"] is None:
+        return None
+    return float(u["depo_usd"]), float(u["depo_risk_pct"] or 1.0)
 
 
 def notify_prefs(tg_id: int) -> dict:
