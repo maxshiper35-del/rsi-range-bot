@@ -170,3 +170,103 @@ def test_api_me_expired_subscription_is_public(fresh_db, webapp_token):
     assert r.status_code == 200
     assert json.loads(raw)["private"] is False
     assert "entry" not in raw and "positions" not in raw
+
+def _mk_closed(sym: str, r: float, closed: str) -> int:
+    from app import db
+    db.execute(
+        "INSERT INTO signals(symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at, filled_at, closed_at, result_r) "
+        f"VALUES ('{sym}','LONG','1h',1,0.9,2.0,0.7,'{{}}','stopped',"
+        f"'2026-08-01T00:00:00+00:00','2026-08-01T01:00:00+00:00','{closed}',{r})")
+    return db.query_one("SELECT MAX(id) AS i FROM signals")["i"]
+
+
+def test_api_take_auth_matrix(fresh_db, webapp_token):
+    """Отметка сделки: 401 без подписи, 403 фри-юзеру, 400/404 на мусор."""
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(600100, "free")
+    sid = _mk_closed("AAA/USDT:USDT", 1.5, "2026-08-10T00:00:00+00:00")
+    with flask_app.test_client() as c:
+        assert c.post("/api/take", json={"signal_id": sid, "taken": True}).status_code == 401
+        free = {"Authorization": "tma " + _init_data("123:TEST", 600100)}
+        assert c.post("/api/take", json={"signal_id": sid, "taken": True},
+                      headers=free).status_code == 403     # платный слой — платникам
+        payments.register_user(600200, "payer")
+        from app import db
+        db.execute("UPDATE users SET tier='paid', paid_until='2099-01-01T00:00:00+00:00' "
+                   "WHERE tg_id=600200")
+        paid = {"Authorization": "tma " + _init_data("123:TEST", 600200)}
+        assert c.post("/api/take", json={"signal_id": "x", "taken": True},
+                      headers=paid).status_code == 400
+        assert c.post("/api/take", json={"signal_id": True, "taken": True},
+                      headers=paid).status_code == 400     # bool — не id
+        assert c.post("/api/take", json={"signal_id": 999999, "taken": True},
+                      headers=paid).status_code == 404
+
+
+def test_api_take_toggles_and_my_stats(fresh_db, webapp_token, monkeypatch):
+    """Отметил две закрытые -> личный итог = их сумма; снял одну -> пересчитался."""
+    from app import db, webapp
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(600300, "payer")
+    db.execute("UPDATE users SET tier='paid', paid_until='2099-01-01T00:00:00+00:00' "
+               "WHERE tg_id=600300")
+    a = _mk_closed("AAA/USDT:USDT", 2.4, "2026-08-10T00:00:00+00:00")
+    b = _mk_closed("BBB/USDT:USDT", -1.0, "2026-08-11T00:00:00+00:00")
+    monkeypatch.setattr(webapp, "_last_prices", lambda syms: {})
+    hdr = {"Authorization": "tma " + _init_data("123:TEST", 600300)}
+    with flask_app.test_client() as c:
+        r1 = c.post("/api/take", json={"signal_id": a, "taken": True}, headers=hdr)
+        r2 = c.post("/api/take", json={"signal_id": b, "taken": True}, headers=hdr)
+        ms = json.loads(r2.get_data(as_text=True))["my_stats"]
+        assert ms["trades"] == 2 and ms["total_r"] == 1.4 and ms["winrate"] == 0.5
+        assert json.loads(r1.get_data(as_text=True))["ok"] is True
+        me = json.loads(c.get("/api/me", headers=hdr).get_data(as_text=True))
+        assert sorted(me["taken"]) == sorted([a, b])
+        assert {x["id"] for x in me["recent_closed"]} >= {a, b}
+        assert "entry" not in json.dumps(me["recent_closed"])  # уровней в списке нет
+        r3 = c.post("/api/take", json={"signal_id": b, "taken": False}, headers=hdr)
+        ms = json.loads(r3.get_data(as_text=True))["my_stats"]
+        assert ms["trades"] == 1 and ms["total_r"] == 2.4
+
+def test_api_take_body_shape_and_range(fresh_db, webapp_token):
+    """По ревью 13.08: не-dict JSON и id за 64 бита — чистый 400, не 500."""
+    from app import db
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(600400, "payer")
+    db.execute("UPDATE users SET tier='paid', paid_until='2099-01-01T00:00:00+00:00' "
+               "WHERE tg_id=600400")
+    hdr = {"Authorization": "tma " + _init_data("123:TEST", 600400),
+           "Content-Type": "application/json"}
+    with flask_app.test_client() as c:
+        for raw in ("[1,2]", '"abc"', "5", "null"):
+            assert c.post("/api/take", data=raw, headers=hdr).status_code == 400, raw
+        assert c.post("/api/take", json={"signal_id": 2 ** 64, "taken": True},
+                      headers=hdr).status_code == 400
+        assert c.post("/api/take", json={"signal_id": -5, "taken": True},
+                      headers=hdr).status_code == 400
+
+
+def test_recent_closed_keeps_taken_beyond_limit(fresh_db, webapp_token, monkeypatch):
+    """По ревью 13.08: отмеченная сделка старше топ-15 остаётся видимой (и снимаемой)."""
+    from app import db, webapp
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(600500, "payer")
+    db.execute("UPDATE users SET tier='paid', paid_until='2099-01-01T00:00:00+00:00' "
+               "WHERE tg_id=600500")
+    old = _mk_closed("OLD/USDT:USDT", 2.0, "2026-07-01T00:00:00+00:00")
+    for i in range(16):
+        _mk_closed(f"S{i}/USDT:USDT", 1.0, f"2026-08-{i + 1:02d}T00:00:00+00:00")
+    monkeypatch.setattr(webapp, "_last_prices", lambda syms: {})
+    hdr = {"Authorization": "tma " + _init_data("123:TEST", 600500)}
+    with flask_app.test_client() as c:
+        c.post("/api/take", json={"signal_id": old, "taken": True}, headers=hdr)
+        me = json.loads(c.get("/api/me", headers=hdr).get_data(as_text=True))
+    ids = [x["id"] for x in me["recent_closed"]]
+    assert old in ids and ids[-1] == old                    # старая отметка видима, в конце
+    assert len(ids) == 16                                   # топ-15 + отмеченная за пределами
+    assert me["my_stats"]["trades"] == 1

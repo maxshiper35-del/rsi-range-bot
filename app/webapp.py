@@ -1,4 +1,5 @@
-"""Mini App «Живой дашборд» — Flask-страница + JSON API поверх журнала (read-only).
+"""Mini App «Живой дашборд» — Flask-страница + JSON API поверх журнала.
+Почти read-only: единственная запись — отметки подписчика user_taken (/api/take).
 
 Открывается КНОПКОЙ «📈 Дашборд» внутри Telegram (web_app), когда runtime.webapp_url
 задан. Хостится на нашем VPS за Caddy (авто-HTTPS на rDNS-имени Hetzner — Telegram
@@ -195,7 +196,7 @@ def _open_signals_private() -> list:
     """Открытые С УРОВНЯМИ (вход/стоп — платный слой) и живым unrealized R.
     Тегов сетапов нет и здесь: таксономия — собственность стратегии, её не видит никто."""
     rows = list(db.query(
-        "SELECT symbol, side, timeframe, entry, stop, created_at, filled_at "
+        "SELECT id, symbol, side, timeframe, entry, stop, created_at, filled_at "
         "FROM signals WHERE status='open' AND result_r IS NULL "
         "ORDER BY created_at DESC"))
     prices = _last_prices(sorted({r["symbol"] for r in rows})) if rows else {}
@@ -215,40 +216,117 @@ def _open_signals_private() -> list:
         if in_pos and price and risk:
             move = price - r["entry"] if r["side"] == "LONG" else r["entry"] - price
             ur = round(move / risk, 2)
-        out.append({"symbol": r["symbol"].split("/")[0], "side": r["side"],
-                    "tf": r["timeframe"], "age_h": age_h, "in_pos": in_pos,
-                    "entry": r["entry"], "stop": r["stop"], "ur": ur})
+        out.append({"id": r["id"], "symbol": r["symbol"].split("/")[0],
+                    "side": r["side"], "tf": r["timeframe"], "age_h": age_h,
+                    "in_pos": in_pos, "entry": r["entry"], "stop": r["stop"],
+                    "ur": ur})
     return out
+
+
+def _no_store(payload: dict, status: int = 200) -> Response:
+    """Персональные ответы не кешируются нигде — в том числе промежуточным Caddy."""
+    resp = Response(json.dumps(payload, ensure_ascii=False), status=status,
+                    mimetype="application/json")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _auth_user() -> dict | None:
+    """user из Authorization: tma <initData> | None. initData едет в Authorization:
+    Caddy в access-логах редактирует именно этот заголовок — PII и 24-часовой
+    replay-токен не осядут в логах (ревью 13.08)."""
+    auth = request.headers.get("Authorization", "")
+    raw = auth[4:] if auth.startswith("tma ") else ""
+    return _validate_init_data(raw, get_settings().tg_bot_token)
+
+
+def _taken_ids(tg_id: int) -> list[int]:
+    return [r["signal_id"] for r in db.query(
+        "SELECT signal_id FROM user_taken WHERE tg_id=?", (tg_id,))]
+
+
+def _my_stats(tg_id: int) -> dict:
+    """Личный итог: сумма R по отмеченным ЗАКРЫТЫМ сделкам (порядок закрытий)."""
+    rs = [r["result_r"] for r in db.query(
+        "SELECT s.result_r FROM user_taken ut JOIN signals s ON s.id = ut.signal_id "
+        "WHERE ut.tg_id=? AND s.result_r IS NOT NULL AND s.status IN "
+        "('tp1','tp2','tp3','stopped','expired') ORDER BY s.closed_at", (tg_id,))]
+    wins = sum(1 for r in rs if r > 0)
+    return {"trades": len(rs), "total_r": round(sum(rs), 2),
+            "winrate": round(wins / len(rs), 4) if rs else None,
+            "last": [round(r, 2) for r in rs[-10:]]}
+
+
+_CLOSED = "status IN ('tp1','tp2','tp3','stopped','expired') AND result_r IS NOT NULL"
+
+
+def _recent_closed(tg_id: int, limit: int = 15) -> list:
+    """Недавно закрытые для отметки задним числом + ВСЕ отмеченные юзером закрытые:
+    иначе отметка старше топ-15 исчезала бы из UI навсегда, оставаясь в итоге
+    (ревью 13.08 — «невидимая и неснимаемая»). Результаты закрытых и так публичны
+    (/trackrecord CSV) — уровни и сетапы сюда не кладём всё равно."""
+    rows = {r["id"]: r for r in db.query(
+        f"SELECT id, symbol, side, timeframe, result_r, closed_at FROM signals "
+        f"WHERE {_CLOSED} ORDER BY closed_at DESC LIMIT ?", (limit,))}
+    for r in db.query(
+            f"SELECT s.id, s.symbol, s.side, s.timeframe, s.result_r, s.closed_at "
+            f"FROM user_taken ut JOIN signals s ON s.id = ut.signal_id "
+            f"WHERE ut.tg_id=? AND {_CLOSED}", (tg_id,)):
+        rows.setdefault(r["id"], r)
+    ordered = sorted(rows.values(), key=lambda r: r["closed_at"] or "", reverse=True)
+    return [{"id": r["id"], "symbol": r["symbol"].split("/")[0], "side": r["side"],
+             "tf": r["timeframe"], "r": r["result_r"], "d": (r["closed_at"] or "")[5:10]}
+            for r in ordered]
 
 
 @app.get("/api/me")
 def api_me() -> Response:
-    """Платный слой для валидного подписчика/админа. Без валидной подписи — 401;
-    ответ всегда персональный -> no-store (никаких промежуточных кешей).
-    initData едет в Authorization: Caddy в access-логах редактирует именно этот
-    заголовок — PII и 24-часовой replay-токен не осядут в логах (ревью 13.08)."""
-    cfg = get_settings()
-    auth = request.headers.get("Authorization", "")
-    raw = auth[4:] if auth.startswith("tma ") else ""
-    user = _validate_init_data(raw, cfg.tg_bot_token)
+    """Платный слой для валидного подписчика/админа. Без валидной подписи — 401."""
+    user = _auth_user()
     if user is None:
-        resp = Response(json.dumps({"ok": False}), status=401,
-                        mimetype="application/json")
-        resp.headers["Cache-Control"] = "no-store"
-        return resp
+        return _no_store({"ok": False}, 401)
     uid = int(user["id"])
     from app.delivery import payments
-    private = payments.is_paid(uid) or uid in cfg.admin_ids
+    private = payments.is_paid(uid) or uid in get_settings().admin_ids
     payload: dict = {"ok": True, "private": private}
     if private:
         since = _paid_since(uid)
         payload["positions"] = _open_signals_private()
         payload["since"] = (since or "")[:10]
         payload["since_stats"] = journal.stats_since_created(since) if since else None
-    resp = Response(json.dumps(payload, ensure_ascii=False),
-                    mimetype="application/json")
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+        payload["taken"] = _taken_ids(uid)
+        payload["my_stats"] = _my_stats(uid)
+        payload["recent_closed"] = _recent_closed(uid)
+    return _no_store(payload)
+
+
+@app.post("/api/take")
+def api_take() -> Response:
+    """Отметка «я зашёл в эту сделку» (или снятие). Только активный платник/админ:
+    фри-юзеру и истёкшему — 403, даже с валидной подписью."""
+    user = _auth_user()
+    if user is None:
+        return _no_store({"ok": False}, 401)
+    uid = int(user["id"])
+    from app.delivery import payments
+    if not (payments.is_paid(uid) or uid in get_settings().admin_ids):
+        return _no_store({"ok": False}, 403)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):                # [1,2]/"abc"/5 — валидный JSON, но не объект
+        return _no_store({"ok": False}, 400)
+    sid, take = body.get("signal_id"), body.get("taken")
+    if (not isinstance(sid, int) or isinstance(sid, bool) or not isinstance(take, bool)
+            or not 0 < sid < 2 ** 63):            # за 64 бита SQLite не биндится -> был бы 500
+        return _no_store({"ok": False}, 400)
+    if not db.query_one("SELECT 1 FROM signals WHERE id=?", (sid,)):
+        return _no_store({"ok": False}, 404)
+    if take:
+        db.execute("INSERT OR IGNORE INTO user_taken(tg_id, signal_id, created_at) "
+                   "VALUES (?,?,?)", (uid, sid, clock.utcnow_iso()))
+    else:
+        db.execute("DELETE FROM user_taken WHERE tg_id=? AND signal_id=?", (uid, sid))
+    # свежие отметки и итог сразу в ответе — фронт перерисовывается без второго GET
+    return _no_store({"ok": True, "taken": _taken_ids(uid), "my_stats": _my_stats(uid)})
 
 
 @app.get("/api/stats")

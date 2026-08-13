@@ -40,7 +40,7 @@ zsh scripts/deploy.sh   # git archive HEAD -> сервер -> pytest ТАМ -> �
 
 - URL: `https://static.158.32.181.135.clients.your-server.de/` (rDNS-имя Hetzner,
   сертификат Let's Encrypt добывает и продлевает Caddy автоматически).
-- Стек: `app/webapp.py` (Flask, read-only) → waitress (`rsirange-webapp`, 127.0.0.1:8091)
+- Стек: `app/webapp.py` (Flask; почти read-only — пишет только user_taken через /api/take) → waitress (`rsirange-webapp`, 127.0.0.1:8091)
   → Caddy (443). Кнопка «📈 Дашборд» в боте становится web_app через
   `runtime.webapp_url` (лежит в settings; пустая строка = обычная кнопка).
 - После деплоя правок webapp: `ssh root@135.181.32.158 systemctl restart rsirange-webapp`

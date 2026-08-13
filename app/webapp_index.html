@@ -98,6 +98,10 @@ svg{display:block;width:100%}
   font-size:12.5px;white-space:nowrap}
 .mystat{font-size:12.5px;color:var(--ink-3);margin:-2px 0 10px}
 .mystat b{font-family:"IBM Plex Mono",ui-monospace,monospace}
+.pos-t .ck{width:26px;font-family:"IBM Plex Mono",ui-monospace,monospace;
+  font-size:15px;color:var(--ink-3);user-select:none}
+tr[data-sid]{cursor:pointer}
+tr[data-sid].busy{opacity:.45;pointer-events:none}
 .side-tag{display:inline-block;min-width:14px;text-align:center;margin-right:8px;
   font-family:ui-monospace,monospace;font-weight:700}
 .side-tag.l{color:var(--pos)} .side-tag.s{color:var(--neg)}
@@ -145,6 +149,8 @@ if (inTg) { tg.ready(); tg.expand(); setTheme(tg.colorScheme === "dark");
   setTheme(mq.matches); mq.addEventListener("change", e => setTheme(e.matches)); }
 
 let DATA = null, ME = null, SCOPE = "epoch";
+let takeGen = 0;                       // поколение POST /api/take: применяем только последний ответ
+const PENDING = new Set();             // sid с запросом в полёте — busy переживает ре-рендер
 const $ = s => document.querySelector(s);
 const esc = t => String(t).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtR = (v, d) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(+v).toFixed(d ?? (Math.abs(v) >= 100 ? 0 : 1)) + "R";
@@ -199,13 +205,16 @@ function render(noAnim) {
     <div class="cell"><b>${hold ? "~" + Math.round(hold) + "ч" : "—"}</b><span>в сделке</span></div>
   </div>`);
   if (ME && ME.private) {
-    const ss = ME.since_stats, pos = ME.positions || [];
+    const ss = ME.since_stats, pos = ME.positions || [], tk = ME.taken || [];
     const fmtP = v => String(+v);
+    const ckb = id => `<td class="ck">${tk.includes(id) ? "▣" : "▢"}</td>`;
     const stat = ss && ss.trades
       ? `с подписки${ME.since ? " · " + ME.since : ""}: <b class="${(ss.total_r || 0) >= 0 ? "up" : "dn"}">${fmtR(ss.total_r || 0)}</b> · ${ss.trades} закрытых`
       : "с подписки: закрытых сделок пока нет";
+    const rcls = (o, pend) => [pend ? "pend" : "", PENDING.has(o.id) ? "busy" : ""]
+      .filter(Boolean).join(" ");
     const rows = pos.map(o =>
-      `<tr${o.in_pos === false ? ` class="pend"` : ""}><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span></td>
+      `<tr data-sid="${o.id}" class="${rcls(o, o.in_pos === false)}">${ckb(o.id)}<td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span></td>
        <td class="dim">${esc(o.tf)}</td><td class="lv">${fmtP(o.entry)} → ${fmtP(o.stop)}</td>
        <td class="urc">${o.in_pos === false ? `<span class="st">ждёт входа</span>` : o.ur != null ? `<b class="${o.ur >= 0 ? "up" : "dn"}">${fmtR(o.ur, 2)}</b>` : `<span class="dim">—</span>`}</td>
        <td class="dim">${o.age_h != null ? Math.round(o.age_h) + "ч" : ""}</td></tr>`).join("");
@@ -214,6 +223,22 @@ function render(noAnim) {
       <div class="mystat">${stat}</div>
       ${pos.length ? `<table class="pos-t">${rows}</table>`
         : `<div class="warn" style="padding:8px 0">открытых сигналов нет</div>`}</section>`);
+    const ms = ME.my_stats || {trades: 0}, rc = ME.recent_closed || [];
+    const myline = ms.trades
+      ? `мой итог по отмеченным: <b class="${(ms.total_r || 0) >= 0 ? "up" : "dn"}">${fmtR(ms.total_r || 0)}</b> · ${ms.trades} закрытых${ms.winrate != null ? ` · winrate ${Math.round(ms.winrate * 100)}%` : ""}`
+      : `отметь сделки, в которые заходил — твой личный итог посчитается здесь`;
+    const sq = ms.trades ? `<div class="sq">${(ms.last || []).map(r =>
+      `<i style="background:var(--${r > 0 ? "pos" : "neg"})" title="${fmtR(r)}"></i>`).join("")}
+      <span class="net">${fmtR((ms.last || []).reduce((s, r) => s + r, 0))}</span></div>` : "";
+    const rcRows = rc.map(o =>
+      `<tr data-sid="${o.id}" class="${rcls(o, false)}">${ckb(o.id)}<td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span></td>
+       <td class="dim">${esc(o.tf)}</td><td class="urc"><b class="${o.r >= 0 ? "up" : "dn"}">${fmtR(o.r, 2)}</b></td>
+       <td class="dim">${esc(o.d)}</td></tr>`).join("");
+    h += sec(`<section><div class="sec-h"><h2>МОЙ ИТОГ</h2>
+      <span class="note">только отмеченные сделки</span></div>
+      <div class="mystat">${myline}</div>${sq}
+      ${rc.length ? `<div class="mystat" style="margin-top:10px">закрытые недавно — отметь свои:</div>
+      <table class="pos-t">${rcRows}</table>` : ""}</section>`);
   }
   h += sec(`<section><div class="sec-h"><h2>ЭКВИТИ · R</h2>
     <span class="note">по закрытиям</span></div>
@@ -357,6 +382,34 @@ if (inTg && tg.initData) {
     .then(m => { if (m && m.private) { ME = m; if (DATA) render(true); } })
     .catch(() => {});
 }
+
+// тап по строке с data-sid — переключить «я в этой сделке» (только платный слой).
+// PENDING переживает ре-рендеры (busy рисуется из него), поколение gen отбрасывает
+// устаревшие ответы при гонке двух тапов, !r.ok — честный алерт вместо тихого отката.
+document.addEventListener("click", e => {
+  const tr = e.target.closest("tr[data-sid]");
+  if (!tr || !(ME && ME.private) || !inTg) return;
+  const sid = +tr.dataset.sid;
+  if (PENDING.has(sid)) return;
+  const on = !(ME.taken || []).includes(sid);
+  PENDING.add(sid);
+  const gen = ++takeGen;
+  tr.classList.add("busy");
+  fetch("api/take", {method: "POST",
+    headers: {"Authorization": "tma " + tg.initData, "Content-Type": "application/json"},
+    body: JSON.stringify({signal_id: sid, taken: on})})
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      PENDING.delete(sid);
+      if (d && d.ok) {
+        if (gen === takeGen) { ME.taken = d.taken; ME.my_stats = d.my_stats; }
+      } else if (tg && tg.showAlert) {
+        try { tg.showAlert("Отметка не сохранилась — переоткрой дашборд"); } catch (e2) {}
+      }
+      render(true);
+    })
+    .catch(() => { PENDING.delete(sid); render(true); });
+});
 </script>
 </body>
 </html>
