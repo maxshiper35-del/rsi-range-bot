@@ -88,6 +88,9 @@ svg{display:block;width:100%}
 .pos-t tr:hover td{background:color-mix(in srgb,var(--surface) 60%,transparent)}
 .pos-t .sym{font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:600}
 .pos-t .dim{text-align:right;color:var(--ink-3);font-size:12px}
+.pos-t .st{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px;
+  letter-spacing:.04em;color:var(--ink-3);text-align:right;white-space:nowrap}
+.pos-t tr.pend .sym,.pos-t tr.pend .side-tag{opacity:.5}
 .side-tag{display:inline-block;min-width:14px;text-align:center;margin-right:8px;
   font-family:ui-monospace,monospace;font-weight:700}
 .side-tag.l{color:var(--pos)} .side-tag.s{color:var(--neg)}
@@ -205,8 +208,9 @@ function render() {
     h += sec(`<section><div class="sec-h"><h2>ОТКРЫТЫ СЕЙЧАС</h2>
       <span class="note">уровни — по подписке</span></div><table class="pos-t">${
       DATA.open_signals.map(o =>
-        `<tr><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span></td>
-         <td class="dim">${esc(o.tf)}</td><td class="dim">${o.age_h != null ? Math.round(o.age_h) + "ч" : ""}</td></tr>`).join("")
+        `<tr${o.in_pos === false ? ` class="pend"` : ""}><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span></td>
+         <td class="dim">${esc(o.tf)}</td><td class="st">${o.in_pos == null ? "" : o.in_pos ? "в позиции" : "ждёт входа"}</td>
+         <td class="dim">${o.age_h != null ? Math.round(o.age_h) + "ч" : ""}</td></tr>`).join("")
       }</table></section>`);
   }
   h += sec(`<div class="foot">Каждая сделка — в проверяемом журнале: /trackrecord у

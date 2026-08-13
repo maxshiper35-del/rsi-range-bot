@@ -43,19 +43,24 @@ def _equity(since_created: str | None = None) -> list:
 def _open_signals_public() -> list:
     """Открытые сигналы БЕЗ уровней и БЕЗ тегов сетапов: уровни — платный контент,
     таксономия сетапов — стратегическая собственность (публичный CSV /trackrecord
-    сознательно не содержит setup — дашборд держит ту же границу публикации)."""
+    сознательно не содержит setup — дашборд держит ту же границу публикации).
+    in_pos отличает исполненный вход от ожидающей лимитки (факт филла и так публичен —
+    канал постит исполнение); возраст позиции — от филла, ожидания — от публикации,
+    иначе лимитка выглядит «сделкой, висящей 50 часов» (вопрос владельца 13.08.2026)."""
     now = clock.utcnow()
     out = []
-    for r in db.query("SELECT symbol, side, timeframe, created_at "
+    for r in db.query("SELECT symbol, side, timeframe, created_at, filled_at "
                       "FROM signals WHERE status='open' AND result_r IS NULL "
                       "ORDER BY created_at DESC"):
+        in_pos = bool(r["filled_at"])
+        anchor = r["filled_at"] if in_pos else r["created_at"]
         age_h = None
-        if r["created_at"]:
+        if anchor:
             from datetime import datetime
-            age_h = round((now - datetime.fromisoformat(r["created_at"]))
+            age_h = round((now - datetime.fromisoformat(anchor))
                           .total_seconds() / 3600, 1)
         out.append({"symbol": r["symbol"].split("/")[0], "side": r["side"],
-                    "tf": r["timeframe"], "age_h": age_h})
+                    "tf": r["timeframe"], "age_h": age_h, "in_pos": in_pos})
     return out
 
 
