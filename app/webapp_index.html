@@ -91,6 +91,13 @@ svg{display:block;width:100%}
 .pos-t .st{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px;
   letter-spacing:.04em;color:var(--ink-3);text-align:right;white-space:nowrap}
 .pos-t tr.pend .sym,.pos-t tr.pend .side-tag{opacity:.5}
+.up{color:var(--pos)} .dn{color:var(--neg)}
+.pos-t .lv{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px;
+  color:var(--ink-2);white-space:nowrap}
+.pos-t .urc{text-align:right;font-family:"IBM Plex Mono",ui-monospace,monospace;
+  font-size:12.5px;white-space:nowrap}
+.mystat{font-size:12.5px;color:var(--ink-3);margin:-2px 0 10px}
+.mystat b{font-family:"IBM Plex Mono",ui-monospace,monospace}
 .side-tag{display:inline-block;min-width:14px;text-align:center;margin-right:8px;
   font-family:ui-monospace,monospace;font-weight:700}
 .side-tag.l{color:var(--pos)} .side-tag.s{color:var(--neg)}
@@ -137,7 +144,7 @@ if (inTg) { tg.ready(); tg.expand(); setTheme(tg.colorScheme === "dark");
 } else { const mq = matchMedia("(prefers-color-scheme: dark)");
   setTheme(mq.matches); mq.addEventListener("change", e => setTheme(e.matches)); }
 
-let DATA = null, SCOPE = "epoch";
+let DATA = null, ME = null, SCOPE = "epoch";
 const $ = s => document.querySelector(s);
 const esc = t => String(t).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtR = (v, d) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(+v).toFixed(d ?? (Math.abs(v) >= 100 ? 0 : 1)) + "R";
@@ -167,12 +174,14 @@ function pick() {
            hold: useEpoch ? DATA.hold_epoch : DATA.hold_all };
 }
 
-function render() {
+function render(noAnim) {
+  $("#tip").style.opacity = 0;   // старый svg уходит без pointerleave — не оставляем висящий тултип
   const { st, eq, hold } = pick(), d = derive(eq);
   const wr = st.trades ? Math.round(st.winrate * 100) : 0;
   const tot = st.total_r || 0, exp = st.expectancy_r || 0;
   let fx = 0;
-  const sec = inner => `<div class="fx" style="animation-delay:${(fx++) * 70}ms">${inner}</div>`;
+  const sec = inner => noAnim ? `<div>${inner}</div>`
+    : `<div class="fx" style="animation-delay:${(fx++) * 70}ms">${inner}</div>`;
   let h = "";
   h += sec(`<div class="hero">
     <div class="hero-main">
@@ -189,6 +198,23 @@ function render() {
     <div class="cell"><b>${DATA.all.open ?? 0}</b><span>открыто</span></div>
     <div class="cell"><b>${hold ? "~" + Math.round(hold) + "ч" : "—"}</b><span>в сделке</span></div>
   </div>`);
+  if (ME && ME.private) {
+    const ss = ME.since_stats, pos = ME.positions || [];
+    const fmtP = v => String(+v);
+    const stat = ss && ss.trades
+      ? `с подписки${ME.since ? " · " + ME.since : ""}: <b class="${(ss.total_r || 0) >= 0 ? "up" : "dn"}">${fmtR(ss.total_r || 0)}</b> · ${ss.trades} закрытых`
+      : "с подписки: закрытых сделок пока нет";
+    const rows = pos.map(o =>
+      `<tr${o.in_pos === false ? ` class="pend"` : ""}><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span></td>
+       <td class="dim">${esc(o.tf)}</td><td class="lv">${fmtP(o.entry)} → ${fmtP(o.stop)}</td>
+       <td class="urc">${o.in_pos === false ? `<span class="st">ждёт входа</span>` : o.ur != null ? `<b class="${o.ur >= 0 ? "up" : "dn"}">${fmtR(o.ur, 2)}</b>` : `<span class="dim">—</span>`}</td>
+       <td class="dim">${o.age_h != null ? Math.round(o.age_h) + "ч" : ""}</td></tr>`).join("");
+    h += sec(`<section><div class="sec-h"><h2>МОИ ПОЗИЦИИ</h2>
+      <span class="note">видно только тебе</span></div>
+      <div class="mystat">${stat}</div>
+      ${pos.length ? `<table class="pos-t">${rows}</table>`
+        : `<div class="warn" style="padding:8px 0">открытых сигналов нет</div>`}</section>`);
+  }
   h += sec(`<section><div class="sec-h"><h2>ЭКВИТИ · R</h2>
     <span class="note">по закрытиям</span></div>
     <div class="plot">${equitySVG(eq)}</div>
@@ -204,7 +230,7 @@ function render() {
   h += sec(`<section><div class="sec-h"><h2>РАСПРЕДЕЛЕНИЕ</h2>
     <span class="note">сделок в диапазоне R</span></div>
     <div class="plot">${histSVG(d.tr)}</div></section>`);
-  if (DATA.open_signals.length) {
+  if (DATA.open_signals.length && !(ME && ME.private)) {   // подписчику хватает «МОИХ ПОЗИЦИЙ»
     h += sec(`<section><div class="sec-h"><h2>ОТКРЫТЫ СЕЙЧАС</h2>
       <span class="note">уровни — по подписке</span></div><table class="pos-t">${
       DATA.open_signals.map(o =>
@@ -322,6 +348,15 @@ fetch("api/stats").then(r => r.json()).then(d => {
   $("#upd").textContent = t ? `live · ${t} UTC` : "live";
   render();
 }).catch(() => $("#app").innerHTML = `<div class="warn" style="padding:30px 0;text-align:center">Не удалось загрузить данные — попробуйте позже</div>`);
+
+// платный слой: подпись initData проверяет сервер; не подписчик/не Telegram — молча публичный
+// вид. Authorization — его Caddy редактирует в access-логах. Ре-рендер без повторной анимации.
+if (inTg && tg.initData) {
+  fetch("api/me", {headers: {"Authorization": "tma " + tg.initData}})
+    .then(r => r.ok ? r.json() : null)
+    .then(m => { if (m && m.private) { ME = m; if (DATA) render(true); } })
+    .catch(() => {});
+}
 </script>
 </body>
 </html>
