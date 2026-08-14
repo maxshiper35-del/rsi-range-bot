@@ -8,9 +8,12 @@ SMC-интеграция реализована чистыми функциям�
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import monotonic as _monotonic
 
 import pandas as pd
 
@@ -40,6 +43,30 @@ def scan_frames(symbol: str, frames: dict[str, pd.DataFrame], engine: SMCEngine,
 # встают в очередь за браузерами (ревью 14.08, starvation воспроизведён). 2 слота:
 # юзерский рендер не блокирует канальный пост и наоборот, а пула хватает на остальное.
 _RENDER_SEM = asyncio.Semaphore(2)
+
+
+class _ErrorBuffer(logging.Handler):
+    """ERROR+ из логов -> DM админам (батч в maintenance-цикле). aiogram-логгеры
+    исключены: сетевые обрывы Telegram самолечатся ретраями и завалили бы DM шумом."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.ERROR)
+        self.buf: deque = deque(maxlen=20)
+        self.last_sent: float = 0.0
+
+    def emit(self, record) -> None:
+        if record.name.startswith("aiogram"):
+            return
+        try:
+            msg = f"{record.name}: {record.getMessage()}"[:300]
+            if record.exc_info and record.exc_info[1] is not None:
+                msg += f" [{type(record.exc_info[1]).__name__}]"
+            self.buf.append(msg)
+        except Exception:                               # noqa: BLE001 — логгер не падает
+            pass
+
+
+_ERRBUF = _ErrorBuffer()
 
 
 async def _render_png(fn, *args):
@@ -1325,6 +1352,7 @@ def main() -> None:
     start_time = datetime.now(timezone.utc)
     db.init_db()
     cfg = get_settings()
+    logging.getLogger().addHandler(_ERRBUF)   # ERROR из любых наших логгеров -> DM админам
     bot = Bot(token=cfg.tg_bot_token)
     dp = Dispatcher()
     # username бота для deep-link CTA под постами канала; заполняется в _main() после
@@ -3652,6 +3680,42 @@ def main() -> None:
                     for admin_id in cfg.admin_ids:
                         try:
                             await bot.send_message(admin_id, joined)
+                        except Exception:               # noqa: BLE001
+                            pass
+                # недельный отчёт «исполнение vs журнал» — админам. Маркер недели
+                # СТАВИТСЯ ДО отправки (принцип трек-рекорда: пропуск лучше дубля)
+                if runtime.executor_enabled():
+                    _now = datetime.now(timezone.utc)
+                    _iy, _iw, _ = _now.isocalendar()
+                    _wk = f"{_iy}-W{_iw:02d}"
+                    if should_post_weekly(runtime.exec_report_last_week(), _wk):
+                        await asyncio.to_thread(runtime.set_exec_report_last_week, _wk)
+                        try:
+                            from app.v2 import bingx_executor
+                            _txt = await asyncio.to_thread(
+                                bingx_executor.execution_report,
+                                (_now - timedelta(days=7)).isoformat(), _now.isoformat())
+                        except Exception:               # noqa: BLE001
+                            log.exception("execution report")
+                            _txt = None
+                        if _txt:
+                            for admin_id in cfg.admin_ids:
+                                try:
+                                    await bot.send_message(admin_id, _txt,
+                                                           parse_mode="HTML")
+                                except Exception:       # noqa: BLE001
+                                    pass
+                # ERROR-алерты админам: батч из буфера логов, кулдаун 10 мин.
+                # Без parse_mode: тексты ошибок содержат <>&. Дедуп повторов.
+                if _ERRBUF.buf and _monotonic() - _ERRBUF.last_sent > 600:
+                    _ERRBUF.last_sent = _monotonic()
+                    uniq = list(dict.fromkeys(_ERRBUF.buf))[:6]
+                    _ERRBUF.buf.clear()
+                    err_msg = "🚨 Ошибки бота (см. журнал сервера):\n" + \
+                              "\n".join(f"— {u}" for u in uniq)
+                    for admin_id in cfg.admin_ids:
+                        try:
+                            await bot.send_message(admin_id, err_msg)
                         except Exception:               # noqa: BLE001
                             pass
             except Exception:                          # noqa: BLE001 — цикл живёт всегда

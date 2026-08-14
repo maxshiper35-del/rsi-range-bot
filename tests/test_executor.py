@@ -66,3 +66,30 @@ def test_calc_qty_notional_cap():
     assert qty * 100.0 <= ex.MAX_NOTIONAL_USDT + 1e-6
     # без капа было бы 1000/1 = 1000 монет ($100k) — теперь 45 монет ($4500)
     assert qty == 45.0
+
+
+def test_execution_report_slippage_and_gap(fresh_db):
+    """Отчёт «исполнение vs журнал»: демо-R vs журнальный R, слип выхода, комиссии.
+    LONG: вход 100 (филл 100), стоп 98 (риск 2), журнал вышел 106 (+3R),
+    демо закрылось 105.8 -> демо +2.9R, слип выхода −0.1R."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at, closed_at, result_r, exit_price) "
+        "VALUES (900,'AAA/USDT:USDT','LONG','1h',100,98,2.0,0.7,'{}','stopped',"
+        "'2026-08-10T00:00:00+00:00','2026-08-12T00:00:00+00:00',3.0,106.0)")
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, created_at, updated_at, fill_px, fill_qty, fill_fee, "
+        "close_px, close_fee, closed_at) VALUES (900,'AAA/USDT:USDT','LONG',10,100,98,"
+        "'rsiE900','closed','2026-08-10T01:00:00+00:00','2026-08-12T00:01:00+00:00',"
+        "100.0,10,0.4,105.8,0.42,'2026-08-12T00:01:00+00:00')")
+    txt = ex.execution_report("2026-08-09T00:00:00+00:00", "2026-08-13T00:00:00+00:00")
+    assert txt is not None
+    assert "журнал +3.00R · демо +2.90R · разрыв -0.10R" in txt
+    assert "в среднем -0.100R" in txt
+    assert "0.82 VST" in txt
+    # вне периода -> пусто
+    assert ex.execution_report("2026-01-01T00:00:00+00:00",
+                               "2026-01-02T00:00:00+00:00") is None

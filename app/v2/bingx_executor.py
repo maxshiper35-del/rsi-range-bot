@@ -295,14 +295,44 @@ def _close_position(ex, t, max_qty: float) -> float:
     'reduceOnly': True} — путь самого ccxt для hedge-режима (bingx.py: при hedged ccxt
     сам выводит positionSide из side и УБИРАЕТ reduceOnly из запроса — сырой reduceOnly
     BingX в hedge отклоняет кодом 109414). Ошибки НЕ глотаются: после клампа «нет
-    позиции» невозможен штатно, остальное должно быть видно как error."""
+    позиции» невозможен штатно, остальное должно быть видно как error.
+    Побочно (best-effort) пишет фактическую цену/комиссию закрытия — сырьё
+    еженедельного отчёта «исполнение vs журнал»."""
     closable = min(max_qty, _position_qty(ex, t["symbol"], t["side"]))
     if closable <= 0:
         return 0.0
     side = "sell" if t["side"] == "LONG" else "buy"
-    ex.create_order(t["symbol"], "market", side, closable, None,
-                    params={"hedged": True, "reduceOnly": True})
+    o = ex.create_order(t["symbol"], "market", side, closable, None,
+                        params={"hedged": True, "reduceOnly": True})
+    _record_close(ex, t, o)
     return closable
+
+
+def _fee_cost(o) -> float | None:
+    try:
+        fee = (o or {}).get("fee") or {}
+        return float(fee["cost"]) if fee.get("cost") is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_close(ex, t, created) -> None:
+    """Фактическая цена/комиссия рыночного закрытия (best-effort: ответ create может
+    не нести average — дочитываем fetch_order по id; сбой записи не роняет закрытие)."""
+    try:
+        o = created or {}
+        if not o.get("average") and o.get("id"):
+            try:
+                o = ex.fetch_order(o["id"], t["symbol"]) or o
+            except Exception:                           # noqa: BLE001
+                pass
+        px = o.get("average") or o.get("price")
+        db.execute("UPDATE executor_orders SET close_px=?, close_fee=?, closed_at=? "
+                   "WHERE signal_id=?",
+                   (float(px) if px else None, _fee_cost(o), clock.utcnow_iso(),
+                    t["signal_id"]))
+    except Exception:                                   # noqa: BLE001 — отчётные поля не критичны
+        pass
 
 
 def _sync_fill_states(ex, report: list[str]) -> None:
@@ -316,10 +346,70 @@ def _sync_fill_states(ex, report: list[str]) -> None:
         status, filled = o.get("status"), float(o.get("filled") or 0.0)
         if status == "closed" and filled > 0:
             _set_state(t["signal_id"], "filled")
+            px = o.get("average") or o.get("price")
+            db.execute("UPDATE executor_orders SET fill_px=?, fill_qty=?, fill_fee=? "
+                       "WHERE signal_id=?",
+                       (float(px) if px else None, filled, _fee_cost(o),
+                        t["signal_id"]))
             report.append(f"✅ #{t['signal_id']} {t['symbol']}: вход исполнен на BingX")
         elif status == "canceled":
             _set_state(t["signal_id"], "cancelled", "снята вне executor")
             report.append(f"🚫 #{t['signal_id']} {t['symbol']}: лимитка снята вне executor")
+
+
+def execution_report(start_iso: str, end_iso: str) -> str | None:
+    """Еженедельная сводка «исполнение vs журнал» (только БД, без сети) | None = пусто.
+
+    Живая проверка допущений бэктеста (maker-вход, слип 0.02%, комиссии) на демо:
+    к гейту эпохи-3 (28.08) даёт второй ответ — «исполнение сходится?». Сравнения:
+    вход fill_px vs entry_px журнала, выход close_px vs exit_price журнала (в R от
+    дистанции стопа), демо-R vs журнальный result_r по закрытым зеркальным сделкам."""
+    rows = list(db.query(
+        "SELECT eo.*, s.result_r, s.exit_price, s.status AS j_status "
+        "FROM executor_orders eo JOIN signals s ON s.id = eo.signal_id "
+        "WHERE eo.updated_at >= ? AND eo.updated_at < ?", (start_iso, end_iso)))
+    if not rows:
+        return None
+    placed = sum(1 for r in rows if r["state"] in ("placed", "filled", "closed"))
+    filled = [r for r in rows if r["fill_px"]]
+    closed = [r for r in rows if r["state"] == "closed"]
+    errors = [r for r in rows if r["state"] == "error"]
+    cancelled = sum(1 for r in rows if r["state"] == "cancelled")
+
+    lines = ["🤖 <b>Executor: исполнение vs журнал (неделя)</b>",
+             f"Ордеров: {placed} · входов: {len(filled)} · закрыто: {len(closed)} · "
+             f"снято без филла: {cancelled} · ошибок: {len(errors)}"]
+    j_sum = x_sum = 0.0
+    n_pairs = 0
+    slips_out = []
+    for r in closed:
+        risk = abs(r["entry_px"] - r["stop_px"])
+        sign = 1.0 if r["side"] == "LONG" else -1.0
+        if r["fill_px"] and r["close_px"] and risk:
+            x_r = sign * (r["close_px"] - r["fill_px"]) / risk
+            j_r = r["result_r"]
+            if j_r is not None:
+                j_sum += j_r
+                x_sum += x_r
+                n_pairs += 1
+            if r["exit_price"]:
+                # + = вышли ЛУЧШЕ журнала, − = хуже (в R от дистанции стопа)
+                slips_out.append(sign * (r["close_px"] - r["exit_price"]) / risk)
+    if n_pairs:
+        lines.append(f"Закрытые зеркальные ({n_pairs}): журнал {j_sum:+.2f}R · "
+                     f"демо {x_sum:+.2f}R · разрыв {x_sum - j_sum:+.2f}R")
+    if slips_out:
+        avg = sum(slips_out) / len(slips_out)
+        worst = min(slips_out)
+        lines.append(f"Слип выхода: в среднем {avg:+.3f}R, худший {worst:+.3f}R "
+                     f"(n={len(slips_out)})")
+    fees = [f for r in rows for f in (r["fill_fee"], r["close_fee"]) if f]
+    if fees:
+        lines.append(f"Комиссии (видимые): {sum(fees):.2f} VST")
+    for r in errors[:3]:
+        lines.append(f"⚠️ #{r['signal_id']}: {(r['note'] or '')[:80]}")
+    lines.append("<i>Демо BingX (VST) — проверка исполнения перед гейтом 28.08.</i>")
+    return "\n".join(lines)
 
 
 def status() -> dict:
