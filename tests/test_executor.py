@@ -5,15 +5,16 @@ from app.v2.bingx_executor import Action, calc_qty, plan
 
 
 def test_calc_qty_risk_based():
-    # риск 1% от 100k VST = 1000; стоп-дистанция 2000 -> 0.5 BTC, шаг 0.001 не режет
-    assert calc_qty(100_000, 1.0, 64_000, 62_000, 0.001, 0.001) == 0.5
+    # риск 1% от 10k VST = 100; стоп-дистанция 200 -> 0.5 BTC номиналом $3200 —
+    # под капом 4500 USDT, риск-формула работает как есть
+    assert calc_qty(10_000, 1.0, 6_400, 6_200, 0.001, 0.001) == 0.5
     # шаг объёма режет ВНИЗ (никогда не превышать риск)
-    assert calc_qty(100_000, 1.0, 64_000, 62_000, 0.001, 0.3) == 0.3
+    assert calc_qty(10_000, 1.0, 6_400, 6_200, 0.001, 0.3) == 0.3
     # ниже минимального объёма биржи -> 0 (сделка пропускается)
-    assert calc_qty(100, 1.0, 64_000, 62_000, 0.001, 0.001) == 0.0
+    assert calc_qty(10, 1.0, 6_400, 6_200, 0.001, 0.001) == 0.0
     # вырожденные входы не роняют
-    assert calc_qty(100_000, 1.0, 64_000, 64_000, 0.001, 0.001) == 0.0
-    assert calc_qty(0, 1.0, 64_000, 62_000, 0.001, 0.001) == 0.0
+    assert calc_qty(10_000, 1.0, 6_400, 6_400, 0.001, 0.001) == 0.0
+    assert calc_qty(0, 1.0, 6_400, 6_200, 0.001, 0.001) == 0.0
 
 
 def _row(sid, symbol="BTC/USDT:USDT", created="2026-08-13T10:00:00+00:00", filled=None):
@@ -55,3 +56,13 @@ def test_plan_closes_and_cancels_on_journal_resolution():
 def test_plan_is_action_dataclass():
     a = Action("place", 1, "BTC/USDT:USDT")
     assert a.kind == "place" and a.signal_id == 1
+
+
+def test_calc_qty_notional_cap():
+    """BingX 101209: номинал позиции ограничен ~5000 USDT — риск-объём капится.
+    1% от 100k при стопе 1% дал бы номинал 100k — режем до MAX_NOTIONAL_USDT."""
+    from app.v2 import bingx_executor as ex
+    qty = ex.calc_qty(100_000, 1.0, entry=100.0, stop=99.0, min_qty=0.0, qty_step=0.001)
+    assert qty * 100.0 <= ex.MAX_NOTIONAL_USDT + 1e-6
+    # без капа было бы 1000/1 = 1000 монет ($100k) — теперь 45 монет ($4500)
+    assert qty == 45.0

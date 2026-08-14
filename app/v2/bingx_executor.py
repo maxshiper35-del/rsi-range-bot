@@ -40,15 +40,21 @@ _ENTRY_PREFIX = "rsiE"
 # ---------------------------------------------------------------------------
 # Чистые функции (тестируются без сети)
 # ---------------------------------------------------------------------------
+MAX_NOTIONAL_USDT = 4500.0   # BingX: «maximum position value for this leverage is 5000
+#                              USDT» (code 101209, первый живой ордер #324 14.08) —
+#                              кап номинала с запасом. Риск в $ при капе меньше 1% —
+#                              для демо-зеркала это ок: паритет исполнения важнее суммы.
+
+
 def calc_qty(balance: float, risk_pct: float, entry: float, stop: float,
              min_qty: float, qty_step: float) -> float:
-    """Объём от риска: risk_pct% баланса / дистанцию стопа, вниз до шага объёма.
-    0.0 = сделка не проходит по минимальному объёму биржи (пропустить с пометкой)."""
+    """Объём от риска: risk_pct% баланса / дистанцию стопа, с капом биржевого
+    номинала, вниз до шага объёма. 0.0 = не проходит по минимальному объёму."""
     risk_amount = balance * risk_pct / 100.0
     dist = abs(entry - stop)
-    if dist <= 0 or risk_amount <= 0:
+    if dist <= 0 or risk_amount <= 0 or entry <= 0:
         return 0.0
-    qty = risk_amount / dist
+    qty = min(risk_amount / dist, MAX_NOTIONAL_USDT / entry)
     if qty_step > 0:
         qty = int(qty / qty_step) * qty_step
     return 0.0 if qty < max(min_qty, 0) or qty <= 0 else round(qty, 10)
