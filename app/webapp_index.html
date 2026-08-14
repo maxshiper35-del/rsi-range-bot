@@ -6,120 +6,123 @@
 <title>RSI Range — живой терминал</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-/* Направление: терминальный финтех, dark-first. Данные — валидированная пара
-   blue↔red на прежних чартовых поверхностях (валидатор пройден ранее, поверхности
-   не менялись). Один акцент. Числа — IBM Plex Mono, tabular. Никаких карточек-
-   коробочек: hairline-сетка, зерно на фоне, асимметрия в хиро. */
+/* v4 «биржевой терминал» (фидбэк владельца 14.08: равнение на Bybit/TradingView).
+   Тёмная тема ВСЕГДА — как у бирж; плотные панели, Inter для UI + Plex Mono для цифр.
+   Пара роста/падения #1f9e6e/#f6465d валидирована dataviz-валидатором на #14181d
+   (deutan 7.1 в полосе 6–8 — легально: везде вторичное кодирование знаками +/−, ▲/▼,
+   а серия квадратов кодируется заливкой/контуром, не только цветом). Оранжевый —
+   единственный акцент бренда, данные им не красим. */
 :root{
-  color-scheme:light;
-  --bg:#f1f0ec; --surface:#fcfcfb; --ink:#111110; --ink-2:#5b5a55; --ink-3:#96948c;
-  --line:#dddbd4; --grid:#e7e6e2; --pos:#2a78d6; --neg:#e34948; --zero:#b9b8b3;
-}
-:root[data-theme="dark"]{
   color-scheme:dark;
-  --bg:#121211; --surface:#1a1a19; --ink:#f4f3ef; --ink-2:#b9b8ae; --ink-3:#75746b;
-  --line:#2b2b28; --grid:#33322f; --pos:#3987e5; --neg:#e66767; --zero:#5a5955;
+  --bg:#0b0e11; --panel:#14181d; --panel2:#232a32; --ink:#eaecef; --ink-2:#8a94a1;
+  --ink-3:#5c6672; --line:#232a32; --grid:#1e242b; --surface:#14181d;
+  --pos:#1f9e6e; --neg:#f6465d; --zero:#3a424c; --acc:#f7a600;
 }
 *{margin:0;box-sizing:border-box}
 html{scroll-behavior:smooth}
-body{font:14px/1.5 -apple-system,system-ui,Roboto,sans-serif;background:var(--bg);
+body{font:13px/1.5 Inter,-apple-system,system-ui,Roboto,sans-serif;background:var(--bg);
      color:var(--ink);padding:0 0 40px;font-variant-numeric:tabular-nums}
-/* зерно: ломает цифровую плоскость, не отвлекая */
-body::before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.05;z-index:0;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='.6'/%3E%3C/svg%3E")}
-.wrap{max-width:620px;margin:0 auto;padding:0 16px;position:relative;z-index:1}
+.wrap{max-width:680px;margin:0 auto;padding:0 12px;position:relative}
 .mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
 
-header{display:flex;align-items:center;gap:10px;padding:18px 0 14px}
+header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;
+  padding:12px 2px 10px;background:color-mix(in srgb,var(--bg) 88%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
 .wordmark{font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:700;
-  font-size:15px;letter-spacing:.14em}
-.live{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-3);
-  margin-left:auto}
-.live i{width:7px;height:7px;border-radius:50%;background:var(--pos);
+  font-size:13.5px;letter-spacing:.12em}
+.wordmark::before{content:"";display:inline-block;width:8px;height:8px;margin-right:8px;
+  background:var(--acc);border-radius:2px;vertical-align:baseline}
+.live{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--ink-3);
+  margin-left:auto;font-family:"IBM Plex Mono",ui-monospace,monospace}
+.live i{width:6px;height:6px;border-radius:50%;background:var(--acc);
   animation:pulse 2.2s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 
-.tabs{display:flex;border-bottom:1px solid var(--line);margin-bottom:0}
-.tab{padding:9px 2px;margin-right:22px;font-size:13px;color:var(--ink-3);cursor:pointer;
-  border-bottom:2px solid transparent;transition:color .2s,border-color .2s;user-select:none}
-.tab:hover{color:var(--ink-2)}
-.tab.on{color:var(--ink);border-bottom-color:var(--pos);font-weight:600}
+.tabs{display:inline-flex;background:var(--panel);border:1px solid var(--line);
+  border-radius:6px;padding:2px;margin:10px 0 2px}
+.tab{padding:4px 12px;border-radius:4px;font-size:12px;color:var(--ink-2);cursor:pointer;
+  transition:color .15s,background .15s;user-select:none}
+.tab:hover{color:var(--ink)}
+.tab.on{background:var(--panel2);color:var(--ink);font-weight:600}
 
-/* хиро: асимметрия — доминирующее число слева, колонка метрик справа */
-.hero{display:grid;grid-template-columns:1.25fr 1fr;gap:0;border-bottom:1px solid var(--line)}
-.hero-main{padding:22px 8px 20px 0}
+/* сводка: доминирующий итог + колонка метрик — панель терминала */
+.hero{display:grid;grid-template-columns:1.15fr 1fr;gap:0;background:var(--panel);
+  border:1px solid var(--line);border-radius:8px;margin-top:8px;overflow:hidden}
+.hero-main{padding:16px 14px 14px}
 .hero-num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:700;
-  font-size:clamp(44px,13vw,58px);line-height:1;letter-spacing:-.04em}
+  font-size:clamp(34px,10vw,44px);line-height:1;letter-spacing:-.03em}
 .hero-num.up{color:var(--pos)} .hero-num.dn{color:var(--neg)}
-.hero-sub{font-size:12px;color:var(--ink-3);margin-top:8px}
+.hero-sub{font-size:11px;color:var(--ink-3);margin-top:7px}
 .hero-side{border-left:1px solid var(--line);display:flex;flex-direction:column;justify-content:center}
 .mrow{display:flex;justify-content:space-between;align-items:baseline;
-  padding:9px 0 9px 14px;border-top:1px solid var(--line)}
+  padding:7px 14px;border-top:1px solid var(--grid)}
 .mrow:first-child{border-top:none}
-.mrow b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:15px;font-weight:600}
-.mrow span{font-size:11px;color:var(--ink-3)}
+.mrow b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:13.5px;font-weight:600}
+.mrow span{font-size:10.5px;color:var(--ink-3)}
 
-.strip{display:flex;gap:0;border-bottom:1px solid var(--line)}
-.cell{flex:1;padding:12px 0 12px;text-align:left;border-left:1px solid var(--line)}
-.cell:first-child{border-left:none;padding-left:0}
-.cell:not(:first-child){padding-left:12px}
-.cell b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:16px;font-weight:600;display:block}
-.cell span{font-size:10.5px;color:var(--ink-3);letter-spacing:.04em}
+.strip{display:flex;gap:0;background:var(--panel);border:1px solid var(--line);
+  border-radius:8px;margin-top:8px;overflow:hidden}
+.cell{flex:1;padding:9px 12px;text-align:left;border-left:1px solid var(--grid)}
+.cell:first-child{border-left:none}
+.cell b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:14.5px;font-weight:600;display:block}
+.cell span{font-size:10px;color:var(--ink-3);letter-spacing:.05em;text-transform:uppercase}
 
-section{padding:20px 0 6px}
-.sec-h{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
-.sec-h h2{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px;
-  font-weight:600;letter-spacing:.16em;color:var(--ink-2)}
-.sec-h .note{font-size:11px;color:var(--ink-3)}
-.plot{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 8px 6px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:11px 13px 9px;margin-top:8px}
+.sec-h{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
+.sec-h h2{font-size:10.5px;font-weight:600;letter-spacing:.12em;color:var(--ink-2);
+  text-transform:uppercase}
+.sec-h .note{font-size:10.5px;color:var(--ink-3);margin-left:auto}
+.plot{padding:2px 0 0}
 svg{display:block;width:100%}
 
-.sq{display:flex;gap:5px;align-items:center;padding:2px 0 6px}
-.sq i{width:16px;height:16px;border-radius:4px;transition:transform .15s}
+.sq{display:flex;gap:5px;align-items:center;padding:2px 0 4px}
+.sq i{width:15px;height:15px;border-radius:3px;transition:transform .15s}
+.sq i.w{background:var(--pos)}
+.sq i.l{background:transparent;border:2px solid var(--neg)}   /* минус = контур, не только цвет */
 .sq i:hover{transform:translateY(-2px)}
 .sq .net{margin-left:auto;font-family:"IBM Plex Mono",ui-monospace,monospace;
-  font-size:13px;color:var(--ink-2)}
+  font-size:12.5px;color:var(--ink-2)}
 
 .pos-t{width:100%;border-collapse:collapse}
-.pos-t td{padding:9px 2px;border-top:1px solid var(--line);font-size:13.5px;transition:background .15s}
+.pos-t td{padding:7px 2px;border-top:1px solid var(--grid);font-size:12.5px;transition:background .15s}
 .pos-t tr:first-child td{border-top:none}
-.pos-t tr:hover td{background:color-mix(in srgb,var(--surface) 60%,transparent)}
-.pos-t .sym{font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:600}
-.pos-t .dim{text-align:right;color:var(--ink-3);font-size:12px}
-.pos-t .st{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px;
-  letter-spacing:.04em;color:var(--ink-3);text-align:right;white-space:nowrap}
+.pos-t tr:hover td{background:color-mix(in srgb,var(--panel2) 45%,transparent)}
+.pos-t .sym{font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:600;font-size:12.5px}
+.pos-t .dim{text-align:right;color:var(--ink-3);font-size:11px;
+  font-family:"IBM Plex Mono",ui-monospace,monospace}
+.pos-t .st{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:10.5px;
+  letter-spacing:.03em;color:var(--ink-3);text-align:right;white-space:nowrap}
 .pos-t tr.pend .sym,.pos-t tr.pend .side-tag{opacity:.5}
 .up{color:var(--pos)} .dn{color:var(--neg)}
-.pos-t .lv{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px;
+.pos-t .lv{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px;
   color:var(--ink-2);white-space:nowrap}
 .pos-t .urc{text-align:right;font-family:"IBM Plex Mono",ui-monospace,monospace;
-  font-size:12.5px;white-space:nowrap}
-.mystat{font-size:12.5px;color:var(--ink-3);margin:-2px 0 10px}
+  font-size:12px;white-space:nowrap}
+.mystat{font-size:11.5px;color:var(--ink-2);margin:-2px 0 8px}
 .mystat b{font-family:"IBM Plex Mono",ui-monospace,monospace}
-.pos-t .ck{width:26px;font-family:"IBM Plex Mono",ui-monospace,monospace;
-  font-size:15px;color:var(--ink-3);user-select:none}
+.pos-t .ck{width:24px;font-family:"IBM Plex Mono",ui-monospace,monospace;
+  font-size:14px;color:var(--ink-3);user-select:none}
 tr[data-sid]{cursor:pointer}
 tr[data-sid].busy{opacity:.45;pointer-events:none}
-.side-tag{display:inline-block;min-width:14px;text-align:center;margin-right:8px;
-  font-family:ui-monospace,monospace;font-weight:700}
+.side-tag{display:inline-block;min-width:13px;text-align:center;margin-right:7px;
+  font-family:ui-monospace,monospace;font-weight:700;font-size:11px}
 .side-tag.l{color:var(--pos)} .side-tag.s{color:var(--neg)}
 
-.foot{font-size:11px;color:var(--ink-3);line-height:1.6;padding-top:18px;
-  border-top:1px solid var(--line);margin-top:18px}
+.foot{font-size:10.5px;color:var(--ink-3);line-height:1.6;padding:12px 2px 0;margin-top:6px}
 .foot a{color:var(--ink-2)}
-.tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--bg);
-  font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px;padding:5px 9px;
-  border-radius:6px;opacity:0;transition:opacity .12s;z-index:9;white-space:nowrap}
-.warn{font-size:11.5px;color:var(--ink-3);margin-top:8px}
+.tip{position:fixed;pointer-events:none;background:var(--panel2);color:var(--ink);
+  border:1px solid var(--line);font-family:"IBM Plex Mono",ui-monospace,monospace;
+  font-size:11px;padding:4px 8px;border-radius:5px;opacity:0;transition:opacity .12s;
+  z-index:9;white-space:nowrap}
+.warn{font-size:11px;color:color-mix(in srgb,var(--acc) 75%,var(--ink-2));margin-top:7px}
 
-/* стаггер-вход: секции всплывают каскадом */
-.fx{opacity:0;transform:translateY(10px);animation:in .45s cubic-bezier(.2,.7,.3,1) forwards}
+.fx{opacity:0;transform:translateY(8px);animation:in .4s cubic-bezier(.2,.7,.3,1) forwards}
 @keyframes in{to{opacity:1;transform:none}}
-/* скелетон */
-.skel{height:74px;border-radius:10px;margin:14px 0;background:
-  linear-gradient(100deg,var(--surface) 40%,color-mix(in srgb,var(--surface) 70%,var(--ink-3)) 50%,var(--surface) 60%);
+.skel{height:70px;border:1px solid var(--line);border-radius:8px;margin:10px 0;background:
+  linear-gradient(100deg,var(--panel) 40%,var(--panel2) 50%,var(--panel) 60%);
   background-size:200% 100%;animation:sh 1.2s linear infinite}
 @keyframes sh{to{background-position:-200% 0}}
 @media (prefers-reduced-motion: reduce){.fx,.live i,.skel{animation:none;opacity:1;transform:none}}
@@ -142,11 +145,10 @@ tr[data-sid].busy{opacity:.45;pointer-events:none}
 "use strict";
 const tg = window.Telegram && Telegram.WebApp;
 const inTg = !!(tg && tg.platform && tg.platform !== "unknown");
-const setTheme = d => document.documentElement.dataset.theme = d ? "dark" : "light";
-if (inTg) { tg.ready(); tg.expand(); setTheme(tg.colorScheme === "dark");
-  tg.onEvent("themeChanged", () => setTheme(tg.colorScheme === "dark"));
-} else { const mq = matchMedia("(prefers-color-scheme: dark)");
-  setTheme(mq.matches); mq.addEventListener("change", e => setTheme(e.matches)); }
+// v4: тема всегда тёмная (биржевой терминал), от темы Telegram не зависит
+if (inTg) { tg.ready(); tg.expand();
+  if (tg.setHeaderColor) try { tg.setHeaderColor("#0b0e11"); } catch (e) {}
+  if (tg.setBackgroundColor) try { tg.setBackgroundColor("#0b0e11"); } catch (e) {} }
 
 let DATA = null, ME = null, SCOPE = "epoch";
 let takeGen = 0;                       // поколение POST /api/take: применяем только последний ответ
@@ -228,7 +230,7 @@ function render(noAnim) {
       ? `мой итог по отмеченным: <b class="${(ms.total_r || 0) >= 0 ? "up" : "dn"}">${fmtR(ms.total_r || 0)}</b> · ${ms.trades} закрытых${ms.winrate != null ? ` · winrate ${Math.round(ms.winrate * 100)}%` : ""}`
       : `отметь сделки, в которые заходил — твой личный итог посчитается здесь`;
     const sq = ms.trades ? `<div class="sq">${(ms.last || []).map(r =>
-      `<i style="background:var(--${r > 0 ? "pos" : "neg"})" title="${fmtR(r)}"></i>`).join("")}
+      `<i class="${r > 0 ? "w" : "l"}" title="${fmtR(r)}"></i>`).join("")}
       <span class="net">${fmtR((ms.last || []).reduce((s, r) => s + r, 0))}</span></div>` : "";
     const rcRows = rc.map(o =>
       `<tr data-sid="${o.id}" class="${rcls(o, false)}">${ckb(o.id)}<td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span></td>
@@ -251,9 +253,10 @@ function render(noAnim) {
   h += sec(`<section><div class="sec-h"><h2>R ПО НЕДЕЛЯМ</h2>
     <span class="note">пн — начало недели</span></div>
     <div class="plot">${weeksSVG(d.weeks)}</div></section>`);
-  h += sec(`<section><div class="sec-h"><h2>ПОСЛЕДНИЕ ${d.last.length}</h2></div>
+  h += sec(`<section><div class="sec-h"><h2>ПОСЛЕДНИЕ ${d.last.length}</h2>
+    <span class="note">■ плюс · □ минус</span></div>
     <div class="sq">${d.last.map(x =>
-      `<i style="background:var(--${x.r > 0 ? "pos" : "neg"})" title="${x.t} ${fmtR(x.r)}"></i>`).join("")}
+      `<i class="${x.r > 0 ? "w" : "l"}" title="${x.t} ${fmtR(x.r)}"></i>`).join("")}
       <span class="net">${fmtR(d.last.reduce((s, x) => s + x.r, 0))}</span></div></section>`);
   h += sec(`<section><div class="sec-h"><h2>РАСПРЕДЕЛЕНИЕ</h2>
     <span class="note">сделок в диапазоне R</span></div>
