@@ -171,3 +171,11 @@ def test_render_dashboard_png():
     pytest.importorskip("playwright")
     png = graphics.render_dashboard_png(_DASH)
     assert png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 10_000
+
+
+def test_build_og_card_html():
+    html = graphics.build_og_card_html(9.2, 228, [1.0, -1.0, 2.0])
+    assert "+9.2R" in html and "228 закрытых" in html and "#1f9e6e" in html
+    assert "не финансовый совет" in html and "<svg" in html
+    down = graphics.build_og_card_html(-3.0, 10, [-1.0, -1.0, -1.0])
+    assert "−3.0R" in down and "#f6465d" in down

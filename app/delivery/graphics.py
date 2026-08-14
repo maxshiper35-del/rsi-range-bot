@@ -612,6 +612,40 @@ def _dash_milestone(current: int, nxt) -> str:
             f'<div class="bar-track"><div class="bar-fill" style="width:{pct}%"></div></div>')
 
 
+def build_og_card_html(total_r: float, trades: int, equity: list) -> str:
+    """Карточка 1200x630 для og:image дашборда (палитра v4 «биржевой терминал»).
+    Рендерится ботом раз в сутки -> data/og.png, отдаёт webapp по /og.png."""
+    color = "#1f9e6e" if total_r >= 0 else "#f6465d"
+    sign = "+" if total_r > 0 else "−" if total_r < 0 else ""
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+*{{margin:0;box-sizing:border-box}}
+body{{width:1200px;height:630px;background:#0b0e11;color:#eaecef;
+  font:26px/1.4 -apple-system,system-ui,sans-serif;font-variant-numeric:tabular-nums}}
+.card{{width:1200px;height:630px;padding:48px 56px;display:flex;flex-direction:column}}
+.head{{display:flex;align-items:center;gap:14px;font-family:ui-monospace,Menlo,monospace;
+  font-weight:700;font-size:30px;letter-spacing:.12em}}
+.head i{{width:16px;height:16px;background:#f7a600;border-radius:4px}}
+.num{{font-family:ui-monospace,Menlo,monospace;font-weight:700;font-size:120px;
+  line-height:1.05;color:{color};margin:18px 0 4px}}
+.sub{{color:#8a94a1;font-size:27px}}
+.eq{{margin-top:26px;background:#14181d;border:1px solid #232a32;border-radius:12px;
+  padding:16px 14px 8px;flex:1}}
+.eq svg{{width:100%;height:100%}}
+.foot{{color:#5c6672;font-size:21px;margin-top:22px}}
+</style></head><body><div class="card">
+<div class="head"><i></i>RSI RANGE · ЖИВОЙ ТЕРМИНАЛ</div>
+<div class="num">{sign}{abs(total_r):.1f}R</div>
+<div class="sub">итог за всю историю · {trades} закрытых · каждая сделка в проверяемом журнале</div>
+<div class="eq">{_equity_svg(equity, w=1080, h=250)}</div>
+<div class="foot">CSV + SHA-256 · минусовые периоды не скрываются · не финансовый совет · 18+</div>
+</div></body></html>"""
+
+
+def render_og_card(total_r: float, trades: int, equity: list) -> bytes:
+    return render_html_to_png(build_og_card_html(total_r, trades, equity),
+                              width=1200, scale=1, selector=".card")
+
+
 def build_dashboard_html(data: dict) -> str:
     """Самодостаточный HTML-дашборд. data: {period_label, updated_label, stats, equity,
     by_symbol, milestone:{current,next}}. Чистая функция — тестируется без браузера.

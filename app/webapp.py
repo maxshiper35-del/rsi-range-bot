@@ -344,8 +344,29 @@ def api_stats() -> Response:
     return resp
 
 
+_OG_PNG = Path("data/og.png")            # рисует бот раз в сутки (cwd обоих — корень репо)
+
+
+@app.get("/og.png")
+def og_png() -> Response:
+    if not _OG_PNG.exists():
+        return Response(status=404)
+    resp = Response(_OG_PNG.read_bytes(), mimetype="image/png")
+    resp.headers["Cache-Control"] = "public, max-age=3600"
+    return resp
+
+
 @app.get("/")
 def index() -> Response:
-    resp = Response(_INDEX.read_text(encoding="utf-8"), mimetype="text/html")
+    html = _INDEX.read_text(encoding="utf-8")
+    base = runtime.webapp_url()
+    if base.startswith("https://") and _OG_PNG.exists():
+        # превью ссылки с эквити: og:image требует АБСОЛЮТНЫЙ url — подставляем из
+        # настроек на лету, статический файл не привязан к хосту деплоя
+        html = html.replace('<meta name="twitter:card" content="summary">',
+                            '<meta name="twitter:card" content="summary_large_image">')
+        html = html.replace("</title>", f'</title>\n<meta property="og:image" '
+                                        f'content="{base.rstrip("/")}/og.png">')
+    resp = Response(html, mimetype="text/html")
     resp.headers["Cache-Control"] = "public, max-age=300"
     return resp

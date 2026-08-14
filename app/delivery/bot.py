@@ -68,6 +68,9 @@ class _ErrorBuffer(logging.Handler):
 
 _ERRBUF = _ErrorBuffer()
 
+# cwd бота = корень репо (systemd WorkingDirectory) — og.png живёт рядом с БД
+DATAOG_DIR = Path("data")
+
 
 async def _render_png(fn, *args):
     async with _RENDER_SEM:
@@ -3705,6 +3708,23 @@ def main() -> None:
                                                            parse_mode="HTML")
                                 except Exception:       # noqa: BLE001
                                     pass
+                # og-карточка дашборда (превью ссылки с эквити): раз в сутки, через
+                # общий семафор рендеров; webapp отдаёт файл по /og.png
+                try:
+                    _day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    if (runtime.og_card_last_day() != _day and runtime.webapp_url()
+                            and DATAOG_DIR.exists()):
+                        await asyncio.to_thread(runtime.set_og_card_last_day, _day)
+                        st_all = await asyncio.to_thread(journal.stats)
+                        if st_all.get("trades", 0) > 1:
+                            png_ = await _render_png(
+                                graphics.render_og_card, st_all.get("total_r", 0.0),
+                                st_all.get("trades", 0),
+                                await asyncio.to_thread(journal.equity_series))
+                            (DATAOG_DIR / "og.png").write_bytes(png_)
+                            log.info("og-карточка обновлена (%d байт)", len(png_))
+                except Exception:                       # noqa: BLE001
+                    log.exception("og-карточка")
                 # ERROR-алерты админам: батч из буфера логов, кулдаун 10 мин.
                 # Без parse_mode: тексты ошибок содержат <>&. Дедуп повторов.
                 if _ERRBUF.buf and _monotonic() - _ERRBUF.last_sent > 600:

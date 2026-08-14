@@ -270,3 +270,18 @@ def test_recent_closed_keeps_taken_beyond_limit(fresh_db, webapp_token, monkeypa
     assert old in ids and ids[-1] == old                    # старая отметка видима, в конце
     assert len(ids) == 16                                   # топ-15 + отмеченная за пределами
     assert me["my_stats"]["trades"] == 1
+
+def test_og_png_and_meta_injection(fresh_db, monkeypatch, tmp_path):
+    """og:image подставляется только когда карточка отрендерена; иначе 404 и base-мета."""
+    from app import runtime, webapp
+    from app.webapp import app as flask_app
+    monkeypatch.setattr(webapp, "_OG_PNG", tmp_path / "og.png")
+    runtime.set_value("webapp_url", "https://example.test/")
+    with flask_app.test_client() as c:
+        assert c.get("/og.png").status_code == 404
+        assert "og:image" not in c.get("/").get_data(as_text=True)
+        (tmp_path / "og.png").write_bytes(b"\x89PNG fake")
+        assert c.get("/og.png").status_code == 200
+        body = c.get("/").get_data(as_text=True)
+        assert 'og:image" content="https://example.test/og.png"' in body
+        assert "summary_large_image" in body

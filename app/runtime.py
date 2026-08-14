@@ -183,6 +183,15 @@ def set_trackrecord_last_week(week_key: str) -> None:
     set_value("trackrecord_last_week", week_key)
 
 
+def og_card_last_day() -> str | None:
+    """YYYY-MM-DD последнего рендера og-карточки дашборда (бот рисует раз в сутки)."""
+    return _raw("og_card_last_day")
+
+
+def set_og_card_last_day(day: str) -> None:
+    set_value("og_card_last_day", day)
+
+
 def exec_report_last_week() -> str | None:
     """ISO-неделя последнего отчёта «исполнение vs журнал» админам (не слать дважды)."""
     return _raw("exec_report_last_week")
