@@ -2091,11 +2091,8 @@ def main() -> None:
             caption="🔍 Проверка в 1 клик: откройте файл в браузере, перетащите CSV — "
                     "sha256 посчитается локально (офлайн, без отправки куда-либо).")
 
-    @dp.message(Command("dashboard"))
-    @dp.message(F.text == "📈 Дашборд")
-    async def _dashboard(m):
-        # web_app-кнопка (если webapp_url задан) открывает Mini App сама и сюда не доходит;
-        # этот путь — самодостаточный HTML-файл (офлайн, тот же документ, что и Mini App).
+    async def _send_offline_dashboard(m):
+        """Самодостаточный HTML-файл (офлайн-версия того же дашборда)."""
         def _build():
             updated = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
             data = dashboard_data(journal.stats(), journal.equity_series(),
@@ -2106,6 +2103,32 @@ def main() -> None:
             BufferedInputFile(html.encode("utf-8"), filename="dashboard.html"),
             caption="📈 Дашборд трек-рекорда — откройте в браузере: эквити-кривая, "
                     "разбивка по инструментам, прогресс до вехи. Работает офлайн.")
+
+    @dp.message(Command("dashboard"))
+    async def _dashboard_cmd(m):
+        # команда — всегда офлайн-файл (сознательная фича: переслать/хранить)
+        await _send_offline_dashboard(m)
+
+    @dp.message(F.text == "📈 Дашборд")
+    async def _dashboard_btn(m):
+        # Сюда доходит только СТАРАЯ reply-клавиатура (выданная до Mini App): её
+        # кнопка — плоский текст. Новая (web_app) открывает Mini App сама. Reply-
+        # клавиатуры живут на клиенте вечно — сами не обновятся: даём inline-кнопку
+        # Mini App прямо сейчас И перевыдаём клавиатуру (фидбэк владельца 14.08
+        # «хочу чтоб дашборд в тг был»). Без webapp_url — прежний офлайн-файл.
+        wurl = runtime.webapp_url()
+        if not wurl.startswith("https://"):
+            await _send_offline_dashboard(m)
+            return
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="📈 Открыть живой дашборд", web_app=WebAppInfo(url=wurl))]])
+        await m.answer(
+            "Живой дашборд теперь открывается прямо в Telegram — кнопкой ниже.\n"
+            "Обновил и меню: кнопка «📈 Дашборд» дальше будет открывать его сразу.\n"
+            "Офлайн-файл по-прежнему доступен: /dashboard",
+            reply_markup=kb)
+        await m.answer("Меню обновлено ✅",
+                       reply_markup=_main_menu_kb(m.from_user.id in cfg.admin_ids))
 
     def _is_admin(m) -> bool:
         return bool(m.from_user) and m.from_user.id in cfg.admin_ids
