@@ -19,7 +19,9 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
 fi
 
 echo "→ код на сервер (git archive HEAD)"
-git archive HEAD | ssh -o BatchMode=yes "$HOST" "tar x -C $APPDIR && chown -R bot:bot $APPDIR/app $APPDIR/scripts $APPDIR/tests $APPDIR/migrations"
+# data/ в chown обязателен: tar кладёт каталог root-ом, а бот должен СОЗДАВАТЬ в нём
+# файлы (og.png; сама БД писалась и так — файл принадлежит bot). Инцидент 14.08.
+git archive HEAD | ssh -o BatchMode=yes "$HOST" "tar x -C $APPDIR && chown -R bot:bot $APPDIR/app $APPDIR/scripts $APPDIR/tests $APPDIR/migrations && chown bot:bot $APPDIR/data"
 
 echo "→ тесты на сервере (полный прогон)"
 if ! ssh -o BatchMode=yes "$HOST" "sudo -u bot bash -c 'cd $APPDIR && .venv/bin/python -m pytest -q 2>&1 | tail -2'"; then
