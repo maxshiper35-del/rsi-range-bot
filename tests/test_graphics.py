@@ -130,8 +130,6 @@ _DASH = {
                                     "expectancy_r": 0.3, "total_r": 3.0},
                   "ETH/USDT:USDT": {"trades": 14, "wins": 7, "winrate": 0.5,
                                     "expectancy_r": -0.02, "total_r": -0.36}},
-    "by_setup": {"1:1": {"trades": 24, "wins": 13, "winrate": 0.54,
-                         "expectancy_r": 0.11, "total_r": 2.64}},
     "milestone": {"current": 24, "next": 25},
 }
 
@@ -140,7 +138,10 @@ def test_build_dashboard_html_self_contained_and_real():
     html = graphics.build_dashboard_html(_DASH)
     assert html.startswith("<!DOCTYPE html>") and "<svg" in html          # полный документ + SVG
     assert "+2.6R" in html and "+0.11R" in html and "54%" in html          # тайлы
-    assert "BTC/USDT:USDT" in html and "1:1" in html                       # разбивки
+    assert "BTC/USDT:USDT" in html                                         # разбивка
+    # граница публикации: сетапов нет и в офлайн-дашборде (ревью 14.08)
+    for leak in ("По сетапам", "6226", "LTF-BB", "1:1"):
+        assert leak not in html
     assert "24 из 25" in html                                              # прогресс вехи
     assert "Не финансовый совет" in html                                   # честность
     # самодостаточность: ни одной ЗАГРУЗКИ ресурса. SVG-namespace (xmlns) — не запрос.
@@ -150,7 +151,7 @@ def test_build_dashboard_html_self_contained_and_real():
 
 
 def test_build_dashboard_html_empty_fallback():
-    data = dict(_DASH, equity=[], by_symbol={}, by_setup={},
+    data = dict(_DASH, equity=[], by_symbol={},
                 stats={"trades": 0, "open": 0, "winrate": 0.0, "expectancy_r": 0.0,
                        "total_r": 0.0, "wins": 0, "losses": 0},
                 milestone={"current": 0, "next": 10})

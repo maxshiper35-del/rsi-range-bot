@@ -7,6 +7,7 @@ SMC-интеграция реализована чистыми функциям�
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,6 +32,19 @@ def scan_frames(symbol: str, frames: dict[str, pd.DataFrame], engine: SMCEngine,
     if sig is not None and record:
         journal.record_signal(sig)
     return sig
+
+
+# Все PNG-рендеры (Playwright поднимает целый Chromium ~300МБ на вызов) — через один
+# семафор: без него параллельные рендеры занимают дефолтный ThreadPoolExecutor целиком
+# (на 2 vCPU это 6 воркеров) и ВСЕ to_thread-вызовы бота — БД, доставка, оплаты —
+# встают в очередь за браузерами (ревью 14.08, starvation воспроизведён). 2 слота:
+# юзерский рендер не блокирует канальный пост и наоборот, а пула хватает на остальное.
+_RENDER_SEM = asyncio.Semaphore(2)
+
+
+async def _render_png(fn, *args):
+    async with _RENDER_SEM:
+        return await asyncio.to_thread(fn, *args)
 
 
 def _side_capacity_ok(side_value: str, symbol: str) -> bool:
@@ -609,12 +623,14 @@ def next_milestone(trades: int, levels: tuple = MILESTONES) -> int | None:
     return None
 
 
-def dashboard_data(st: dict, equity: list, by_symbol: dict, by_setup: dict,
+def dashboard_data(st: dict, equity: list, by_symbol: dict,
                    updated_label: str, period_label: str = "всё время") -> dict:
-    """Сборка входа для graphics.build_dashboard_html из журнала. Чистая — тестируется без БД."""
+    """Сборка входа для graphics.build_dashboard_html из журнала. Чистая — тестируется
+    без БД. Сетапов нет — граница публикации (ревью 14.08: /dashboard отдавал
+    разбивку по сетапам любому фри-юзеру, поверхность пропущена зачисткой 13.08)."""
     return {
         "period_label": period_label, "updated_label": updated_label,
-        "stats": st, "equity": equity, "by_symbol": by_symbol, "by_setup": by_setup,
+        "stats": st, "equity": equity, "by_symbol": by_symbol,
         "milestone": {"current": st["trades"], "next": next_milestone(st["trades"])},
     }
 
@@ -930,6 +946,8 @@ def format_channel_live_board(st: dict, by_symbol: dict, cohort: dict | None = N
             state = "в позиции" if in_pos else "ждёт входа"
             sym = templates.esc(o["symbol"].split("/")[0])
             lines.append(f"  {arrow} {sym} {templates.esc(o['timeframe'])} — {state}{age}")
+        if len(open_rows) > 10:
+            lines.append(f"  …и ещё {len(open_rows) - 10}")
         lines.append("  Уровни и живой uR — подписчикам: @rsirange_bot")
     if cohort is not None:
         c, r = cohort["confirmed"], cohort["rejected"]
@@ -1413,11 +1431,21 @@ def main() -> None:
                 text="✅ Я оплатил USDT", callback_data="usdt_claim")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
+    _mycard_last: dict[int, float] = {}
+
     async def _send_mycard(m):
-        """Личная карточка итога по отметкам (шеринг). Платникам/админам."""
+        """Личная карточка итога по отметкам (шеринг). Платникам/админам.
+
+        Кулдаун 60с на юзера + общий семафор рендеров (_RENDER_SEM): Chromium
+        поднимается на каждый рендер, и без троттлинга один спамящий /mycard
+        платник занимал бы весь thread-pool бота (ревью 14.08)."""
         uid = m.from_user.id
         if not (await asyncio.to_thread(payments.is_paid, uid) or uid in cfg.admin_ids):
             await m.answer("Карточка итога — для подписчиков: /subscribe")
+            return
+        import time as _t
+        if _t.monotonic() - _mycard_last.get(uid, -1e9) < 60:
+            await m.answer("Карточка только что рисовалась — подожди минуту 🙃")
             return
         ms = await asyncio.to_thread(payments.taken_stats, uid)
         if not ms["trades"]:
@@ -1425,9 +1453,10 @@ def main() -> None:
                            "отметь ▢ сделки, в которые заходил — карточка соберётся "
                            "по ним.")
             return
+        _mycard_last[uid] = _t.monotonic()      # столбим ДО рендера: спам в очередь не встаёт
         ms["bot"] = bot_info["username"] or "rsirange_bot"
         from aiogram.types import BufferedInputFile as _BIF
-        png = await asyncio.to_thread(graphics.render_my_card, ms)
+        png = await _render_png(graphics.render_my_card, ms)
         await m.answer_photo(
             _BIF(png, filename="my_result.png"),
             caption="Твой итог по отмеченным сделкам. Перешли, куда захочешь 📤")
@@ -1751,7 +1780,7 @@ def main() -> None:
             await cq.answer("У вас полный доступ — сигнал отправлен бесплатно.")
             return
         try:
-            png = await asyncio.to_thread(_signal_chart_png, sig, sid)
+            png = await _render_png(_signal_chart_png, sig, sid)
         except Exception as e:                          # noqa: BLE001 — биржа/рендер
             log.warning("unlock #%s: график не собрался: %s", sid, e)
             await cq.answer("Не удалось подготовить сигнал — попробуйте чуть позже.",
@@ -1818,7 +1847,7 @@ def main() -> None:
         # давал вечный спиннер и алерт админу на каждый повторный тап (аудит-2 UX [7])
         await cq.answer("Готовлю график…")
         try:
-            png = await asyncio.to_thread(_signal_chart_png, sig, sid)
+            png = await _render_png(_signal_chart_png, sig, sid)
         except Exception as e:                              # noqa: BLE001 — биржа/рендер
             log.warning("sigchart #%s: %s", sid, e)
             await cq.message.answer("График сейчас недоступен — попробуйте позже.")
@@ -2070,13 +2099,13 @@ def main() -> None:
         def _build():
             updated = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
             data = dashboard_data(journal.stats(), journal.equity_series(),
-                                  journal.stats_by_symbol(), journal.stats_by_setup(), updated)
+                                  journal.stats_by_symbol(), updated)
             return graphics.build_dashboard_html(data)
         html = await asyncio.to_thread(_build)
         await m.answer_document(
             BufferedInputFile(html.encode("utf-8"), filename="dashboard.html"),
             caption="📈 Дашборд трек-рекорда — откройте в браузере: эквити-кривая, "
-                    "разбивка по инструментам и сетапам, прогресс до вехи. Работает офлайн.")
+                    "разбивка по инструментам, прогресс до вехи. Работает офлайн.")
 
     def _is_admin(m) -> bool:
         return bool(m.from_user) and m.from_user.id in cfg.admin_ids
@@ -2843,7 +2872,7 @@ def main() -> None:
         photo = None
         if want_chart:
             try:
-                photo = await asyncio.to_thread(_chart_for_id, sid)
+                photo = await _render_png(_chart_for_id, sid)
             except Exception as e:                     # noqa: BLE001 — биржа/рендер
                 log.warning("карта поста #%s: %s", sid, e)
         if photo is None:
@@ -2938,7 +2967,7 @@ def main() -> None:
             photo = None
             if runtime.channel_mode() == "full" and runtime.signal_chart_enabled():
                 try:
-                    photo = await asyncio.to_thread(_signal_chart_png, sig, sid)
+                    photo = await _render_png(_signal_chart_png, sig, sid)
                 except Exception as e:                 # noqa: BLE001
                     log.warning("график сигнала #%s: %s", sid, e)
             try:
@@ -3199,6 +3228,7 @@ def main() -> None:
                     # сбой рендера/чтения БД — состояние табло не трогаем, повторим на след. такте
                     log.warning("live board render: %s", e)
                 else:
+                    board_ok = True
                     msg_id = runtime.live_board_message_id()
                     if msg_id:
                         try:
@@ -3208,15 +3238,18 @@ def main() -> None:
                             if "message is not modified" in str(e).lower():
                                 pass                     # текст не изменился — не сбой, id валиден
                             else:
-                                # протухло/удалено/нет прав — пересоздадим на следующем цикле,
-                                # а не будем молча биться в одну и ту же ошибку вечно
+                                # протухло/удалено/нет прав — пересоздать. Метку времени НЕ
+                                # ставим (ревью 14.08): иначе «след. цикл» превращался в
+                                # «следующее часовое окно» — до 2ч канал без табло
                                 log.warning("edit live board (пересоздам на след. цикле): %s", e)
                                 await asyncio.to_thread(runtime.set_live_board_message_id, None)
+                                board_ok = False
                     else:
                         try:
                             sent = await bot.send_message(channel, text, parse_mode="HTML")
                         except Exception as e:          # noqa: BLE001
                             log.warning("send live board: %s", e)
+                            board_ok = False
                         else:
                             # id сохраняем СРАЗУ после успешной отправки, ДО pin — иначе сбой
                             # пина (нет права "Pin Messages") оставит отправленный пост
@@ -3228,7 +3261,8 @@ def main() -> None:
                                                            disable_notification=True)
                             except Exception as e:      # noqa: BLE001 — опубликовано, но не закреплено
                                 log.warning("pin live board: %s", e)
-                    await asyncio.to_thread(runtime.set_last_board_update_at, now)
+                    if board_ok:
+                        await asyncio.to_thread(runtime.set_last_board_update_at, now)
             # еженедельный публичный трек-рекорд (CSV+sha256) — раз в календарную ISO-неделю,
             # не привязан к should_refresh_board (разная периодичность: 24ч vs раз в неделю)
             now_dt = datetime.now(timezone.utc)
@@ -3260,7 +3294,7 @@ def main() -> None:
                         "outcomes": wk["outcomes"],
                         "updated_label": now_dt.strftime("%d.%m.%Y"),
                     }
-                    png_bytes = await asyncio.to_thread(graphics.render_weekly_card, card_data)
+                    png_bytes = await _render_png(graphics.render_weekly_card, card_data)
                     await bot.send_photo(
                         channel, BufferedInputFile(png_bytes, filename="weekly_card.png"),
                         reply_markup=_channel_kb("chcard"))
@@ -3330,18 +3364,32 @@ def main() -> None:
             prefs = await asyncio.to_thread(payments.notify_prefs, uid)
             return bool(prefs.get("muted"))
 
+        async def _send_retry(uid: int, text: str) -> None:
+            """Один повтор после 429 — иначе rate-limit Telegram молча съедает
+            дайджест юзера до следующей недели (ревью 14.08)."""
+            from aiogram.exceptions import TelegramRetryAfter
+            try:
+                await bot.send_message(uid, text, parse_mode="HTML")
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(min(float(e.retry_after), 30.0) + 1.0)
+                await bot.send_message(uid, text, parse_mode="HTML")
+
         sent = f_sent = 0
         try:
             for uid in await asyncio.to_thread(payments.active_subscriber_ids):
                 try:
                     if await _muted(uid):
                         continue
-                    # коуч дисциплины — только пользующимся отметками (иначе None)
-                    coach = await asyncio.to_thread(
-                        payments.weekly_discipline, uid, start_iso, end_iso)
-                    block = templates.render_discipline_block(coach) if coach else ""
-                    await bot.send_message(uid, d_text + ("\n" + block if block else ""),
-                                           parse_mode="HTML")
+                    # коуч дисциплины — только пользующимся отметками (иначе None);
+                    # сбой коуча не лишает юзера всего дайджеста
+                    block = ""
+                    try:
+                        coach = await asyncio.to_thread(
+                            payments.weekly_discipline, uid, start_iso, end_iso)
+                        block = templates.render_discipline_block(coach) if coach else ""
+                    except Exception as e:              # noqa: BLE001
+                        log.warning("коуч -> %s: %s", uid, e)
+                    await _send_retry(uid, d_text + ("\n" + block if block else ""))
                     sent += 1
                 except Exception as e:                  # noqa: BLE001
                     log.warning("дайджест -> %s: %s", uid, e)
@@ -3354,9 +3402,8 @@ def main() -> None:
                         continue
                     missed = await asyncio.to_thread(
                         payments.missed_teaser_r, uid, start_iso, end_iso)
-                    await bot.send_message(
-                        uid, templates.render_weekly_digest(d_label, d_wk, d_st, missed),
-                        parse_mode="HTML")
+                    await _send_retry(
+                        uid, templates.render_weekly_digest(d_label, d_wk, d_st, missed))
                     f_sent += 1
                 except Exception as e:                  # noqa: BLE001
                     log.warning("дайджест(free) -> %s: %s", uid, e)

@@ -542,7 +542,6 @@ _DASH_DOC = Template("""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-
   </div>
   <div class="card"><h3>Эквити-кривая (накопленный R)</h3>$equity</div>
   <div class="card"><h3>По инструментам</h3>$by_symbol</div>
-  <div class="card"><h3>По сетапам</h3>$by_setup</div>
   <div class="card"><h3>Прогресс до следующей вехи</h3>$milestone</div>
   <div class="card note"><b>Честно:</b> публикуем 100% исходов, включая убыточные.
     Бэктест устойчивого края не показал — это инструмент и проверяемая история,
@@ -615,7 +614,9 @@ def _dash_milestone(current: int, nxt) -> str:
 
 def build_dashboard_html(data: dict) -> str:
     """Самодостаточный HTML-дашборд. data: {period_label, updated_label, stats, equity,
-    by_symbol, by_setup, milestone:{current,next}}. Чистая функция — тестируется без браузера."""
+    by_symbol, milestone:{current,next}}. Чистая функция — тестируется без браузера.
+    Разбивки по сетапам НЕТ (граница публикации стратегии — таксономия сетапов не
+    отдаётся никому; ревью 14.08 нашло эту поверхность пропущенной при зачистке)."""
     st = data["stats"]
     return _DASH_DOC.substitute(
         css=_DASH_CSS,
@@ -627,7 +628,6 @@ def build_dashboard_html(data: dict) -> str:
         wins=st["wins"], losses=st["losses"], closed=st["trades"], open=st["open"],
         equity=_equity_svg(data["equity"]),
         by_symbol=_dash_table(data["by_symbol"]),
-        by_setup=_dash_table(data["by_setup"]),
         milestone=_dash_milestone(data["milestone"]["current"], data["milestone"]["next"]),
     )
 

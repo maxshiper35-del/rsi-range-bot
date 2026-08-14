@@ -803,7 +803,8 @@ def test_next_milestone_and_dashboard_data():
     assert bot.next_milestone(1000) is None
     st = {"trades": 24, "open": 3, "winrate": 0.5, "expectancy_r": 0.1, "total_r": 2.4,
           "wins": 12, "losses": 12}
-    d = bot.dashboard_data(st, [1.0, -1.0], {"BTC": {}}, {"1:1": {}}, "now")
+    d = bot.dashboard_data(st, [1.0, -1.0], {"BTC": {}}, "now")
+    assert "by_setup" not in d                       # сетапы не отдаются никому
     assert d["milestone"] == {"current": 24, "next": 25}
     assert d["stats"] is st and d["equity"] == [1.0, -1.0]
 
