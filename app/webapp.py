@@ -246,15 +246,9 @@ def _taken_ids(tg_id: int) -> list[int]:
 
 
 def _my_stats(tg_id: int) -> dict:
-    """Личный итог: сумма R по отмеченным ЗАКРЫТЫМ сделкам (порядок закрытий)."""
-    rs = [r["result_r"] for r in db.query(
-        "SELECT s.result_r FROM user_taken ut JOIN signals s ON s.id = ut.signal_id "
-        "WHERE ut.tg_id=? AND s.result_r IS NOT NULL AND s.status IN "
-        "('tp1','tp2','tp3','stopped','expired') ORDER BY s.closed_at", (tg_id,))]
-    wins = sum(1 for r in rs if r > 0)
-    return {"trades": len(rs), "total_r": round(sum(rs), 2),
-            "winrate": round(wins / len(rs), 4) if rs else None,
-            "last": [round(r, 2) for r in rs[-10:]]}
+    """Личный итог по отмеченным — общий расчёт с ботом (карточка/коуч)."""
+    from app.delivery import payments
+    return payments.taken_stats(tg_id)
 
 
 _CLOSED = "status IN ('tp1','tp2','tp3','stopped','expired') AND result_r IS NOT NULL"
@@ -297,6 +291,7 @@ def api_me() -> Response:
         payload["taken"] = _taken_ids(uid)
         payload["my_stats"] = _my_stats(uid)
         payload["recent_closed"] = _recent_closed(uid)
+        payload["bot"] = runtime.bot_username()   # deep-link «поделиться карточкой»
     return _no_store(payload)
 
 

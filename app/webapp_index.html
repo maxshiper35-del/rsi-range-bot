@@ -234,9 +234,12 @@ function render(noAnim) {
       `<tr data-sid="${o.id}" class="${rcls(o, false)}">${ckb(o.id)}<td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span></td>
        <td class="dim">${esc(o.tf)}</td><td class="urc"><b class="${o.r >= 0 ? "up" : "dn"}">${fmtR(o.r, 2)}</b></td>
        <td class="dim">${esc(o.d)}</td></tr>`).join("");
+    const share = ms.trades && ME.bot
+      ? `<div class="mystat" style="margin-top:10px"><a href="#" id="shareCard"
+         style="color:var(--pos);text-decoration:none">📤 поделиться карточкой итога</a></div>` : "";
     h += sec(`<section><div class="sec-h"><h2>МОЙ ИТОГ</h2>
       <span class="note">только отмеченные сделки</span></div>
-      <div class="mystat">${myline}</div>${sq}
+      <div class="mystat">${myline}</div>${sq}${share}
       ${rc.length ? `<div class="mystat" style="margin-top:10px">закрытые недавно — отметь свои:</div>
       <table class="pos-t">${rcRows}</table>` : ""}</section>`);
   }
@@ -387,6 +390,11 @@ if (inTg && tg.initData) {
 // PENDING переживает ре-рендеры (busy рисуется из него), поколение gen отбрасывает
 // устаревшие ответы при гонке двух тапов, !r.ok — честный алерт вместо тихого отката.
 document.addEventListener("click", e => {
+  if (e.target.closest("#shareCard")) {
+    e.preventDefault();
+    if (ME && ME.bot && inTg) tg.openTelegramLink(`https://t.me/${ME.bot}?start=mycard`);
+    return;
+  }
   const tr = e.target.closest("tr[data-sid]");
   if (!tr || !(ME && ME.private) || !inTg) return;
   const sid = +tr.dataset.sid;

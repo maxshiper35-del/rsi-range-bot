@@ -246,11 +246,13 @@ def build_weekly_card_html(data: dict) -> str:
     return f"<style>{_STYLE}</style>{body}"
 
 
-def render_html_to_png(html: str, width: int = _CARD_WIDTH, scale: int = 2) -> bytes:
+def render_html_to_png(html: str, width: int = _CARD_WIDTH, scale: int = 2,
+                       selector: str | None = None) -> bytes:
     """Синхронный рендер (Playwright sync API) — вызывать ТОЛЬКО из потока
     (asyncio.to_thread), никогда напрямую из event loop. Высота — intrinsic по контенту
     (full_page=True), не зафиксирована: юнит-чарт может перенестись на несколько строк
-    в активную неделю без обрезания карточки."""
+    в активную неделю без обрезания карточки. selector — скриншот ОДНОГО элемента
+    (личная карточка ниже вьюпорта — full_page дорисовал бы пустое поле до 800px)."""
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -260,6 +262,8 @@ def render_html_to_png(html: str, width: int = _CARD_WIDTH, scale: int = 2) -> b
             page.set_viewport_size({"width": width, "height": 800})
             page.set_content(html)
             page.wait_for_timeout(100)
+            if selector:
+                return page.locator(selector).screenshot()
             return page.screenshot(full_page=True)
         finally:
             browser.close()
@@ -267,6 +271,65 @@ def render_html_to_png(html: str, width: int = _CARD_WIDTH, scale: int = 2) -> b
 
 def render_weekly_card(data: dict) -> bytes:
     return render_html_to_png(build_weekly_card_html(data))
+
+
+# ---------------------------------------------------------------------------
+# Персональная карточка «мой итог» — шеринг подписчиком своего результата по
+# отметкам сделок. Терминальная эстетика дашборда v3 (моно, hairline, тёмный
+# фон, сине-красная пара). Без уровней и сетапов — только личные агрегаты.
+# ---------------------------------------------------------------------------
+
+_MYCARD_STYLE = """
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#121211; font-family:"SF Mono", ui-monospace, Menlo, Consolas, monospace;
+         color:#e8e6e1; -webkit-font-smoothing:antialiased; }
+  .card { width:1080px; padding:64px 72px 52px; background:
+          radial-gradient(1100px 480px at 18% -12%, rgba(57,135,229,.10), transparent 60%), #121211; }
+  .head { display:flex; justify-content:space-between; align-items:baseline;
+          border-bottom:1px solid #2a2927; padding-bottom:22px; }
+  .brand { font-size:26px; font-weight:700; letter-spacing:.28em; }
+  .tag { font-size:15px; color:#8a877f; letter-spacing:.05em; }
+  .num { font-size:150px; font-weight:700; letter-spacing:-.02em; margin:46px 0 8px;
+         font-variant-numeric:tabular-nums; }
+  .pos { color:#3987e5; } .neg { color:#e66767; }
+  .sub { font-size:20px; color:#8a877f; }
+  .row { display:flex; gap:10px; margin-top:42px; align-items:center; min-height:34px; }
+  .sq { width:34px; height:34px; border-radius:7px; }
+  .foot { display:flex; justify-content:space-between; margin-top:52px;
+          border-top:1px solid #2a2927; padding-top:22px; font-size:15px; color:#8a877f; }
+  .foot b { color:#c9c6bf; font-weight:600; }
+  .warn { margin-top:10px; font-size:13px; color:#5f5c55; }
+"""
+
+_MYCARD_BODY = Template("""
+<div class="card">
+  <div class="head"><div class="brand">RSI RANGE</div>
+    <div class="tag">мой результат · по отметкам сделок</div></div>
+  <div class="num $num_class">$total</div>
+  <div class="sub">$trades закрытых · winrate $winrate</div>
+  <div class="row">$squares</div>
+  <div class="foot"><div>канал: <b>@rsi_range</b></div><div>бот: <b>t.me/$bot</b></div></div>
+  <div class="warn">Не финансовый совет. Личная выборка сделок — итог может отличаться от стратегии.</div>
+</div>
+""")
+
+
+def render_my_card(data: dict) -> bytes:
+    """PNG личного итога (payments.taken_stats + ключ bot). Только через to_thread."""
+    squares = "".join(
+        f'<div class="sq" style="background:{"#3987e5" if r > 0 else "#e66767"}"></div>'
+        for r in data.get("last", []))
+    total = data["total_r"]
+    body = _MYCARD_BODY.substitute(
+        num_class="pos" if total >= 0 else "neg",
+        total=f"{total:+.1f}R",
+        trades=data["trades"],
+        winrate=f"{round((data.get('winrate') or 0) * 100)}%",
+        squares=squares,
+        bot=_esc(data.get("bot") or "rsirange_bot"),
+    )
+    return render_html_to_png(f"<style>{_MYCARD_STYLE}</style>{body}", width=1080,
+                              selector=".card")
 
 
 # ---------------------------------------------------------------------------

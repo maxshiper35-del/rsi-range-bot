@@ -426,6 +426,11 @@ def trail_only_exit() -> bool:
     return (_raw("trail_only_exit") or "1").lower() in _TRUE
 
 
+def bot_username() -> str | None:
+    """Username бота (пишется ботом при старте) — Mini App строит deep-links."""
+    return _raw("bot_username") or None
+
+
 def trail_max_hold_hours() -> float:
     """Потолок удержания позиции в часах (0 = без потолка). Дефолт 168 (7 дней): без
     фиксированного тейка сделка иначе может висеть неделями (в симуляции до 36 дней),

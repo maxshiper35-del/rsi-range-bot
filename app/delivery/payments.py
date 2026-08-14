@@ -657,6 +657,51 @@ def referral_stats(tg_id: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Персональный журнал (отметки «я зашёл» из Mini App) и коуч дисциплины
+# ---------------------------------------------------------------------------
+_CLOSED_SQL = ("status IN ('tp1','tp2','tp3','stopped','expired') "
+               "AND result_r IS NOT NULL")
+
+
+def taken_stats(tg_id: int) -> dict:
+    """Личный итог по отмеченным закрытым (для карточки и Mini App)."""
+    rs = [r["result_r"] for r in db.query(
+        f"SELECT s.result_r FROM user_taken ut JOIN signals s ON s.id = ut.signal_id "
+        f"WHERE ut.tg_id=? AND {_CLOSED_SQL} ORDER BY s.closed_at", (tg_id,))]
+    wins = sum(1 for r in rs if r > 0)
+    return {"trades": len(rs), "total_r": round(sum(rs), 2),
+            "winrate": round(wins / len(rs), 4) if rs else None,
+            "last": [round(r, 2) for r in rs[-10:]]}
+
+
+def weekly_discipline(tg_id: int, start_iso: str, end_iso: str) -> dict | None:
+    """Разбор дисциплины за период: взятое юзером vs всё закрытое стратегией.
+
+    None — юзер не пользуется отметками вовсе (ни одной за всю историю): блока в
+    дайджесте у него нет, это не «пропустил всё». Пропущенное считается только по
+    закрытиям периода — открытые ещё ничем не кончились."""
+    if not db.query_one("SELECT 1 FROM user_taken WHERE tg_id=? LIMIT 1", (tg_id,)):
+        return None
+    marked = {r["signal_id"] for r in db.query(
+        "SELECT signal_id FROM user_taken WHERE tg_id=?", (tg_id,))}
+    closed = list(db.query(
+        f"SELECT id, side, result_r FROM signals WHERE {_CLOSED_SQL} "
+        f"AND closed_at >= ? AND closed_at < ?", (start_iso, end_iso)))
+    taken = [r for r in closed if r["id"] in marked]
+    skipped = [r for r in closed if r["id"] not in marked]
+    return {
+        "closed_n": len(closed),
+        "closed_r": round(sum(r["result_r"] for r in closed), 2),
+        "taken_n": len(taken),
+        "taken_r": round(sum(r["result_r"] for r in taken), 2),
+        "skipped_n": len(skipped),
+        "skipped_r": round(sum(r["result_r"] for r in skipped), 2),
+        "skipped_short": sum(1 for r in skipped if r["side"] == "SHORT"),
+        "skipped_long": sum(1 for r in skipped if r["side"] == "LONG"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Настройки уведомлений: мьют и тихие часы (гейтят только DM-пуш сигналов)
 # ---------------------------------------------------------------------------
 def set_muted(tg_id: int, muted: bool) -> None:

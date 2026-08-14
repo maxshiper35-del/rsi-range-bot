@@ -239,6 +239,14 @@ def export_public_trades() -> list:
         "ORDER BY created_at, id")
 
 
+def open_signals_brief() -> list:
+    """Открытые для ПУБЛИЧНЫХ поверхностей (табло канала): символ/сторона/ТФ/время —
+    БЕЗ уровней и сетапов, та же граница публикации, что у дашборда."""
+    return [dict(r) for r in db.query(
+        "SELECT symbol, side, timeframe, created_at, filled_at FROM signals "
+        "WHERE status='open' AND result_r IS NULL ORDER BY created_at DESC")]
+
+
 def open_side_counts() -> dict:
     """Активные сигналы по направлениям (open, включая ждущие лимитки — обе несут риск):
     -> {"LONG": n, "SHORT": m}. Для портфельного лимита направления и /status."""

@@ -889,29 +889,48 @@ def weekly_report_period(now_dt: datetime) -> tuple[datetime, datetime]:
 
 
 def format_channel_live_board(st: dict, by_symbol: dict, cohort: dict | None = None,
-                              by_setup: dict | None = None) -> str:
-    """Живое табло для закреплённого поста канала: не winrate (самая манипулируемая метрика
-    ниши), а матожидание в R, размер выборки, разбивка по символам/сетапам, когорты (semiauto)."""
+                              open_rows: list | None = None,
+                              now_iso: str | None = None) -> str:
+    """Живое табло для закреплённого поста канала: не winrate (самая манипулируемая
+    метрика ниши), а матожидание в R, размер выборки, топ инструментов, живой список
+    открытых. Сетапов здесь НЕТ (граница публикации стратегии — фидбэк владельца
+    13.08; блок «По сетапам» удалён 14.08). Открытые — символ/сторона/ТФ/возраст,
+    без уровней и unrealized R: по временнОму ряду uR восстанавливаются вход и стоп."""
     lines = [f"📌 <b>RSI RANGE — живое табло</b>\n{_LINE}"]
     if st["trades"] == 0:
         lines.append("Сделки ещё копятся, первые результаты скоро появятся здесь.")
     else:
-        lines.append(f"Всего закрыто: <b>{st['trades']}</b>  (открыто {st['open']})")
+        lines.append(f"Всего закрыто: <b>{st['trades']}</b>")
         lines.append(f"Матожидание: <b>{st['expectancy_r']:+.2f}R</b> на сделку  |  "
                      f"Итог: <b>{st['total_r']:+.2f}R</b>  |  Winrate: {st['winrate']:.0%}")
         warn = _small_sample_warning(st["trades"]).rstrip()
         if warn:
             lines.append(warn)
         if by_symbol:
-            lines.append("\n<b>По инструментам:</b>")
-            for symbol, s in sorted(by_symbol.items()):
+            top = sorted(by_symbol.items(),
+                         key=lambda kv: kv[1]["trades"], reverse=True)[:8]
+            lines.append("\n<b>Топ инструментов:</b>")
+            for symbol, s in top:
                 lines.append(f"  • {templates.esc(symbol)}: {s['trades']} сд, "
                              f"exp {s['expectancy_r']:+.2f}R, итог {s['total_r']:+.2f}R")
-        if by_setup:
-            lines.append("\n<b>По сетапам:</b>")
-            for setup, s in sorted(by_setup.items()):
-                lines.append(f"  • {templates.esc(setup)}: {s['trades']} сд, "
-                             f"exp {s['expectancy_r']:+.2f}R, итог {s['total_r']:+.2f}R")
+            if len(by_symbol) > 8:
+                lines.append(f"  …и ещё {len(by_symbol) - 8} в /trackrecord")
+    if open_rows:
+        from datetime import datetime
+        lines.append(f"\n<b>Открыты сейчас ({len(open_rows)}):</b>")
+        for o in open_rows[:10]:
+            arrow = "▲" if o["side"] == "LONG" else "▼"
+            in_pos = bool(o.get("filled_at"))
+            anchor = o.get("filled_at") if in_pos else o.get("created_at")
+            age = ""
+            if anchor and now_iso:
+                h = (datetime.fromisoformat(now_iso)
+                     - datetime.fromisoformat(anchor)).total_seconds() / 3600
+                age = f" · {h:.0f}ч"
+            state = "в позиции" if in_pos else "ждёт входа"
+            sym = templates.esc(o["symbol"].split("/")[0])
+            lines.append(f"  {arrow} {sym} {templates.esc(o['timeframe'])} — {state}{age}")
+        lines.append("  Уровни и живой uR — подписчикам: @rsirange_bot")
     if cohort is not None:
         c, r = cohort["confirmed"], cohort["rejected"]
         lines.append("\n🧪 Подтверждённые оператором vs отклонённые (форвард-эксперимент):")
@@ -920,6 +939,8 @@ def format_channel_live_board(st: dict, by_symbol: dict, cohort: dict | None = N
         lines.append(f"  Edge оператора: {cohort['edge_r']:+.2f}R")
     lines.append(f"\n{NO_MANUAL_EDITS_LINE}")
     lines.append("Публикуем 100% исходов — включая убыточные.")
+    if now_iso:
+        lines.append(f"⏱ обновлено {now_iso[11:16]} UTC")
     return "\n".join(lines)
 
 
@@ -951,6 +972,7 @@ USER_COMMANDS = [
     ("promo", "применить промокод: /promo <код>"),
     ("referral", "пригласить друга и получить дни подписки"),
     ("depo", "твой объём в каждом сигнале: /depo <депозит$> [риск%]"),
+    ("mycard", "карточка твоего итога по отмеченным сделкам"),
     ("alert", "бесплатный прайс-алерт: /alert BTC 65000"),
     ("notify", "уведомления: мьют и тихие часы"),
     ("cancel", "отменить текущий пошаговый ввод"),
@@ -1391,6 +1413,29 @@ def main() -> None:
                 text="✅ Я оплатил USDT", callback_data="usdt_claim")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
+    async def _send_mycard(m):
+        """Личная карточка итога по отметкам (шеринг). Платникам/админам."""
+        uid = m.from_user.id
+        if not (await asyncio.to_thread(payments.is_paid, uid) or uid in cfg.admin_ids):
+            await m.answer("Карточка итога — для подписчиков: /subscribe")
+            return
+        ms = await asyncio.to_thread(payments.taken_stats, uid)
+        if not ms["trades"]:
+            await m.answer("Пока нечего рисовать: открой 📈 Дашборд → «Мой итог» и "
+                           "отметь ▢ сделки, в которые заходил — карточка соберётся "
+                           "по ним.")
+            return
+        ms["bot"] = bot_info["username"] or "rsirange_bot"
+        from aiogram.types import BufferedInputFile as _BIF
+        png = await asyncio.to_thread(graphics.render_my_card, ms)
+        await m.answer_photo(
+            _BIF(png, filename="my_result.png"),
+            caption="Твой итог по отмеченным сделкам. Перешли, куда захочешь 📤")
+
+    @dp.message(Command("mycard"))
+    async def _mycard_cmd(m):
+        await _send_mycard(m)
+
     @dp.message(Command("start"))
     async def _start(m):
         await asyncio.to_thread(payments.register_user, m.from_user.id, m.from_user.username)
@@ -1403,6 +1448,11 @@ def main() -> None:
         elif arg.startswith("ref_") and arg[4:].isdecimal():  # isdecimal: '²³' роняют int()
             await asyncio.to_thread(payments.set_referrer, m.from_user.id, int(arg[4:]))
             await asyncio.to_thread(payments.set_acquisition_source, m.from_user.id, "referral")
+        elif arg == "mycard":
+            # кнопка «поделиться карточкой» из Mini App: дашборд не умеет слать
+            # файлы — deep-link приводит в DM, где бот рисует и отдаёт PNG
+            await _send_mycard(m)
+            return
         elif arg.startswith("xray_") and arg[5:].isdecimal():
             # «Рентген сделки» из канала: показать анатомию ЗАКРЫТОГО сигнала и НЕ
             # вываливать следом весь онбординг — юзер пришёл за конкретной вещью.
@@ -3134,14 +3184,17 @@ def main() -> None:
         channel = runtime.signals_channel()
         if channel and runtime.channel_enabled():
             now = clock.utcnow_iso()
-            if should_refresh_board(runtime.last_board_update_at(), now):
+            # раз в час (был раз в сутки): живой список открытых с возрастами делает
+            # закреп «дышащим», а таймстемп в подвале гарантирует изменение текста
+            if should_refresh_board(runtime.last_board_update_at(), now, hours=1):
                 try:
                     st = await asyncio.to_thread(journal.stats)
                     by_symbol = await asyncio.to_thread(journal.stats_by_symbol)
-                    by_setup = await asyncio.to_thread(journal.stats_by_setup)
+                    open_rows = await asyncio.to_thread(journal.open_signals_brief)
                     cohort = (await asyncio.to_thread(journal.cohort_stats)
                              if runtime.signal_mode() == "semiauto" else None)
-                    text = format_channel_live_board(st, by_symbol, cohort, by_setup)
+                    text = format_channel_live_board(st, by_symbol, cohort,
+                                                     open_rows, now)
                 except Exception as e:                  # noqa: BLE001
                     # сбой рендера/чтения БД — состояние табло не трогаем, повторим на след. такте
                     log.warning("live board render: %s", e)
@@ -3283,7 +3336,12 @@ def main() -> None:
                 try:
                     if await _muted(uid):
                         continue
-                    await bot.send_message(uid, d_text, parse_mode="HTML")
+                    # коуч дисциплины — только пользующимся отметками (иначе None)
+                    coach = await asyncio.to_thread(
+                        payments.weekly_discipline, uid, start_iso, end_iso)
+                    block = templates.render_discipline_block(coach) if coach else ""
+                    await bot.send_message(uid, d_text + ("\n" + block if block else ""),
+                                           parse_mode="HTML")
                     sent += 1
                 except Exception as e:                  # noqa: BLE001
                     log.warning("дайджест -> %s: %s", uid, e)
@@ -3559,6 +3617,8 @@ def main() -> None:
             log.warning("register_bot_commands: %s", e)
         try:
             bot_info["username"] = (await bot.get_me()).username   # для CTA-кнопок канала
+            # username в settings — Mini App строит deep-link «поделиться карточкой»
+            await asyncio.to_thread(runtime.set_value, "bot_username", bot_info["username"])
         except Exception as e:                         # noqa: BLE001 — кнопки не критичны
             log.warning("get_me (CTA-кнопки канала будут без ссылки): %s", e)
         poller = asyncio.create_task(_poller(), name="poller")

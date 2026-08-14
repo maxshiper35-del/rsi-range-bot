@@ -216,6 +216,30 @@ def render_referral_invite(link: str, ref: dict, reward_days: int) -> str:
     )
 
 
+def render_discipline_block(c: dict) -> str:
+    """Коуч дисциплины для платника (по отметкам «я зашёл» в дашборде).
+
+    Только факты за неделю, без нравоучений: что закрыла стратегия, что взял юзер,
+    что прошло мимо. Паттерн по сторонам — только при достаточной выборке (>=4
+    пропущенных и перекос >=75%), чтобы не сочинять закономерности из шума.
+    Пустая строка — если за неделю закрытий не было (блок не рисуем)."""
+    if not c or not c["closed_n"]:
+        return ""
+    lines = [f"{LINE}", "🎯 <b>Твоя дисциплина</b> (по отметкам в дашборде)",
+             f"Стратегия закрыла {c['closed_n']} сд: <b>{c['closed_r']:+.1f}R</b>. "
+             f"Ты отметил {c['taken_n']}: <b>{c['taken_r']:+.1f}R</b>."]
+    if c["skipped_n"]:
+        lines.append(f"Мимо прошло {c['skipped_n']} сд на {c['skipped_r']:+.1f}R.")
+    sk = c["skipped_short"] + c["skipped_long"]
+    if sk >= 4:
+        if c["skipped_short"] / sk >= 0.75:
+            lines.append(f"Чаще пропускаешь шорты: {c['skipped_short']} из {sk}.")
+        elif c["skipped_long"] / sk >= 0.75:
+            lines.append(f"Чаще пропускаешь лонги: {c['skipped_long']} из {sk}.")
+    lines.append("Отметки: 📈 Дашборд → «Мой итог»")
+    return "\n".join(lines) + "\n"
+
+
 def render_weekly_digest(period_label: str, wk: dict, st: dict,
                          missed: dict | None = None) -> str:
     """Недельный личный дайджест: итоги ЭТОЙ недели (stats_for_period) + всё время.

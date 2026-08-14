@@ -830,3 +830,69 @@ def test_free_active_ids_includes_lapsed_paid(fresh_db):
     db.execute("UPDATE users SET paid_until='2020-01-01T00:00:00+00:00' WHERE tg_id=62")
     ids = set(payments.free_active_ids())
     assert 60 in ids and 62 in ids and 61 not in ids
+
+
+def _closed_signal(sym: str, side: str, r: float, closed: str) -> int:
+    from app import db
+    db.execute(
+        "INSERT INTO signals(symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at, filled_at, closed_at, result_r) "
+        "VALUES (?,?, '1h', 1, 0.9, 2.0, 0.7, '{}', 'stopped', "
+        "'2026-08-01T00:00:00+00:00', '2026-08-01T01:00:00+00:00', ?, ?)",
+        (sym, side, closed, r))
+    return db.query_one("SELECT MAX(id) AS i FROM signals")["i"]
+
+
+def _mark(tg_id: int, sid: int) -> None:
+    from app import db
+    db.execute("INSERT OR IGNORE INTO user_taken(tg_id, signal_id, created_at) "
+               "VALUES (?,?, '2026-08-12T00:00:00+00:00')", (tg_id, sid))
+
+
+def test_weekly_discipline_math(fresh_db):
+    """Коуч: взятое vs пропущенное за неделю; None — если отметками не пользуется."""
+    from app.delivery import payments
+
+    payments.register_user(700100, "coachee")
+    a = _closed_signal("AAA/USDT:USDT", "LONG", 2.0, "2026-08-10T10:00:00+00:00")
+    _closed_signal("BBB/USDT:USDT", "SHORT", -1.0, "2026-08-11T10:00:00+00:00")
+    _closed_signal("CCC/USDT:USDT", "SHORT", 3.0, "2026-08-12T10:00:00+00:00")
+    # не пользуется отметками -> None (нет блока, а не «пропустил всё»)
+    assert payments.weekly_discipline(
+        700100, "2026-08-10T00:00:00+00:00", "2026-08-17T00:00:00+00:00") is None
+    _mark(700100, a)
+    c = payments.weekly_discipline(
+        700100, "2026-08-10T00:00:00+00:00", "2026-08-17T00:00:00+00:00")
+    assert c["closed_n"] == 3 and c["closed_r"] == 4.0
+    assert c["taken_n"] == 1 and c["taken_r"] == 2.0
+    assert c["skipped_n"] == 2 and c["skipped_r"] == 2.0
+    assert c["skipped_short"] == 2 and c["skipped_long"] == 0
+    # закрытие ВНЕ окна не считается
+    c2 = payments.weekly_discipline(
+        700100, "2026-08-10T00:00:00+00:00", "2026-08-11T00:00:00+00:00")
+    assert c2["closed_n"] == 1 and c2["taken_n"] == 1
+
+
+def test_taken_stats_and_discipline_render(fresh_db):
+    from app.delivery import payments, templates
+
+    payments.register_user(700200, "renderer")
+    a = _closed_signal("AAA/USDT:USDT", "LONG", 1.9, "2026-08-10T10:00:00+00:00")
+    b = _closed_signal("BBB/USDT:USDT", "LONG", -1.0, "2026-08-11T10:00:00+00:00")
+    _mark(700200, a)
+    _mark(700200, b)
+    ms = payments.taken_stats(700200)
+    assert ms["trades"] == 2 and ms["total_r"] == 0.9 and ms["winrate"] == 0.5
+    txt = templates.render_discipline_block({
+        "closed_n": 5, "closed_r": 3.2, "taken_n": 2, "taken_r": 0.9,
+        "skipped_n": 3, "skipped_r": 2.3, "skipped_short": 3, "skipped_long": 0})
+    assert "Твоя дисциплина" in txt and "+3.2R" in txt and "+0.9R" in txt
+    assert "Мимо прошло 3" in txt
+    assert "пропускаешь шорты" not in txt          # выборка мала (3 < 4) — паттерн молчит
+    txt2 = templates.render_discipline_block({
+        "closed_n": 6, "closed_r": 1.0, "taken_n": 1, "taken_r": 0.0,
+        "skipped_n": 5, "skipped_r": 1.0, "skipped_short": 4, "skipped_long": 1})
+    assert "пропускаешь шорты: 4 из 5" in txt2
+    assert templates.render_discipline_block(
+        {"closed_n": 0, "closed_r": 0, "taken_n": 0, "taken_r": 0,
+         "skipped_n": 0, "skipped_r": 0, "skipped_short": 0, "skipped_long": 0}) == ""

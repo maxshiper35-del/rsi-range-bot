@@ -253,10 +253,22 @@ def test_format_channel_live_board():
     txt2 = bot.format_channel_live_board(st, {}, cohort=cohort)
     assert "Edge оператора: +0.60R" in txt2
 
-    by_setup = {"LTF-BB": {"trades": 5, "wins": 1, "winrate": 0.2,
-                           "expectancy_r": -0.2, "total_r": -1.0}}
-    txt3 = bot.format_channel_live_board(st, {}, by_setup=by_setup)
-    assert "По сетапам" in txt3 and "LTF-BB" in txt3
+    # граница публикации: сетапов в публичном табло НЕТ (фидбэк владельца 13.08),
+    # открытые — символ/сторона/ТФ/возраст, без уровней и uR
+    open_rows = [
+        {"symbol": "SOL/USDT:USDT", "side": "LONG", "timeframe": "4h",
+         "created_at": "2026-08-12T12:00:00+00:00",
+         "filled_at": "2026-08-12T16:00:00+00:00"},
+        {"symbol": "CYS/USDT:USDT", "side": "SHORT", "timeframe": "1h",
+         "created_at": "2026-08-13T11:00:00+00:00", "filled_at": None},
+    ]
+    txt3 = bot.format_channel_live_board(st, {}, open_rows=open_rows,
+                                         now_iso="2026-08-13T20:00:00+00:00")
+    assert "сетап" not in txt3.lower() and "6226" not in txt3
+    assert "Открыты сейчас (2)" in txt3
+    assert "▲ SOL 4h — в позиции · 28ч" in txt3
+    assert "▼ CYS 1h — ждёт входа · 9ч" in txt3
+    assert "обновлено 20:00 UTC" in txt3
 
 
 def test_format_report():
