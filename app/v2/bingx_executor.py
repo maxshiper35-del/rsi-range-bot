@@ -47,17 +47,32 @@ MAX_NOTIONAL_USDT = 4500.0   # BingX: «maximum position value for this leverage
 
 
 def calc_qty(balance: float, risk_pct: float, entry: float, stop: float,
-             min_qty: float, qty_step: float) -> float:
+             min_qty: float, qty_step: float,
+             max_notional: float = MAX_NOTIONAL_USDT) -> float:
     """Объём от риска: risk_pct% баланса / дистанцию стопа, с капом биржевого
-    номинала, вниз до шага объёма. 0.0 = не проходит по минимальному объёму."""
+    номинала, вниз до шага объёма. 0.0 = не проходит по минимальному объёму.
+    max_notional — ОСТАТОК бюджета символа/стороны: лимит 5000 USDT у BingX общий
+    на позицию символа, второй сигнал того же символа (другой ТФ) ловил 101209,
+    пока кап был на-ордер (17.08: #325/#328/#329/#334/#338/#340)."""
     risk_amount = balance * risk_pct / 100.0
     dist = abs(entry - stop)
-    if dist <= 0 or risk_amount <= 0 or entry <= 0:
+    if dist <= 0 or risk_amount <= 0 or entry <= 0 or max_notional <= 0:
         return 0.0
-    qty = min(risk_amount / dist, MAX_NOTIONAL_USDT / entry)
+    qty = min(risk_amount / dist, max_notional / entry)
     if qty_step > 0:
         qty = int(qty / qty_step) * qty_step
     return 0.0 if qty < max(min_qty, 0) or qty <= 0 else round(qty, 10)
+
+
+def _active_notional(symbol: str, side: str) -> float:
+    """Суммарный номинал УЖЕ ведущихся ордеров/позиций символа/стороны (учёт наш,
+    не биржи: стоящие лимитки биржевой fetch_positions не видит, а лимит BingX
+    считает и их)."""
+    r = db.query_one(
+        "SELECT COALESCE(SUM(qty * entry_px), 0) AS s FROM executor_orders "
+        "WHERE symbol=? AND side=? AND state IN ('placing','placed','filled')",
+        (symbol, side))
+    return float(r["s"]) if r and r["s"] else 0.0
 
 
 @dataclass
@@ -179,13 +194,17 @@ def reconcile() -> list[str]:
                 r = rows_by_id[a.signal_id]
                 m = ex.market(r["symbol"])
                 lim = m.get("limits", {}) or {}
+                budget = MAX_NOTIONAL_USDT - _active_notional(r["symbol"], r["side"])
                 qty = calc_qty(balance, runtime.executor_risk_pct(), r["entry"], r["stop"],
                                float((lim.get("amount") or {}).get("min") or 0),
-                               float(m.get("precision", {}).get("amount") or 0))
+                               float(m.get("precision", {}).get("amount") or 0),
+                               max_notional=budget)
                 if qty <= 0:
+                    why = ("бюджет номинала символа/стороны исчерпан (лимит BingX 5000)"
+                           if budget < MAX_NOTIONAL_USDT else "объём ниже минимума биржи")
                     _track(a.signal_id, r, 0.0, "")
-                    _set_state(a.signal_id, "error", "объём ниже минимума биржи")
-                    report.append(f"⏭ #{a.signal_id}: объём ниже минимума биржи")
+                    _set_state(a.signal_id, "error", why)
+                    report.append(f"⏭ #{a.signal_id}: {why}")
                     continue
                 side = "buy" if r["side"] == "LONG" else "sell"
                 client_id = f"{_ENTRY_PREFIX}{a.signal_id}"

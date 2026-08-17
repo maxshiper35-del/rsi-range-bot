@@ -93,3 +93,28 @@ def test_execution_report_slippage_and_gap(fresh_db):
     # вне периода -> пусто
     assert ex.execution_report("2026-01-01T00:00:00+00:00",
                                "2026-01-02T00:00:00+00:00") is None
+
+
+def test_calc_qty_symbol_budget(fresh_db):
+    """Лимит BingX 5000 USDT — общий на символ/сторону: второй сигнал того же
+    символа получает ОСТАТОК бюджета, а не полный кап (инцидент 101209 17.08)."""
+    from app.v2 import bingx_executor as ex
+    db_mod = __import__("app.db", fromlist=["db"])
+    db_mod.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at) VALUES "
+        "(901,'BBB/USDT:USDT','SHORT','1h',0.9,1.0,2.0,0.7,'{}','open',"
+        "'2026-08-17T00:00:00+00:00')")
+    db_mod.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, created_at) VALUES (901,'BBB/USDT:USDT','SHORT',5000,0.9,"
+        "1.0,'rsiE901','placed','2026-08-17T00:00:00+00:00')")
+    used = ex._active_notional("BBB/USDT:USDT", "SHORT")
+    assert used == 4500.0
+    # остаток бюджета 0 -> объём 0 (вторая лимитка не пробьёт биржевой лимит)
+    qty = ex.calc_qty(100_000, 1.0, 0.9, 1.0, 0.0, 0.0,
+                      max_notional=ex.MAX_NOTIONAL_USDT - used)
+    assert qty == 0.0
+    # закрытые/ошибочные бюджет не держат
+    db_mod.execute("UPDATE executor_orders SET state='closed' WHERE signal_id=901")
+    assert ex._active_notional("BBB/USDT:USDT", "SHORT") == 0.0
