@@ -40,10 +40,11 @@ _ENTRY_PREFIX = "rsiE"
 # ---------------------------------------------------------------------------
 # Чистые функции (тестируются без сети)
 # ---------------------------------------------------------------------------
-MAX_NOTIONAL_USDT = 4500.0   # BingX: «maximum position value for this leverage is 5000
-#                              USDT» (code 101209, первый живой ордер #324 14.08) —
-#                              кап номинала с запасом. Риск в $ при капе меньше 1% —
-#                              для демо-зеркала это ок: паритет исполнения важнее суммы.
+MAX_NOTIONAL_USDT = 1500.0   # BingX: лимит «5000 USDT на позицию символа» (101209) —
+#                              общий бюджет символа/стороны. 1500 = влезают ТРИ
+#                              одновременных сигнала одного символа (мульти-ТФ дубли —
+#                              норма журнала): для демо-зеркала ПОКРЫТИЕ замера паритета
+#                              важнее размера позиции (20.08: кап 4500 пропускал дубли).
 
 
 def calc_qty(balance: float, risk_pct: float, entry: float, stop: float,
@@ -212,11 +213,15 @@ def reconcile() -> list[str]:
                 # оставит ордер-сироту — recovery в except сверит по clientOrderID
                 _track(a.signal_id, r, qty, client_id)
                 try:
+                    # цены — к тику инструмента: сырой стоп ловил 101400
+                    # «SL Price must be…» на монетах с крупным тиком (#343 PORTAL 20.08)
                     ex.create_order(
-                        r["symbol"], "limit", side, qty, r["entry"],
+                        r["symbol"], "limit", side, qty,
+                        float(ex.price_to_precision(r["symbol"], r["entry"])),
                         params={"positionSide": r["side"], "clientOrderID": client_id,
                                 "stopLoss": {"type": "STOP_MARKET",
-                                             "stopPrice": float(r["stop"])}})
+                                             "stopPrice": float(ex.price_to_precision(
+                                                 r["symbol"], r["stop"]))}})
                 except Exception:                       # noqa: BLE001
                     # неоднозначный сбой (таймаут после отправки?): сверить по clientOrderID —
                     # ордер реально стоит -> успех; нет -> настоящая ошибка наверх

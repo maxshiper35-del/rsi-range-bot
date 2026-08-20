@@ -5,16 +5,16 @@ from app.v2.bingx_executor import Action, calc_qty, plan
 
 
 def test_calc_qty_risk_based():
-    # риск 1% от 10k VST = 100; стоп-дистанция 200 -> 0.5 BTC номиналом $3200 —
-    # под капом 4500 USDT, риск-формула работает как есть
-    assert calc_qty(10_000, 1.0, 6_400, 6_200, 0.001, 0.001) == 0.5
+    # риск 1% от 10k VST = 100; стоп-дистанция 10 -> 10 монет номиналом $1000 —
+    # под капом 1500 USDT, риск-формула работает как есть
+    assert calc_qty(10_000, 1.0, 100, 90, 0.001, 0.001) == 10.0
     # шаг объёма режет ВНИЗ (никогда не превышать риск)
-    assert calc_qty(10_000, 1.0, 6_400, 6_200, 0.001, 0.3) == 0.3
+    assert calc_qty(10_000, 1.0, 100, 90, 0.001, 3.0) == 9.0
     # ниже минимального объёма биржи -> 0 (сделка пропускается)
-    assert calc_qty(10, 1.0, 6_400, 6_200, 0.001, 0.001) == 0.0
+    assert calc_qty(10, 1.0, 100, 90, 0.5, 0.001) == 0.0
     # вырожденные входы не роняют
-    assert calc_qty(10_000, 1.0, 6_400, 6_400, 0.001, 0.001) == 0.0
-    assert calc_qty(0, 1.0, 6_400, 6_200, 0.001, 0.001) == 0.0
+    assert calc_qty(10_000, 1.0, 100, 100, 0.001, 0.001) == 0.0
+    assert calc_qty(0, 1.0, 100, 90, 0.001, 0.001) == 0.0
 
 
 def _row(sid, symbol="BTC/USDT:USDT", created="2026-08-13T10:00:00+00:00", filled=None):
@@ -64,8 +64,8 @@ def test_calc_qty_notional_cap():
     from app.v2 import bingx_executor as ex
     qty = ex.calc_qty(100_000, 1.0, entry=100.0, stop=99.0, min_qty=0.0, qty_step=0.001)
     assert qty * 100.0 <= ex.MAX_NOTIONAL_USDT + 1e-6
-    # без капа было бы 1000/1 = 1000 монет ($100k) — теперь 45 монет ($4500)
-    assert qty == 45.0
+    # без капа было бы 1000/1 = 1000 монет ($100k) — теперь 15 монет ($1500)
+    assert qty == 15.0
 
 
 def test_execution_report_slippage_and_gap(fresh_db):
