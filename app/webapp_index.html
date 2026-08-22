@@ -64,7 +64,8 @@ header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;
 .mrow{display:flex;justify-content:space-between;align-items:baseline;
   padding:7px 14px;border-top:1px solid var(--grid)}
 .mrow:first-child{border-top:none}
-.mrow b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:13.5px;font-weight:600}
+.mrow b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:13.5px;font-weight:600;
+  white-space:nowrap}
 .mrow span{font-size:10.5px;color:var(--ink-3)}
 
 .strip{display:flex;gap:0;background:var(--panel);border:1px solid var(--line);
@@ -116,6 +117,7 @@ tr[data-sid].busy{opacity:.45;pointer-events:none}
   font-family:ui-monospace,monospace;font-weight:700;font-size:11px}
 .side-tag.l{color:var(--pos)} .side-tag.s{color:var(--neg)}
 
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:0 18px;align-items:start}
 .foot{font-size:10.5px;color:var(--ink-3);line-height:1.6;padding:12px 2px 0;margin-top:6px}
 .foot a{color:var(--ink-2)}
 .tip{position:fixed;pointer-events:none;background:var(--panel2);color:var(--ink);
@@ -176,8 +178,23 @@ function derive(eq) {
     const k = y.toISOString().slice(5, 10);
     weeks.set(k, +(((weeks.get(k) || 0) + x.r)).toFixed(2));
   }
+  const months = new Map();
+  for (const x of tr) {
+    const k = x.t.slice(0, 7);
+    const m = months.get(k) || { n: 0, w: 0, r: 0 };
+    m.n++; if (x.r > 0) m.w++; m.r = +(m.r + x.r).toFixed(2);
+    months.set(k, m);
+  }
+  let ws = 0, ls = 0, maxWs = 0, maxLs = 0;
+  for (const x of tr) {
+    if (x.r > 0) { ws++; ls = 0; } else { ls++; ws = 0; }
+    maxWs = Math.max(maxWs, ws); maxLs = Math.max(maxLs, ls);
+  }
   return { tr, pf: lSum ? Math.abs(wSum / lSum) : (wSum ? 99 : 0), maxDD: dd,
-           weeks: [...weeks.entries()].slice(-8), last: tr.slice(-10) };
+           weeks: [...weeks.entries()].slice(-8), last: tr.slice(-10),
+           months: [...months.entries()].slice(-6),
+           avgWin: wins.length ? wSum / wins.length : 0,
+           avgLoss: losses.length ? lSum / losses.length : 0, maxWs, maxLs };
 }
 
 function pick() {
@@ -205,6 +222,8 @@ function render(noAnim) {
       <div class="mrow"><span>на сделку</span><b>${fmtR(exp, 2)}</b></div>
       <div class="mrow"><span>профит-фактор</span><b>${d.pf ? d.pf.toFixed(2) : "—"}</b></div>
       <div class="mrow"><span>просадка max</span><b>−${d.maxDD.toFixed(1)}R</b></div>
+      <div class="mrow"><span>сред. плюс/минус</span><b><span class="up">${fmtR(d.avgWin, 1)}</span>/<span class="dn">${fmtR(d.avgLoss, 1)}</span></b></div>
+      <div class="mrow"><span>серии max</span><b><span class="up">${d.maxWs}▲</span> <span class="dn">${d.maxLs}▼</span></b></div>
     </div></div>`);
   h += sec(`<div class="strip">
     <div class="cell"><b>${wr}%</b><span>winrate</span></div>
@@ -215,9 +234,14 @@ function render(noAnim) {
     const ss = ME.since_stats, pos = ME.positions || [], tk = ME.taken || [];
     const fmtP = v => String(+v);
     const ckb = id => `<td class="ck">${tk.includes(id) ? "▣" : "▢"}</td>`;
-    const stat = ss && ss.trades
+    let stat = ss && ss.trades
       ? `с подписки${ME.since ? " · " + ME.since : ""}: <b class="${(ss.total_r || 0) >= 0 ? "up" : "dn"}">${fmtR(ss.total_r || 0)}</b> · ${ss.trades} закрытых`
       : "с подписки: закрытых сделок пока нет";
+    const urs = pos.filter(o => o.ur != null);
+    if (urs.length) {
+      const urSum = urs.reduce((a, o) => a + o.ur, 0);
+      stat += ` · в позициях сейчас: <b class="${urSum >= 0 ? "up" : "dn"}">${fmtR(urSum, 2)}</b>`;
+    }
     const rcls = (o, pend) => [pend ? "pend" : "", PENDING.has(o.id) ? "busy" : ""]
       .filter(Boolean).join(" ");
     const rows = pos.map(o =>
@@ -244,15 +268,20 @@ function render(noAnim) {
     const share = ms.trades && ME.bot
       ? `<div class="mystat" style="margin-top:10px"><a href="#" id="shareCard"
          style="color:var(--pos);text-decoration:none">📤 поделиться карточкой итога</a></div>` : "";
+    const myEq = (ms.eq || []).length > 1
+      ? `<div class="plot" style="margin-bottom:6px">${equitySVG(ms.eq, 150, "")}</div>` : "";
+    const vs = ms.strat_r != null && ms.trades
+      ? `<div class="mystat">стратегия за тот же период: <b class="${ms.strat_r >= 0 ? "up" : "dn"}">${fmtR(ms.strat_r)}</b> по ${ms.strat_n} сделкам — ты взял ${ms.trades} из ${ms.strat_n}</div>` : "";
     h += sec(`<section><div class="sec-h"><h2>МОЙ ИТОГ</h2>
       <span class="note">только отмеченные сделки</span></div>
-      <div class="mystat">${myline}</div>${sq}${share}
+      <div class="mystat">${myline}</div>${myEq}${vs}${sq}${share}
       ${rc.length ? `<div class="mystat" style="margin-top:10px">закрытые недавно — отметь свои:</div>
       <table class="pos-t">${rcRows}</table>` : ""}</section>`);
   }
   h += sec(`<section><div class="sec-h"><h2>ЭКВИТИ · R</h2>
     <span class="note">по закрытиям</span></div>
     <div class="plot">${equitySVG(eq)}</div>
+    <div class="plot" style="margin-top:2px">${ddSVG(eq)}</div>
     ${(st.trades || 0) < 100 ? `<div class="warn">⚠ выборка мала (n=${st.trades}) — цифры шумят</div>` : ""}
     </section>`);
   h += sec(`<section><div class="sec-h"><h2>R ПО НЕДЕЛЯМ</h2>
@@ -266,6 +295,24 @@ function render(noAnim) {
   h += sec(`<section><div class="sec-h"><h2>РАСПРЕДЕЛЕНИЕ</h2>
     <span class="note">сделок в диапазоне R</span></div>
     <div class="plot">${histSVG(d.tr)}</div></section>`);
+  if ((d.months || []).length > 1) {
+    h += sec(`<section><div class="sec-h"><h2>ПО МЕСЯЦАМ</h2>
+      <span class="note">закрытые сделки</span></div>
+      <table class="pos-t">${d.months.map(([m, v]) =>
+        `<tr><td><span class="sym">${m}</span></td><td class="dim">${v.n} сд.</td>
+         <td class="dim">WR ${v.n ? Math.round(v.w / v.n * 100) : 0}%</td>
+         <td class="urc"><b class="${v.r >= 0 ? "up" : "dn"}">${fmtR(v.r)}</b></td></tr>`).join("")}
+      </table></section>`);
+  }
+  const sy = DATA.symbols;
+  if (sy && (sy.best || []).length) {
+    const syRow = o => `<tr><td><span class="sym">${esc(o.s)}</span></td><td class="dim">${o.n} сд.</td>
+      <td class="urc"><b class="${o.r >= 0 ? "up" : "dn"}">${fmtR(o.r)}</b></td></tr>`;
+    h += sec(`<section><div class="sec-h"><h2>ИНСТРУМЕНТЫ</h2>
+      <span class="note">лучшие и худшие · вся история</span></div>
+      <div class="two-col"><table class="pos-t">${sy.best.map(syRow).join("")}</table>
+      <table class="pos-t">${(sy.worst || []).map(syRow).join("")}</table></div></section>`);
+  }
   if (DATA.open_signals.length && !(ME && ME.private)) {   // подписчику хватает «МОИХ ПОЗИЦИЙ»
     h += sec(`<section><div class="sec-h"><h2>ОТКРЫТЫ СЕЙЧАС</h2>
       <span class="note">уровни — по подписке</span></div><table class="pos-t">${
@@ -283,13 +330,14 @@ function render(noAnim) {
   wireTip();
 }
 
-function equitySVG(eq) {
+function equitySVG(eq, H = 250, id = "eq") {
   if (!eq || eq.length < 2) return `<div class="warn" style="padding:24px 8px">мало закрытий для кривой</div>`;
-  const W = 640, H = 250, P = {l: 34, r: 54, t: 14, b: 22};
+  const W = 640, P = {l: 34, r: 54, t: 14, b: 22};
+  const gid = "fade_" + (id || "my");
   const ys = eq.map(p => p.r), yMin = Math.min(0, ...ys), yMax = Math.max(0, ...ys);
   const X = i => P.l + i * (W - P.l - P.r) / (eq.length - 1);
   const Y = v => P.t + (yMax - v) * (H - P.t - P.b) / (yMax - yMin || 1);
-  let g = `<defs><linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+  let g = `<defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
     <stop offset="0" stop-color="var(--pos)" stop-opacity=".14"/>
     <stop offset="1" stop-color="var(--pos)" stop-opacity="0"/></linearGradient></defs>`;
   for (let k = 0; k <= 3; k++) {
@@ -301,16 +349,35 @@ function equitySVG(eq) {
   const pts = eq.map((p, i) => X(i).toFixed(1) + " " + Y(p.r).toFixed(1));
   const path = "M" + pts.join("L");
   const base = Y(yMin);
-  g += `<path d="${path}L${X(eq.length - 1)} ${base}L${X(0)} ${base}Z" fill="url(#fade)"/>`;
+  g += `<path d="${path}L${X(eq.length - 1)} ${base}L${X(0)} ${base}Z" fill="url(#${gid})"/>`;
   g += `<path d="${path}" fill="none" stroke="var(--pos)" stroke-width="2" stroke-linejoin="round"/>`;
   const last = eq[eq.length - 1];
   g += `<circle cx="${X(eq.length - 1)}" cy="${Y(last.r)}" r="3.5" fill="var(--pos)"/>
         <text x="${X(eq.length - 1) + 7}" y="${Y(last.r) + 4}" font-size="12" font-weight="700" font-family="IBM Plex Mono,monospace" fill="var(--ink)">${fmtR(last.r)}</text>`;
   g += `<text x="${P.l}" y="${H - 5}" font-size="9.5" font-family="IBM Plex Mono,monospace" fill="var(--ink-3)">${eq[0].t}</text>
         <text x="${W - P.r}" y="${H - 5}" text-anchor="end" font-size="9.5" font-family="IBM Plex Mono,monospace" fill="var(--ink-3)">${last.t}</text>`;
-  return `<svg viewBox="0 0 ${W} ${H}" id="eq" data-n="${eq.length}">${g}
-    <line id="xh" y1="${P.t}" y2="${H - P.b}" stroke="var(--zero)" stroke-width="1" opacity="0"/>
+  return `<svg viewBox="0 0 ${W} ${H}"${id ? ` id="${id}"` : ""} data-n="${eq.length}">${g}
+    ${id ? `<line id="xh" y1="${P.t}" y2="${H - P.b}" stroke="var(--zero)" stroke-width="1" opacity="0"/>` : ""}
     <rect x="${P.l}" y="${P.t}" width="${W - P.l - P.r}" height="${H - P.t - P.b}" fill="transparent"/></svg>`;
+}
+
+function ddSVG(eq) {
+  if (!eq || eq.length < 2) return "";
+  const W = 640, H = 90, P = {l: 34, r: 54, t: 6, b: 16};
+  let peak = -1e9;
+  const dd = eq.map(p => { peak = Math.max(peak, p.r); return +(p.r - peak).toFixed(2); });
+  const yMin = Math.min(...dd, -0.01);
+  const X = i => P.l + i * (W - P.l - P.r) / (dd.length - 1);
+  const Y = v => P.t + (0 - v) * (H - P.t - P.b) / (0 - yMin);
+  let path = "M" + dd.map((v, i) => X(i).toFixed(1) + " " + Y(v).toFixed(1)).join("L");
+  const worst = Math.min(...dd), wi = dd.indexOf(worst);
+  return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
+    <line x1="${P.l}" x2="${W - P.r}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--grid)"/>
+    <path d="${path}L${X(dd.length - 1)} ${Y(0)}L${X(0)} ${Y(0)}Z" fill="var(--neg)" opacity=".13"/>
+    <path d="${path}" fill="none" stroke="var(--neg)" stroke-width="1.5" stroke-linejoin="round"/>
+    <circle cx="${X(wi)}" cy="${Y(worst)}" r="2.5" fill="var(--neg)"/>
+    <text x="${W - P.r + 6}" y="${Y(worst) + 4}" font-size="10" font-family="IBM Plex Mono,monospace" fill="var(--neg)">${worst.toFixed(1)}R</text>
+    <text x="${P.l}" y="${H - 3}" font-size="9" font-family="IBM Plex Mono,monospace" fill="var(--ink-3)">просадка от пика</text></svg>`;
 }
 
 function weeksSVG(weeks) {

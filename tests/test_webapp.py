@@ -285,3 +285,37 @@ def test_og_png_and_meta_injection(fresh_db, monkeypatch, tmp_path):
         body = c.get("/").get_data(as_text=True)
         assert 'og:image" content="https://example.test/og.png"' in body
         assert "summary_large_image" in body
+
+def test_symbols_best_worst_public(fresh_db):
+    """Инструменты в публичном API: лучшие И худшие (не витрина), без сетапов."""
+    for sym, r in (("AAA/USDT:USDT", 3.0), ("BBB/USDT:USDT", -1.0), ("CCC/USDT:USDT", 1.0)):
+        _mk_closed(sym, r, "2026-08-10T00:00:00+00:00")
+    from app.webapp import app as flask_app
+    with flask_app.test_client() as c:
+        raw = c.get("/api/stats").get_data(as_text=True)
+    d = json.loads(raw)["symbols"]
+    assert d["best"][0]["s"] == "AAA" and d["best"][0]["r"] == 3.0
+    assert d["worst"][0]["s"] == "BBB" and d["worst"][0]["r"] == -1.0
+    assert "setup" not in raw and "6226" not in raw
+
+
+def test_my_stats_eq_and_strategy_comparison(fresh_db, webapp_token, monkeypatch):
+    """Личная эквити и «ты vs стратегия»: стратегия считается с первого отмеченного
+    закрытия, кривая — кумулятивная по отметкам."""
+    from app import db, webapp
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(700100, "payer")
+    db.execute("UPDATE users SET tier='paid', paid_until='2099-01-01T00:00:00+00:00' "
+               "WHERE tg_id=700100")
+    a = _mk_closed("AAA/USDT:USDT", 2.0, "2026-08-10T00:00:00+00:00")
+    _mk_closed("BBB/USDT:USDT", -1.0, "2026-08-11T00:00:00+00:00")   # не отмечена
+    b = _mk_closed("CCC/USDT:USDT", 1.5, "2026-08-12T00:00:00+00:00")
+    monkeypatch.setattr(webapp, "_last_prices", lambda syms: {})
+    hdr = {"Authorization": "tma " + _init_data("123:TEST", 700100)}
+    with flask_app.test_client() as c:
+        for sid in (a, b):
+            c.post("/api/take", json={"signal_id": sid, "taken": True}, headers=hdr)
+        ms = json.loads(c.get("/api/me", headers=hdr).get_data(as_text=True))["my_stats"]
+    assert [p["r"] for p in ms["eq"]] == [2.0, 3.5]                 # кумулятив
+    assert ms["strat_r"] == 2.5 and ms["strat_n"] == 3              # с первого отмеченного

@@ -245,13 +245,50 @@ def _taken_ids(tg_id: int) -> list[int]:
         "SELECT signal_id FROM user_taken WHERE tg_id=?", (tg_id,))]
 
 
-def _my_stats(tg_id: int) -> dict:
-    """Личный итог по отмеченным — общий расчёт с ботом (карточка/коуч)."""
-    from app.delivery import payments
-    return payments.taken_stats(tg_id)
-
-
 _CLOSED = "status IN ('tp1','tp2','tp3','stopped','expired') AND result_r IS NOT NULL"
+
+
+def _my_stats(tg_id: int) -> dict:
+    """Личный итог по отмеченным — базовый расчёт общий с ботом (карточка/коуч),
+    поверх — личная эквити-кривая и «ты vs стратегия» за тот же период (v4-max)."""
+    from app.delivery import payments
+    out = payments.taken_stats(tg_id)
+    rows = list(db.query(
+        "SELECT s.result_r, s.closed_at FROM user_taken ut "
+        "JOIN signals s ON s.id = ut.signal_id "
+        "WHERE ut.tg_id=? AND s.result_r IS NOT NULL AND s.status IN "
+        "('tp1','tp2','tp3','stopped','expired') ORDER BY s.closed_at", (tg_id,)))
+    if rows:
+        cum, eq = 0.0, []
+        for r in rows:
+            cum += r["result_r"]
+            eq.append({"t": (r["closed_at"] or "")[:10], "r": round(cum, 2)})
+        out["eq"] = eq
+        strat = db.query_one(
+            f"SELECT COALESCE(SUM(result_r), 0) AS s, COUNT(*) AS n FROM signals "
+            f"WHERE {_CLOSED} AND closed_at >= ?", (rows[0]["closed_at"],))
+        if strat:
+            out["strat_r"] = round(float(strat["s"]), 2)
+            out["strat_n"] = int(strat["n"])
+    return out
+
+
+def _symbols_best_worst(limit: int = 4) -> dict:
+    """Лучшие/худшие инструменты по итоговому R закрытых — обе стороны, не витрина
+    из одних плюсов (честность бренда). Символы закрытых и так публичны в CSV."""
+    rows = [{"s": r["symbol"].split("/")[0], "n": r["n"], "r": round(float(r["sr"]), 2)}
+            for r in db.query(
+                f"SELECT symbol, COUNT(*) AS n, SUM(result_r) AS sr FROM signals "
+                f"WHERE {_CLOSED} GROUP BY symbol")]
+    rows.sort(key=lambda x: x["r"], reverse=True)
+    n = len(rows)
+    # без пересечения колонок и на малом числе символов: голова — лучшим,
+    # хвост (worst-first) — худшим
+    k = limit if n >= 2 * limit else max(1, n // 2) if n else 0
+    best = rows[:k]
+    tail = min(limit, n - k)
+    worst = rows[-tail:][::-1] if tail > 0 else []
+    return {"best": best, "worst": worst}
 
 
 def _recent_closed(tg_id: int, limit: int = 15) -> list:
@@ -337,6 +374,7 @@ def api_stats() -> Response:
         "equity_all": _equity(),
         "equity_epoch": _equity(epoch) if epoch else [],
         "open_signals": _open_signals_public(),
+        "symbols": _symbols_best_worst(),
     }
     resp = Response(json.dumps(payload, ensure_ascii=False),
                     mimetype="application/json")
