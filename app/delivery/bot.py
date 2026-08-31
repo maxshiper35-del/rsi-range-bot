@@ -216,9 +216,11 @@ def format_stats(st: dict, epoch_st: dict | None = None,
     epoch_block = ""
     if epoch_st is not None and epoch_label:
         if epoch_st["trades"]:
+            ep_move = (f" · хода <b>{epoch_st['total_move_pct']:+.1f}%</b>"
+                       if epoch_st.get("total_move_pct") is not None else "")
             epoch_block = (
                 f"🆕 Новый код (сигналы с {epoch_label}): {epoch_st['trades']} закрыто · "
-                f"wr {epoch_st['winrate']:.0%} · Σ <b>{epoch_st['total_r']:+.2f}R</b> · "
+                f"wr {epoch_st['winrate']:.0%} · Σ <b>{epoch_st['total_r']:+.2f}R</b>{ep_move} · "
                 f"открыто {epoch_st['open']}\n")
         else:
             epoch_block = (f"🆕 Новый код (сигналы с {epoch_label}): закрытых пока нет, "

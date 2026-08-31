@@ -105,7 +105,8 @@ def test_stats_for_period_empty(fresh_db):
     from app.brain import journal
     wk = journal.stats_for_period("2020-01-01T00:00:00+00:00", "2020-01-02T00:00:00+00:00")
     assert wk == {"trades": 0, "wins": 0, "losses": 0, "winrate": 0.0,
-                  "expectancy_r": 0.0, "total_r": 0.0, "outcomes": []}
+                  "expectancy_r": 0.0, "total_r": 0.0, "outcomes": [],
+                  "total_move_pct": 0}
 
 
 def test_stats_by_symbol(fresh_db):
@@ -826,3 +827,28 @@ def test_signal_xray_hides_expired_candidates(fresh_db):
     db.execute("INSERT INTO signal_events(signal_id, event, created_at) "
                "VALUES (77,'confirmed','2026-08-01T01:00:00+00:00')")
     assert journal.signal_xray(77) is not None          # подтверждённый — публичен
+
+
+def test_stats_period_and_epoch_total_move_pct(fresh_db):
+    """«Сколько чистого движения забрали» (фидбэк 30.08): недельный и эпохальный
+    срезы несут total_move_pct — сумма хода в пользу сделок, стопы с минусом.
+    LONG 100 -> exit 106 = +6%; LONG 100 -> exit 98 = −2%; нетто +4%."""
+    from app import db
+    from app.brain import journal
+    for i, (exit_px, rr) in enumerate(((106.0, 3.0), (98.0, -1.0))):
+        db.execute(
+            "INSERT INTO signals(symbol, side, timeframe, entry, stop, risk_reward, "
+            "confidence, snapshot_json, status, created_at, closed_at, result_r, "
+            "exit_price) VALUES ('AAA/USDT:USDT','LONG','1h',100,98,2.0,0.7,'{}',"
+            "'stopped', ?, ?, ?, ?)",
+            (f"2026-08-2{i}T00:00:00+00:00", f"2026-08-2{i + 1}T00:00:00+00:00",
+             rr, exit_px))
+    wk = journal.stats_for_period("2026-08-01T00:00:00+00:00",
+                                  "2026-09-01T00:00:00+00:00")
+    assert wk["total_move_pct"] == 4.0
+    ep = journal.stats_since_created("2026-08-01T00:00:00+00:00")
+    assert ep["total_move_pct"] == 4.0
+    # дайджест показывает недельный ход
+    from app.delivery import templates
+    txt = templates.render_weekly_digest("18–24.08", wk, journal.stats())
+    assert "Чистого хода забрано: <b>+4.0%</b>" in txt

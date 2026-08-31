@@ -643,6 +643,24 @@ def cohort_stats() -> dict:
     return out
 
 
+def _split_moves(rows) -> tuple[list[float], list[float]]:
+    """Ходы цены «в пользу сделки» по закрытым: (плюсовые, минусовые). Общий расчёт
+    для stats()/stats_for_period()/stats_since_created() — «сколько чистого движения
+    забрали» (фидбэк владельца 30.08). exit_price NULL (до миграции 014) -> уровень."""
+    tp_moves: list[float] = []
+    stop_moves: list[float] = []
+    for r in rows:
+        if r["status"] == "expired":
+            continue                                     # сделки не было — хода нет
+        exit_price = r["exit_price"] if r["exit_price"] is not None else (
+            r["stop"] if r["status"] == "stopped" else r[r["status"]])
+        mv = _price_move_pct(r["side"], r["entry"], exit_price)
+        if mv is None:
+            continue
+        (tp_moves if (r["result_r"] or 0) > 0 else stop_moves).append(mv)
+    return tp_moves, stop_moves
+
+
 def stats() -> dict:
     """Публичные агрегаты для /stats: winrate, expectancy(R), суммарный PnL(R), счётчики,
     плюс ЧИСТОЕ движение цены (без плеча): средний ход в тейках и в стопах и суммарный % —
@@ -655,22 +673,7 @@ def stats() -> dict:
     n = len(rs)
     wins = [r for r in rs if r > 0]
     total_r = sum(rs)
-    tp_moves: list[float] = []
-    stop_moves: list[float] = []
-    for r in rows:
-        # выход по уровням сигнала (та же математика, что скоринг): tpX -> его уровень,
-        # stopped -> стоп; ход считается «в пользу сделки» (SHORT инвертирован)
-        # exit_price заполняется скорингом с миграции 014 (нужен для трейлинга: выход по
-        # подтянутому стопу происходит по цене, которой в исходных уровнях сигнала нет).
-        # NULL (вся история до миграции) -> прежний расчёт по уровню, история не меняется.
-        exit_price = r["exit_price"] if r["exit_price"] is not None else (
-            r["stop"] if r["status"] == "stopped" else r[r["status"]])
-        mv = _price_move_pct(r["side"], r["entry"], exit_price)
-        if mv is None:
-            continue
-        # трейлинг может закрыть сделку выше входа со статусом 'stopped' — такой выход
-        # логически в группе прибыльных, иначе средний «ход в стопах» врал бы
-        (tp_moves if (r["result_r"] or 0) > 0 else stop_moves).append(mv)
+    tp_moves, stop_moves = _split_moves(rows)
     open_n = db.query_one(
         "SELECT COUNT(*) AS c FROM signals WHERE status='open'")["c"]  # type: ignore[index]
     return {
@@ -691,9 +694,10 @@ def stats_since_created(start_iso: str) -> dict:
     """Агрегат ТОЛЬКО по сигналам, СОЗДАННЫМ с start_iso (эпоха обновления стратегии):
     легаси-бэклог доносится по старым правилам и не должен смешиваться с оценкой нового
     кода. Скоуп по created_at, не closed_at — важно, КОГДА сигнал родился."""
-    rows = db.query(
-        "SELECT result_r FROM signals WHERE status IN ('tp1','tp2','tp3','stopped') "
-        "AND result_r IS NOT NULL AND created_at >= ?", (start_iso,))
+    rows = list(db.query(
+        "SELECT side, entry, stop, tp1, tp2, tp3, status, result_r, exit_price "
+        "FROM signals WHERE status IN ('tp1','tp2','tp3','stopped') "
+        "AND result_r IS NOT NULL AND created_at >= ?", (start_iso,)))
     rs = [r["result_r"] for r in rows]
     n = len(rs)
     wins = sum(1 for r in rs if r > 0)
@@ -701,10 +705,12 @@ def stats_since_created(start_iso: str) -> dict:
     open_n = db.query_one(
         "SELECT COUNT(*) AS c FROM signals WHERE status='open' AND created_at >= ?",
         (start_iso,))["c"]  # type: ignore[index]
+    tp_moves, stop_moves = _split_moves(rows)
     return {"trades": n, "wins": wins, "losses": n - wins,
             "winrate": round(wins / n, 4) if n else 0.0,
             "expectancy_r": round(total_r / n, 4) if n else 0.0,
-            "total_r": round(total_r, 4), "open": open_n}
+            "total_r": round(total_r, 4), "open": open_n,
+            "total_move_pct": round(sum(tp_moves) + sum(stop_moves), 2)}
 
 
 def recent_streak(n: int = 10) -> dict:
@@ -723,14 +729,16 @@ def stats_for_period(start_iso: str, end_iso: str) -> dict:
     для карточки недели (реальные цифры ЭТОЙ недели, не всё время жизни бота). Дополнительно
     отдаёт outcomes — хронологический список True/False (win/loss) для юнит-чарта.
     Даты/окно определяет вызывающий код (bot.py), не эта функция — она не читает часы."""
-    rows = db.query(
-        "SELECT result_r FROM signals WHERE status IN ('tp1','tp2','tp3','stopped','expired') "
+    rows = list(db.query(
+        "SELECT side, entry, stop, tp1, tp2, tp3, status, result_r, exit_price "
+        "FROM signals WHERE status IN ('tp1','tp2','tp3','stopped','expired') "
         "AND result_r IS NOT NULL AND closed_at >= ? AND closed_at < ? ORDER BY closed_at",
-        (start_iso, end_iso))
+        (start_iso, end_iso)))
     rs = [r["result_r"] for r in rows]
     n = len(rs)
     wins = [r for r in rs if r > 0]
     total_r = sum(rs)
+    tp_moves, stop_moves = _split_moves(rows)
     return {
         "trades": n,
         "wins": len(wins),
@@ -739,6 +747,7 @@ def stats_for_period(start_iso: str, end_iso: str) -> dict:
         "expectancy_r": round(total_r / n, 4) if n else 0.0,
         "total_r": round(total_r, 4),
         "outcomes": [r > 0 for r in rs],
+        "total_move_pct": round(sum(tp_moves) + sum(stop_moves), 2),
     }
 
 

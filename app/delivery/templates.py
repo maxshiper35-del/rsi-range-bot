@@ -259,15 +259,22 @@ def render_weekly_digest(period_label: str, wk: dict, st: dict,
             f"Их итог в полной версии: <b>{missed['total_r']:+.1f}R</b>\n"
             "Полные сигналы без лимита: /subscribe\n"
         )
+    # «сколько чистого движения забрали» (фидбэк владельца 30.08): сумма хода цены
+    # в пользу сделок за неделю, без плеча — плюсовые ходы минус отданное стопами
+    week_move = (f"Чистого хода забрано: <b>{wk['total_move_pct']:+.1f}%</b> (без плеча)\n"
+                 if wk.get("total_move_pct") is not None and wk.get("trades") else "")
+    all_move = (f" · хода {st['total_move_pct']:+.0f}%"
+                if st.get("total_move_pct") is not None else "")
     return (
         f"🗓 <b>Итоги недели {esc(period_label)}</b>\n{LINE}\n"
         f"Закрыто: <b>{wk.get('trades', 0)}</b>  "
         f"(✅ {wk.get('wins', 0)} / 🛑 {wk.get('losses', 0)})\n"
         f"Winrate недели: <b>{wr:.0f}%</b> · итог <b>{wk.get('total_r', 0):+.1f}R</b>\n"
+        f"{week_move}"
         f"Открыто сейчас: {st.get('open', 0)}\n"
         f"{missed_block}{LINE}\n"
         f"За всё время: {st.get('trades', 0)} сделок · матож. "
-        f"<b>{st.get('expectancy_r', 0):+.2f}R</b> · итог {st.get('total_r', 0):+.1f}R\n"
+        f"<b>{st.get('expectancy_r', 0):+.2f}R</b> · итог {st.get('total_r', 0):+.1f}R{all_move}\n"
         "Полная статистика и журнал: /stats\n"
         "⚠️ Не финсовет. Прошлые результаты не определяют будущие."
     )
