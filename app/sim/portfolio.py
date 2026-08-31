@@ -101,7 +101,9 @@ def simulate_portfolio(bars: dict, signals: list, *,
                        funding_bps_per_bar: float = 0.0,
                        trail_activate_r: float | None = None,
                        trail_distance_r: float = 1.0,
-                       max_hold_bars: int | None = None) -> PortfolioReport:
+                       max_hold_bars: int | None = None,
+                       entry_fill: str = "touch",
+                       through_frac: float = 0.05) -> PortfolioReport:
     """bars: {(symbol, tf): df} — те же кэш-бары, по которым считались сигналы.
     signals: список словарей из scripts.dump_signals (symbol, tf, bar_index, side, ...).
 
@@ -176,8 +178,22 @@ def simulate_portfolio(bars: dict, signals: list, *,
         risk = abs(entry - stop)
         if risk <= 0:
             continue
-        fill_i = next((j for j in range(i + 1, min(n, i + 1 + max_wait))
-                       if low[j] <= entry <= high[j]), None)
+        # Модель исполнения входа (замер 31.08: журнальные «касания» реальный стакан
+        # не исполнял — 17 филлов журнала / 0 на бирже):
+        #   touch   — лимитка исполняется КАСАНИЕМ (оптимистичная, текущий контракт);
+        #   through — пассивная реальность: филл только если цена ПРОШЛА СКВОЗЬ уровень
+        #             на through_frac дистанции стопа (очередь заявок гарантированно снята).
+        if entry_fill == "through":
+            eps = through_frac * risk
+            if sig["side"] == "LONG":
+                fill_i = next((j for j in range(i + 1, min(n, i + 1 + max_wait))
+                               if low[j] <= entry - eps), None)
+            else:
+                fill_i = next((j for j in range(i + 1, min(n, i + 1 + max_wait))
+                               if high[j] >= entry + eps), None)
+        else:
+            fill_i = next((j for j in range(i + 1, min(n, i + 1 + max_wait))
+                           if low[j] <= entry <= high[j]), None)
         side = Side.LONG if sig["side"] == "LONG" else Side.SHORT
         if fill_i is None:                       # лимитка не исполнилась — истекла
             expire_i = min(n - 1, i + max_wait)

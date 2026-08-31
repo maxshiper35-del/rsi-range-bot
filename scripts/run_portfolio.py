@@ -59,6 +59,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--funding", type=float, default=0.0,
                    help="фандинг в bps на бар (Bybit ~0.01%%/8ч = 0.125 bps на 1h-бар); "
                         "критично для схем без фиксированного тейка — позиция висит долго")
+    p.add_argument("--entry-fill", default="touch", choices=("touch", "through"),
+                   help="модель входа: touch — филл касанием (оптимист), through — филл "
+                        "только проходом сквозь уровень (пассивная реальность стакана)")
+    p.add_argument("--through-frac", type=float, default=0.05,
+                   help="глубина прохода для through, доля дистанции стопа")
     p.add_argument("--label", default=None)
     p.add_argument("--json", action="store_true")
     return p.parse_args(argv)
@@ -121,6 +126,8 @@ def main() -> None:
         funding_bps_per_bar=args.funding,
         tp_ladder=parse_ladder(args.ladder) if args.ladder else None,
         move_be_after=args.be,
+        entry_fill=args.entry_fill,
+        through_frac=args.through_frac,
         trail_activate_r=args.trail_activate,
         trail_distance_r=args.trail_dist,
         max_hold_bars=args.max_hold,

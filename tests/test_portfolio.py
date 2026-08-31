@@ -161,3 +161,36 @@ def test_max_hold_bars_forces_timeout_exit():
     res = _simulate_open(df, Side.LONG, 100.0, 99.0, tr, 0, None, 0.0, 0.0, 0.0,
                          max_hold_bars=3)
     assert res is not None and res[0] == "timeout" and res[4] == 3
+
+
+def test_entry_fill_through_requires_trade_through():
+    """through: касание уровня БЕЗ прохода сквозь — не филл (пассивная реальность);
+    бар, прошедший на eps глубже, — филл. touch на тех же барах исполняется касанием."""
+    import pandas as pd
+
+    from app.sim.portfolio import simulate_portfolio
+    dts = pd.date_range("2026-01-01", periods=8, freq="1h", tz="UTC")
+    # LONG entry=100, stop=98 (risk 2, eps=0.1 при 5%): бар2 low=100 (касание),
+    # бар3 low=99.85 (проход), дальше рост до тейка 104
+    df = pd.DataFrame({
+        "dt": dts,
+        "open": [103, 102, 101, 100, 101, 103, 105, 105],
+        "high": [104, 103, 102, 101, 103, 105, 106, 106],
+        "low":  [102, 101, 100.0, 99.85, 100.5, 102, 104, 104],
+        "close": [102, 102, 101, 100.5, 102.5, 104.5, 105.5, 105],
+        "volume": [1] * 8,
+    })
+    sig = {"symbol": "T/USDT:USDT", "tf": "1h", "bar_index": 1, "dt": dts[1],
+           "side": "LONG", "entry": 100.0, "stop": 98.0, "tp": 104.0, "rr": 2.0,
+           "setup": "6226", "confidence": 0.7}
+    bars = {("T/USDT:USDT", "1h"): df}
+    thr = simulate_portfolio(bars, [dict(sig)], fee_pct=0.0, slippage_pct=0.0,
+                             entry_fill="through", through_frac=0.05)
+    tch = simulate_portfolio(bars, [dict(sig)], fee_pct=0.0, slippage_pct=0.0)
+    assert tch.trades == 1 and thr.trades == 1
+    assert tch.detail[0].fill_dt == dts[2]      # касание на баре 2
+    assert thr.detail[0].fill_dt == dts[3]      # проход только на баре 3
+    # глубокий eps (50% риска = 99.0) — прохода нет вовсе, сделки нет
+    deep = simulate_portfolio(bars, [dict(sig)], fee_pct=0.0, slippage_pct=0.0,
+                              entry_fill="through", through_frac=0.5)
+    assert deep.trades == 0
