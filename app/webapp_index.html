@@ -653,9 +653,10 @@ fetch("api/stats").then(r => r.json()).then(d => {
 
 // платный слой: подпись initData проверяет сервер; не подписчик/не Telegram — молча публичный
 // вид. Authorization — его Caddy редактирует в access-логах. Ре-рендер без повторной анимации.
-if (inTg && tg.initData) {
+function bootMe(attempt) {
+  if (!(inTg && tg.initData)) return;
   fetch("api/me", {headers: {"Authorization": "tma " + tg.initData}})
-    .then(r => r.ok ? r.json() : null)
+    .then(r => r.ok ? r.json() : Promise.reject(r.status))
     .then(m => {
       if (m && (m.private || m.admin)) {
         ME = m;
@@ -663,8 +664,11 @@ if (inTg && tg.initData) {
         if (m.admin) admFetch().then(() => { if (NAV !== "over") render(true); else renderNav(); });
       }
     })
-    .catch(() => {});
+    .catch(() => {          // обрыв/рестарт webapp на старте — вкладки не должны пропасть
+      if ((attempt || 0) < 3) setTimeout(() => bootMe((attempt || 0) + 1), 2500);
+    });
 }
+bootMe(0);
 
 // автообновление раз в 60с: публика + (для админа) пульт; активную вкладку перерисовываем тихо
 function meFetch() {

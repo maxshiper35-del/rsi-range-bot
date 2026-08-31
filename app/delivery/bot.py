@@ -2187,8 +2187,9 @@ def main() -> None:
                 log.warning("dashboard png: %s — отдаю файлом", e)
                 await _send_offline_dashboard(m)
             return
+        vurl = f"{wurl}{'&' if '?' in wurl else '?'}v={int(_monotonic())}"
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="📈 Открыть живой терминал", web_app=WebAppInfo(url=wurl))]])
+            text="📈 Открыть живой терминал", web_app=WebAppInfo(url=vurl))]])
         await m.answer("Живой терминал — кнопкой ниже. Офлайн-файл: /dashboard",
                        reply_markup=kb)
 
