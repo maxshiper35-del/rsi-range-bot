@@ -320,7 +320,7 @@ _ADMIN_SETTINGS: dict[str, dict] = {
     "min_confidence":    {"t": "float", "min": 0.0, "max": 1.0,
                           "label": "Мин. confidence", "group": "Сигналы"},
     "max_open_per_side": {"t": "int", "min": 0, "max": 50,
-                          "label": "Лимит позиций на сторону", "group": "Сигналы"},
+                          "label": "Лимит на сторону (0 = БЕЗ лимита!)", "group": "Сигналы"},
     "channel_enabled":   {"t": "bool", "label": "Постить в канал", "group": "Канал"},
     "channel_mode":      {"t": "choice", "choices": ("full", "teaser"),
                           "label": "Режим канала", "group": "Канал"},
@@ -478,8 +478,8 @@ def api_admin_user() -> Response:
     if (not isinstance(tg_id, int) or isinstance(tg_id, bool)
             or not 0 < tg_id < 2 ** 63 or action not in ("grant", "revoke")
             or isinstance(days, bool) or not isinstance(days, (int, float))
-            or not 0 < days <= 365):
-        return _no_store({"ok": False}, 400)
+            or not float(days).is_integer() or not 1 <= days <= 365):
+        return _no_store({"ok": False}, 400)   # дробные дни: int(0.5)=0 давал ложный успех
     from app.delivery import payments
     if action == "grant":
         payments.admin_grant(tg_id, int(days))

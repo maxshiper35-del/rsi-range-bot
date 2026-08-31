@@ -389,3 +389,6 @@ def test_api_admin_user_grant_revoke(fresh_db, admin_env):
         assert payments.is_paid(800200) is False
         assert c.post("/api/admin/user", json={"tg_id": "x", "action": "grant"},
                       headers=hdr).status_code == 400
+        assert c.post("/api/admin/user", json={"tg_id": 800200, "action": "grant",
+                                               "days": 0.5},
+                      headers=hdr).status_code == 400     # int(0.5)=0 давал ложный успех

@@ -267,7 +267,7 @@ function renderNav() {
 function render(noAnim) {
   $("#tip").style.opacity = 0;
   renderNav();
-  $("#scope").style.display = NAV === "over" ? "" : "none";
+  $("#scope").style.display = (NAV === "over" && DATA && DATA.epoch) ? "" : "none";
   if (NAV === "mine") return renderMine(noAnim);
   if (NAV === "users") return renderUsers();
   if (NAV === "settings") return renderSettings();
@@ -335,6 +335,10 @@ function renderMine(noAnim) {
 }
 
 function renderOverview(noAnim) {
+  if (!DATA) {
+    $("#app").innerHTML = `<div class="warn" style="padding:30px 0;text-align:center">Данные ещё грузятся…</div>`;
+    return;
+  }
   const { st, eq, hold } = pick(), d = derive(eq);
   const wr = st.trades ? Math.round(st.winrate * 100) : 0;
   const tot = st.total_r || 0, exp = st.expectancy_r || 0;
@@ -418,7 +422,9 @@ function needAdm() {
     return true;
   }
   if (!ADM) {
-    $("#app").innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+    $("#app").innerHTML = ADM_ERR === 403
+      ? `<div class="warn" style="padding:30px 0;text-align:center">Подпись устарела — закрой и открой дашборд заново</div>`
+      : `<div class="skel"></div><div class="skel"></div>`;
     return true;
   }
   return false;
@@ -503,9 +509,10 @@ function renderSystem() {
 
 const authHdr = () => ({"Authorization": "tma " + tg.initData, "Content-Type": "application/json"});
 
+let ADM_ERR = 0;
 function admFetch() {
   return fetch("api/admin", {headers: authHdr()})
-    .then(r => r.ok ? r.json() : null)
+    .then(r => { ADM_ERR = r.ok ? 0 : r.status; return r.ok ? r.json() : null; })
     .then(a => { if (a && a.ok) ADM = a; return ADM; })
     .catch(() => null);
 }
@@ -516,7 +523,7 @@ function admSet(key, value, el) {
     .then(r => r.ok ? r.json() : null)
     .then(d => {
       if (d && d.ok) { ADM.settings = d.settings; toast("Сохранено: " + key); }
-      else toast("Отклонено сервером");
+      else toast(d === null ? "Подпись устарела? Переоткрой дашборд" : "Отклонено сервером");
       render(true);
     })
     .catch(() => { toast("Сеть недоступна"); render(true); });
@@ -660,13 +667,29 @@ if (inTg && tg.initData) {
 }
 
 // автообновление раз в 60с: публика + (для админа) пульт; активную вкладку перерисовываем тихо
+function meFetch() {
+  if (!(inTg && tg.initData)) return Promise.resolve();
+  return fetch("api/me", {headers: {"Authorization": "tma " + tg.initData}})
+    .then(r => r.ok ? r.json() : null)
+    .then(m => { if (m && (m.private || m.admin)) ME = m; })
+    .catch(() => {});
+}
+
 setInterval(() => {
   fetch("api/stats").then(r => r.json()).then(d => {
     DATA = d;
     const t = (d.generated_at || "").slice(11, 16);
     $("#upd").textContent = t ? `live · ${t} UTC` : "live";
-    const chain = (ME && ME.admin) ? admFetch() : Promise.resolve();
-    chain.then(() => render(true));
+    const chain = Promise.all([ME ? meFetch() : Promise.resolve(),
+                               (ME && ME.admin) ? admFetch() : Promise.resolve()]);
+    chain.then(() => {
+      // не перерисовываем, пока админ печатает (иначе innerHTML стирает ввод до blur),
+      // и вкладки с формами не трогаем автообновлением вовсе (ревью 01.09)
+      const ae = document.activeElement;
+      const editing = ae && ae.closest && ae.closest("#app")
+        && ["INPUT", "SELECT", "TEXTAREA"].includes(ae.tagName);
+      if (!editing && !["users", "settings"].includes(NAV)) render(true);
+    });
   }).catch(() => {});
 }, 60000);
 
@@ -683,7 +706,7 @@ document.addEventListener("click", e => {
   const act = e.target.closest("[data-act]");
   if (act && ME && ME.admin) {
     const id = parseInt(($("#g-id") || {}).value, 10);
-    const days = parseFloat(($("#g-days") || {}).value) || 30;
+    const days = Math.trunc(Number(String(($("#g-days") || {}).value).replace(",", "."))) || 30;
     if (!id) { toast("Укажи tg_id"); return; }
     fetch("api/admin/user", {method: "POST", headers: authHdr(),
       body: JSON.stringify({tg_id: id, action: act.dataset.act, days})})
@@ -704,9 +727,11 @@ document.addEventListener("change", e => {
   if (!el || !(ME && ME.admin) || el.classList.contains("tgl")) return;
   const t = el.dataset.t;
   let v = el.value;
-  if (t === "int") v = parseInt(v, 10);
-  if (t === "float") v = parseFloat(v);
-  if ((t === "int" || t === "float") && !isFinite(v)) { toast("Не число"); return; }
+  if (t === "int" || t === "float") {
+    v = Number(String(v).trim().replace(",", "."));   // «0,5» с русской клавиатуры
+    if (!isFinite(v)) { toast("Не число"); render(true); return; }
+    if (t === "int") v = Math.trunc(v);
+  }
   admSet(el.dataset.set, v, el);
 });
 
