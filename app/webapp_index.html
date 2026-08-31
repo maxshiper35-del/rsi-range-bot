@@ -165,11 +165,27 @@ select.inp{width:auto}
 .toast.show{opacity:1}
 .fx{opacity:0;transform:translateY(8px);animation:in .4s cubic-bezier(.2,.7,.3,1) forwards}
 @keyframes in{to{opacity:1;transform:none}}
-.skel{height:70px;border:1px solid var(--line);border-radius:8px;margin:10px 0;background:
-  linear-gradient(100deg,var(--panel) 40%,var(--panel2) 50%,var(--panel) 60%);
-  background-size:200% 100%;animation:sh 1.2s linear infinite}
-@keyframes sh{to{background-position:-200% 0}}
-@media (prefers-reduced-motion: reduce){.fx,.live i,.skel{animation:none;opacity:1;transform:none}}
+/* скелетоны («синабоны», фидбэк 31.08): призрак реального лейаута с шиммером,
+   а не безликие полоски — юзер сразу видит, ЧТО грузится */
+.skel{position:relative;overflow:hidden;background:var(--panel);
+  border:1px solid var(--line);border-radius:8px;margin-top:8px;padding:14px}
+.skel::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(100deg,transparent 35%,
+    color-mix(in srgb,var(--panel2) 55%,transparent) 50%,transparent 65%);
+  background-size:220% 100%;animation:sh 1.4s linear infinite}
+.sk{background:var(--panel2);border-radius:4px;height:12px}
+.sk.big{height:38px;width:45%;border-radius:6px}
+.sk.t{width:30%;height:9px;margin-bottom:10px}
+.sk.w25{width:25%} .sk.w40{width:40%} .sk.w60{width:60%} .sk.w85{width:85%}
+.sk + .sk{margin-top:9px}
+.skel .sk-chart{height:150px;border-radius:6px;background:
+  repeating-linear-gradient(90deg,var(--panel2) 0 2px,transparent 2px 46px),
+  linear-gradient(180deg,transparent 55%,color-mix(in srgb,var(--panel2) 55%,transparent));
+  border-bottom:1px solid var(--grid)}
+.skel-grid{display:flex;gap:8px;margin-top:8px}
+.skel-grid .skel{flex:1;margin-top:0;height:58px}
+@keyframes sh{to{background-position:-220% 0}}
+@media (prefers-reduced-motion: reduce){.fx,.live i,.skel::after{animation:none;opacity:1;transform:none}}
 </style>
 </head>
 <body>
@@ -183,7 +199,15 @@ select.inp{width:auto}
   <div class="tab on" data-s="epoch">новый код</div>
   <div class="tab" data-s="all">всё время</div>
 </div>
-<div id="app"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
+<div id="app">
+  <div class="skel"><div class="sk t"></div><div class="sk big"></div><div class="sk w40"></div></div>
+  <div class="skel-grid"><div class="skel"><div class="sk w60"></div><div class="sk w25"></div></div>
+    <div class="skel"><div class="sk w60"></div><div class="sk w25"></div></div>
+    <div class="skel"><div class="sk w60"></div><div class="sk w25"></div></div></div>
+  <div class="skel"><div class="sk t"></div><div class="sk-chart"></div></div>
+  <div class="skel"><div class="sk t"></div><div class="sk w85"></div><div class="sk w60"></div>
+    <div class="sk w85"></div><div class="sk w40"></div></div>
+</div>
 <div class="tip" id="tip"></div>
 <div class="toast" id="toast"></div>
 </div>
@@ -336,7 +360,8 @@ function renderMine(noAnim) {
 
 function renderOverview(noAnim) {
   if (!DATA) {
-    $("#app").innerHTML = `<div class="warn" style="padding:30px 0;text-align:center">Данные ещё грузятся…</div>`;
+    $("#app").innerHTML = `<div class="skel"><div class="sk t"></div><div class="sk big"></div>
+      <div class="sk w40"></div></div>${SKEL_PAGE}`;
     return;
   }
   const { st, eq, hold } = pick(), d = derive(eq);
@@ -416,6 +441,14 @@ function renderOverview(noAnim) {
   wireTip();
 }
 
+const SKEL_TABLE = `<div class="skel"><div class="sk t"></div><div class="sk w85"></div>
+  <div class="sk w60"></div><div class="sk w85"></div><div class="sk w40"></div></div>`;
+const SKEL_PAGE = `
+  <div class="skel-grid"><div class="skel"><div class="sk w60"></div><div class="sk w25"></div></div>
+    <div class="skel"><div class="sk w60"></div><div class="sk w25"></div></div>
+    <div class="skel"><div class="sk w60"></div><div class="sk w25"></div></div></div>
+  ${SKEL_TABLE}${SKEL_TABLE}`;
+
 function needAdm() {
   if (!(ME && ME.admin)) {
     $("#app").innerHTML = `<div class="warn" style="padding:30px 0;text-align:center">Только для админов</div>`;
@@ -424,7 +457,7 @@ function needAdm() {
   if (!ADM) {
     $("#app").innerHTML = ADM_ERR === 403
       ? `<div class="warn" style="padding:30px 0;text-align:center">Подпись устарела — закрой и открой дашборд заново</div>`
-      : `<div class="skel"></div><div class="skel"></div>`;
+      : SKEL_PAGE;
     return true;
   }
   return false;
