@@ -319,3 +319,73 @@ def test_my_stats_eq_and_strategy_comparison(fresh_db, webapp_token, monkeypatch
         ms = json.loads(c.get("/api/me", headers=hdr).get_data(as_text=True))["my_stats"]
     assert [p["r"] for p in ms["eq"]] == [2.0, 3.5]                 # кумулятив
     assert ms["strat_r"] == 2.5 and ms["strat_n"] == 3              # с первого отмеченного
+
+@pytest.fixture
+def admin_env(monkeypatch):
+    """Токен + админ-id для админ-эндпоинтов."""
+    from app.config import get_settings
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:TEST")
+    monkeypatch.setenv("TELEGRAM_ADMIN_IDS", "900500")
+    get_settings.cache_clear()
+    yield 900500
+    get_settings.cache_clear()
+
+
+def test_api_admin_requires_admin(fresh_db, admin_env):
+    """403 без подписи, 403 подписчику-не-админу; админу — полный пульт."""
+    from app import db
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(800100, "payer")
+    db.execute("UPDATE users SET tier='paid', paid_until='2099-01-01T00:00:00+00:00' "
+               "WHERE tg_id=800100")
+    with flask_app.test_client() as c:
+        assert c.get("/api/admin").status_code == 403
+        sub = c.get("/api/admin", headers={"Authorization":
+                                           "tma " + _init_data("123:TEST", 800100)})
+        assert sub.status_code == 403                      # платник — не админ
+        adm = c.get("/api/admin", headers={"Authorization":
+                                           "tma " + _init_data("123:TEST", 900500)})
+    assert adm.status_code == 200
+    d = json.loads(adm.get_data(as_text=True))
+    for key in ("health", "users", "money", "settings", "open_signals"):
+        assert key in d
+    assert any(s["key"] == "paused" for s in d["settings"])
+
+
+def test_api_admin_set_whitelist_and_validation(fresh_db, admin_env):
+    """Только белый список ключей и валидные значения; изменение реально применяется."""
+    from app import runtime
+    from app.webapp import app as flask_app
+    hdr = {"Authorization": "tma " + _init_data("123:TEST", 900500)}
+    with flask_app.test_client() as c:
+        assert c.post("/api/admin/set", json={"key": "symbols", "value": "x"},
+                      headers=hdr).status_code == 400      # ключ вне списка
+        assert c.post("/api/admin/set", json={"key": "min_confidence", "value": 5},
+                      headers=hdr).status_code == 400      # вне диапазона
+        assert c.post("/api/admin/set", json={"key": "affiliate_url",
+                                              "value": "http://insecure"},
+                      headers=hdr).status_code == 400      # не https
+        ok = c.post("/api/admin/set", json={"key": "paused", "value": True}, headers=hdr)
+        assert ok.status_code == 200
+        assert runtime.paused() is True
+        ok2 = c.post("/api/admin/set", json={"key": "executor_enabled", "value": True},
+                     headers=hdr)
+        assert ok2.status_code == 200
+        assert runtime.executor_since()                    # since выставлен как /executor on
+
+
+def test_api_admin_user_grant_revoke(fresh_db, admin_env):
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(800200, "target")
+    hdr = {"Authorization": "tma " + _init_data("123:TEST", 900500)}
+    with flask_app.test_client() as c:
+        assert c.post("/api/admin/user", json={"tg_id": 800200, "action": "grant",
+                                               "days": 7}, headers=hdr).status_code == 200
+        assert payments.is_paid(800200) is True
+        assert c.post("/api/admin/user", json={"tg_id": 800200, "action": "revoke"},
+                      headers=hdr).status_code == 200
+        assert payments.is_paid(800200) is False
+        assert c.post("/api/admin/user", json={"tg_id": "x", "action": "grant"},
+                      headers=hdr).status_code == 400

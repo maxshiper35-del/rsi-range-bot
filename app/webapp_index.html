@@ -126,6 +126,43 @@ tr[data-sid].busy{opacity:.45;pointer-events:none}
   z-index:9;white-space:nowrap}
 .warn{font-size:11px;color:color-mix(in srgb,var(--acc) 75%,var(--ink-2));margin-top:7px}
 
+.nav{display:flex;gap:2px;background:var(--panel);border:1px solid var(--line);
+  border-radius:6px;padding:2px;margin:10px 0 0;overflow-x:auto}
+.nav b{padding:5px 13px;border-radius:4px;font-size:12px;font-weight:500;color:var(--ink-2);
+  cursor:pointer;white-space:nowrap;user-select:none;transition:background .15s,color .15s}
+.nav b:hover{color:var(--ink)}
+.nav b.on{background:var(--panel2);color:var(--ink);font-weight:600}
+.nav b.adm.on{box-shadow:inset 0 -2px 0 var(--acc)}
+.tgl{position:relative;width:36px;height:20px;border-radius:10px;background:var(--panel2);
+  cursor:pointer;transition:background .2s;flex:0 0 auto}
+.tgl::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;
+  border-radius:50%;background:var(--ink-2);transition:transform .2s,background .2s}
+.tgl.on{background:var(--pos)}
+.tgl.on::after{transform:translateX(16px);background:#fff}
+.set-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--grid)}
+.set-row:first-of-type{border-top:none}
+.set-row .lbl{font-size:12.5px;flex:1}
+.set-row .key{font-size:10px;color:var(--ink-3);font-family:"IBM Plex Mono",monospace}
+.inp{background:var(--bg);border:1px solid var(--line);border-radius:5px;color:var(--ink);
+  font:12.5px "IBM Plex Mono",ui-monospace,monospace;padding:5px 8px;width:110px}
+.inp.wide{width:100%}
+.inp:focus{outline:none;border-color:var(--acc)}
+select.inp{width:auto}
+.btn{background:var(--panel2);border:1px solid var(--line);border-radius:5px;
+  color:var(--ink);font-size:12px;font-weight:600;padding:6px 14px;cursor:pointer;
+  transition:border-color .15s}
+.btn:hover{border-color:var(--acc)}
+.btn.danger:hover{border-color:var(--neg);color:var(--neg)}
+.hrow{display:flex;justify-content:space-between;align-items:center;gap:10px;
+  padding:8px 0;border-top:1px solid var(--grid);font-size:12.5px}
+.hrow:first-of-type{border-top:none}
+.hrow b{font-family:"IBM Plex Mono",ui-monospace,monospace}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px}
+.dot.ok{background:var(--pos)} .dot.bad{background:var(--neg)} .dot.na{background:var(--zero)}
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:20;
+  background:var(--panel2);border:1px solid var(--line);color:var(--ink);font-size:12.5px;
+  padding:8px 16px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
+.toast.show{opacity:1}
 .fx{opacity:0;transform:translateY(8px);animation:in .4s cubic-bezier(.2,.7,.3,1) forwards}
 @keyframes in{to{opacity:1;transform:none}}
 .skel{height:70px;border:1px solid var(--line);border-radius:8px;margin:10px 0;background:
@@ -141,12 +178,14 @@ tr[data-sid].busy{opacity:.45;pointer-events:none}
   <div class="wordmark">RSI&thinsp;RANGE</div>
   <div class="live"><i></i><span id="upd">подключение…</span></div>
 </header>
+<div class="nav" id="nav" style="display:none"></div>
 <div class="tabs" id="scope">
   <div class="tab on" data-s="epoch">новый код</div>
   <div class="tab" data-s="all">всё время</div>
 </div>
 <div id="app"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
 <div class="tip" id="tip"></div>
+<div class="toast" id="toast"></div>
 </div>
 <script>
 "use strict";
@@ -157,7 +196,12 @@ if (inTg) { tg.ready(); tg.expand();
   if (tg.setHeaderColor) try { tg.setHeaderColor("#0b0e11"); } catch (e) {}
   if (tg.setBackgroundColor) try { tg.setBackgroundColor("#0b0e11"); } catch (e) {} }
 
-let DATA = null, ME = null, SCOPE = "epoch";
+let DATA = null, ME = null, ADM = null, SCOPE = "epoch", NAV = "over";
+let toastT = 0;
+function toast(t) {
+  const el = $("#toast"); el.textContent = t; el.classList.add("show");
+  clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove("show"), 1800);
+}
 let takeGen = 0;                       // поколение POST /api/take: применяем только последний ответ
 const PENDING = new Set();             // sid с запросом в полёте — busy переживает ре-рендер
 const $ = s => document.querySelector(s);
@@ -204,34 +248,43 @@ function pick() {
            hold: useEpoch ? DATA.hold_epoch : DATA.hold_all };
 }
 
+function navItems() {
+  const out = [["over", "Обзор"]];
+  if (ME && ME.private) out.push(["mine", "Моё"]);
+  if (ME && ME.admin) out.push(["users", "Юзеры"], ["settings", "Настройки"], ["system", "Система"]);
+  return out;
+}
+
+function renderNav() {
+  const items = navItems();
+  const nav = $("#nav");
+  if (items.length < 2) { nav.style.display = "none"; return; }
+  nav.style.display = "";
+  nav.innerHTML = items.map(([k, t]) =>
+    `<b data-nav="${k}" class="${k === NAV ? "on" : ""} ${["users", "settings", "system"].includes(k) ? "adm" : ""}">${t}</b>`).join("");
+}
+
 function render(noAnim) {
-  $("#tip").style.opacity = 0;   // старый svg уходит без pointerleave — не оставляем висящий тултип
-  const { st, eq, hold } = pick(), d = derive(eq);
-  const wr = st.trades ? Math.round(st.winrate * 100) : 0;
-  const tot = st.total_r || 0, exp = st.expectancy_r || 0;
+  $("#tip").style.opacity = 0;
+  renderNav();
+  $("#scope").style.display = NAV === "over" ? "" : "none";
+  if (NAV === "mine") return renderMine(noAnim);
+  if (NAV === "users") return renderUsers();
+  if (NAV === "settings") return renderSettings();
+  if (NAV === "system") return renderSystem();
+  return renderOverview(noAnim);
+}
+
+function renderMine(noAnim) {
   let fx = 0;
   const sec = inner => noAnim ? `<div>${inner}</div>`
     : `<div class="fx" style="animation-delay:${(fx++) * 70}ms">${inner}</div>`;
   let h = "";
-  h += sec(`<div class="hero">
-    <div class="hero-main">
-      <div class="hero-num mono ${tot >= 0 ? "up" : "dn"}">${fmtR(tot)}</div>
-      <div class="hero-sub">итог${SCOPE === "epoch" && DATA.epoch_since ? " с " + DATA.epoch_since : " за всю историю"} · ${st.trades || 0} закрытых</div>
-    </div>
-    <div class="hero-side">
-      <div class="mrow"><span>на сделку</span><b>${fmtR(exp, 2)}</b></div>
-      <div class="mrow"><span>профит-фактор</span><b>${d.pf ? d.pf.toFixed(2) : "—"}</b></div>
-      <div class="mrow"><span>просадка max</span><b>−${d.maxDD.toFixed(1)}R</b></div>
-      ${st.total_move_pct != null ? `<div class="mrow"><span>чистого хода забрано</span><b class="${st.total_move_pct >= 0 ? "up" : "dn"}">${(st.total_move_pct > 0 ? "+" : "")}${st.total_move_pct.toFixed(1)}%</b></div>` : ""}
-      <div class="mrow"><span>сред. плюс/минус</span><b><span class="up">${fmtR(d.avgWin, 1)}</span>/<span class="dn">${fmtR(d.avgLoss, 1)}</span></b></div>
-      <div class="mrow"><span>серии max</span><b><span class="up">${d.maxWs}▲</span> <span class="dn">${d.maxLs}▼</span></b></div>
-    </div></div>`);
-  h += sec(`<div class="strip">
-    <div class="cell"><b>${wr}%</b><span>winrate</span></div>
-    <div class="cell"><b>${DATA.all.open ?? 0}</b><span>открыто</span></div>
-    <div class="cell"><b>${hold ? "~" + Math.round(hold) + "ч" : "—"}</b><span>в сделке</span></div>
-  </div>`);
-  if (ME && ME.private) {
+  if (!(ME && ME.private)) {
+    $("#app").innerHTML = `<div class="warn" style="padding:30px 0;text-align:center">Раздел для подписчиков</div>`;
+    return;
+  }
+
     const ss = ME.since_stats, pos = ME.positions || [], tk = ME.taken || [];
     const fmtP = v => String(+v);
     const ckb = id => `<td class="ck">${tk.includes(id) ? "▣" : "▢"}</td>`;
@@ -278,7 +331,35 @@ function render(noAnim) {
       <div class="mystat">${myline}</div>${myEq}${vs}${sq}${share}
       ${rc.length ? `<div class="mystat" style="margin-top:10px">закрытые недавно — отметь свои:</div>
       <table class="pos-t">${rcRows}</table>` : ""}</section>`);
-  }
+    $("#app").innerHTML = h;
+}
+
+function renderOverview(noAnim) {
+  const { st, eq, hold } = pick(), d = derive(eq);
+  const wr = st.trades ? Math.round(st.winrate * 100) : 0;
+  const tot = st.total_r || 0, exp = st.expectancy_r || 0;
+  let fx = 0;
+  const sec = inner => noAnim ? `<div>${inner}</div>`
+    : `<div class="fx" style="animation-delay:${(fx++) * 70}ms">${inner}</div>`;
+  let h = "";
+  h += sec(`<div class="hero">
+    <div class="hero-main">
+      <div class="hero-num mono ${tot >= 0 ? "up" : "dn"}">${fmtR(tot)}</div>
+      <div class="hero-sub">итог${SCOPE === "epoch" && DATA.epoch_since ? " с " + DATA.epoch_since : " за всю историю"} · ${st.trades || 0} закрытых</div>
+    </div>
+    <div class="hero-side">
+      <div class="mrow"><span>на сделку</span><b>${fmtR(exp, 2)}</b></div>
+      <div class="mrow"><span>профит-фактор</span><b>${d.pf ? d.pf.toFixed(2) : "—"}</b></div>
+      <div class="mrow"><span>просадка max</span><b>−${d.maxDD.toFixed(1)}R</b></div>
+      ${st.total_move_pct != null ? `<div class="mrow"><span>чистого хода забрано</span><b class="${st.total_move_pct >= 0 ? "up" : "dn"}">${(st.total_move_pct > 0 ? "+" : "")}${st.total_move_pct.toFixed(1)}%</b></div>` : ""}
+      <div class="mrow"><span>сред. плюс/минус</span><b><span class="up">${fmtR(d.avgWin, 1)}</span>/<span class="dn">${fmtR(d.avgLoss, 1)}</span></b></div>
+      <div class="mrow"><span>серии max</span><b><span class="up">${d.maxWs}▲</span> <span class="dn">${d.maxLs}▼</span></b></div>
+    </div></div>`);
+  h += sec(`<div class="strip">
+    <div class="cell"><b>${wr}%</b><span>winrate</span></div>
+    <div class="cell"><b>${DATA.all.open ?? 0}</b><span>открыто</span></div>
+    <div class="cell"><b>${hold ? "~" + Math.round(hold) + "ч" : "—"}</b><span>в сделке</span></div>
+  </div>`);
   h += sec(`<section><div class="sec-h"><h2>ЭКВИТИ · R</h2>
     <span class="note">по закрытиям</span></div>
     <div class="plot">${equitySVG(eq)}</div>
@@ -329,6 +410,116 @@ function render(noAnim) {
     не определяют будущие. 18+</div>`);
   $("#app").innerHTML = h;
   wireTip();
+}
+
+function needAdm() {
+  if (!(ME && ME.admin)) {
+    $("#app").innerHTML = `<div class="warn" style="padding:30px 0;text-align:center">Только для админов</div>`;
+    return true;
+  }
+  if (!ADM) {
+    $("#app").innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+    return true;
+  }
+  return false;
+}
+
+function renderUsers() {
+  if (needAdm()) return;
+  const u = ADM.users, m = ADM.money;
+  const acq = Object.entries(u.acquisition || {}).map(([k, v]) =>
+    `<tr><td><span class="sym">${esc(k)}</span></td><td class="dim">${v.total} всего</td>
+     <td class="urc"><b class="${v.paid ? "up" : ""}">${v.paid} платили</b></td></tr>`).join("");
+  const recent = (u.recent || []).map(r => {
+    const paid = r.paid_until && r.paid_until > new Date().toISOString();
+    return `<tr><td><span class="sym">${esc(String(r.tg_id))}</span></td>
+      <td class="dim">${esc(r.username || "—")}</td>
+      <td class="st">${paid ? "платит до " + esc((r.paid_until || "").slice(0, 10)) : esc(r.tier || "free")}</td>
+      <td class="dim">${esc((r.joined_at || "").slice(5, 10))}</td></tr>`;
+  }).join("");
+  const pays = (m.last || []).map(r =>
+    `<tr><td><span class="sym">${esc(String(r.tg_id))}</span></td>
+     <td class="dim">${esc(r.method)}</td>
+     <td class="urc"><b class="up">${r.amount} ${esc(r.currency)}</b></td>
+     <td class="dim">${r.days}д · ${esc((r.paid_at || "").slice(5, 10))}</td></tr>`).join("");
+  $("#app").innerHTML = `
+  <div class="strip">
+    <div class="cell"><b>${u.counts.total ?? 0}</b><span>юзеров</span></div>
+    <div class="cell"><b class="up">${u.paid_now}</b><span>платят</span></div>
+    <div class="cell"><b class="${u.lapsed ? "dn" : ""}">${u.lapsed}</b><span>истекли</span></div>
+    <div class="cell"><b>${m.payments_n}</b><span>платежей</span></div>
+  </div>
+  <section><div class="sec-h"><h2>ВЫДАТЬ / СНЯТЬ ПОДПИСКУ</h2></div>
+    <div class="set-row"><input class="inp" id="g-id" placeholder="tg_id" inputmode="numeric">
+      <input class="inp" id="g-days" value="30" style="width:64px" inputmode="numeric">
+      <button class="btn" data-act="grant">Выдать</button>
+      <button class="btn danger" data-act="revoke">Снять</button></div></section>
+  <section><div class="sec-h"><h2>ИСТОЧНИКИ</h2></div><table class="pos-t">${acq || ""}</table></section>
+  <section><div class="sec-h"><h2>ПОСЛЕДНИЕ ЮЗЕРЫ</h2></div><table class="pos-t">${recent}</table></section>
+  <section><div class="sec-h"><h2>ПОСЛЕДНИЕ ПЛАТЕЖИ</h2>
+    <span class="note">всего ${m.payments_sum}</span></div><table class="pos-t">${pays || ""}</table></section>`;
+}
+
+function renderSettings() {
+  if (needAdm()) return;
+  const groups = {};
+  for (const st of ADM.settings) (groups[st.group] = groups[st.group] || []).push(st);
+  const ctl = st => {
+    if (st.t === "bool") return `<div class="tgl ${st.value ? "on" : ""}" data-set="${st.key}" data-t="bool"></div>`;
+    if (st.t === "choice") return `<select class="inp" data-set="${st.key}" data-t="choice">${st.choices.map(c =>
+      `<option ${c === st.value ? "selected" : ""}>${c}</option>`).join("")}</select>`;
+    if (st.t === "url") return `<input class="inp wide" data-set="${st.key}" data-t="url" value="${esc(st.value || "")}" placeholder="https://…">`;
+    return `<input class="inp" data-set="${st.key}" data-t="${st.t}" value="${st.value}" inputmode="decimal">`;
+  };
+  $("#app").innerHTML = Object.entries(groups).map(([g, items]) =>
+    `<section><div class="sec-h"><h2>${esc(g.toUpperCase())}</h2></div>${items.map(st =>
+      `<div class="set-row"><div class="lbl">${esc(st.label)}<br><span class="key">${st.key}</span></div>${ctl(st)}</div>`
+    ).join("")}</section>`).join("") +
+    `<div class="foot">Изменения применяются сразу и действуют на живого бота. Белый список ключей с валидацией на сервере.</div>`;
+}
+
+function renderSystem() {
+  if (needAdm()) return;
+  const h = ADM.health;
+  const dot = (mins, warn) => mins == null ? `<i class="dot na"></i>`
+    : `<i class="dot ${mins < warn ? "ok" : "bad"}"></i>`;
+  const fmtAge = m => m == null ? "нет данных" : m < 90 ? `${Math.round(m)} мин назад` : `${(m / 60).toFixed(1)} ч назад`;
+  const opens = (ADM.open_signals || []).map(o =>
+    `<tr><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol.split("/")[0])}</span></td>
+     <td class="dim">${esc(o.timeframe)}</td><td class="lv">${String(+o.entry)} → ${String(+o.stop)}</td>
+     <td class="st">${o.filled_at ? "в позиции" : "ждёт"}</td></tr>`).join("");
+  $("#app").innerHTML = `
+  <section><div class="sec-h"><h2>ЗДОРОВЬЕ</h2></div>
+    <div class="hrow"><span>${dot(h.poller_tick_min, 90)}Поллер, последний такт</span><b>${fmtAge(h.poller_tick_min)}</b></div>
+    <div class="hrow"><span>${dot(h.backup_min, 26 * 60)}Бэкап базы</span><b>${fmtAge(h.backup_min)}</b></div>
+    <div class="hrow"><span><i class="dot ${h.paused ? "bad" : "ok"}"></i>Сигналы</span><b>${h.paused ? "НА ПАУЗЕ" : "работают"}</b></div>
+    <div class="hrow"><span><i class="dot ${h.executor_enabled ? "ok" : "na"}"></i>Executor (демо)</span><b>${h.executor_enabled ? "вкл" : "выкл"}</b></div>
+    <div class="hrow"><span><i class="dot ${h.webapp_url ? "ok" : "na"}"></i>Туннель</span><b style="font-size:10.5px">${esc((h.webapp_url || "—").replace("https://", "").replace(/\/$/, ""))}</b></div>
+  </section>
+  <section><div class="sec-h"><h2>ОТКРЫТЫЕ (ПОЛНЫЕ УРОВНИ)</h2>
+    <span class="note">${opens ? "" : "нет открытых"}</span></div>
+    <table class="pos-t">${opens}</table></section>`;
+}
+
+const authHdr = () => ({"Authorization": "tma " + tg.initData, "Content-Type": "application/json"});
+
+function admFetch() {
+  return fetch("api/admin", {headers: authHdr()})
+    .then(r => r.ok ? r.json() : null)
+    .then(a => { if (a && a.ok) ADM = a; return ADM; })
+    .catch(() => null);
+}
+
+function admSet(key, value, el) {
+  fetch("api/admin/set", {method: "POST", headers: authHdr(),
+    body: JSON.stringify({key, value})})
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      if (d && d.ok) { ADM.settings = d.settings; toast("Сохранено: " + key); }
+      else toast("Отклонено сервером");
+      render(true);
+    })
+    .catch(() => { toast("Сеть недоступна"); render(true); });
 }
 
 function equitySVG(eq, H = 250, id = "eq") {
@@ -458,9 +649,66 @@ fetch("api/stats").then(r => r.json()).then(d => {
 if (inTg && tg.initData) {
   fetch("api/me", {headers: {"Authorization": "tma " + tg.initData}})
     .then(r => r.ok ? r.json() : null)
-    .then(m => { if (m && m.private) { ME = m; if (DATA) render(true); } })
+    .then(m => {
+      if (m && (m.private || m.admin)) {
+        ME = m;
+        if (DATA) render(true);
+        if (m.admin) admFetch().then(() => { if (NAV !== "over") render(true); else renderNav(); });
+      }
+    })
     .catch(() => {});
 }
+
+// автообновление раз в 60с: публика + (для админа) пульт; активную вкладку перерисовываем тихо
+setInterval(() => {
+  fetch("api/stats").then(r => r.json()).then(d => {
+    DATA = d;
+    const t = (d.generated_at || "").slice(11, 16);
+    $("#upd").textContent = t ? `live · ${t} UTC` : "live";
+    const chain = (ME && ME.admin) ? admFetch() : Promise.resolve();
+    chain.then(() => render(true));
+  }).catch(() => {});
+}, 60000);
+
+// навигация по вкладкам
+document.addEventListener("click", e => {
+  const nb = e.target.closest("[data-nav]");
+  if (nb) { NAV = nb.dataset.nav; render(true); return; }
+  const tglEl = e.target.closest(".tgl[data-set]");
+  if (tglEl && ME && ME.admin) {
+    admSet(tglEl.dataset.set, !tglEl.classList.contains("on"), tglEl);
+    tglEl.classList.toggle("on");
+    return;
+  }
+  const act = e.target.closest("[data-act]");
+  if (act && ME && ME.admin) {
+    const id = parseInt(($("#g-id") || {}).value, 10);
+    const days = parseFloat(($("#g-days") || {}).value) || 30;
+    if (!id) { toast("Укажи tg_id"); return; }
+    fetch("api/admin/user", {method: "POST", headers: authHdr(),
+      body: JSON.stringify({tg_id: id, action: act.dataset.act, days})})
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        toast(d && d.ok ? (act.dataset.act === "grant" ? `Выдано ${days}д для ${id}` : `Снято у ${id}`)
+                        : "Отклонено");
+        admFetch().then(() => render(true));
+      })
+      .catch(() => toast("Сеть недоступна"));
+    return;
+  }
+});
+
+// числа/выбор/URL в настройках — сохранение на change
+document.addEventListener("change", e => {
+  const el = e.target.closest("[data-set]");
+  if (!el || !(ME && ME.admin) || el.classList.contains("tgl")) return;
+  const t = el.dataset.t;
+  let v = el.value;
+  if (t === "int") v = parseInt(v, 10);
+  if (t === "float") v = parseFloat(v);
+  if ((t === "int" || t === "float") && !isFinite(v)) { toast("Не число"); return; }
+  admSet(el.dataset.set, v, el);
+});
 
 // тап по строке с data-sid — переключить «я в этой сделке» (только платный слой).
 // PENDING переживает ре-рендеры (busy рисуется из него), поколение gen отбрасывает

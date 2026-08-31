@@ -310,6 +310,184 @@ def _recent_closed(tg_id: int, limit: int = 15) -> list:
             for r in ordered]
 
 
+# ------------------- админ-панель (v5: пульт управления) -------------------
+# Первый АДМИНСКИЙ пишущий контур на публичном вебе: гейт — та же подпись initData
+# плюс uid в admin_ids; настройки меняются ТОЛЬКО по белому списку с валидацией
+# (произвольный ключ в settings — это инъекция в конфиг бота, запрещено схемой).
+
+_ADMIN_SETTINGS: dict[str, dict] = {
+    "paused":            {"t": "bool", "label": "Пауза сигналов", "group": "Сигналы"},
+    "min_confidence":    {"t": "float", "min": 0.0, "max": 1.0,
+                          "label": "Мин. confidence", "group": "Сигналы"},
+    "max_open_per_side": {"t": "int", "min": 0, "max": 50,
+                          "label": "Лимит позиций на сторону", "group": "Сигналы"},
+    "channel_enabled":   {"t": "bool", "label": "Постить в канал", "group": "Канал"},
+    "channel_mode":      {"t": "choice", "choices": ("full", "teaser"),
+                          "label": "Режим канала", "group": "Канал"},
+    "sub_price_stars":   {"t": "int", "min": 1, "max": 100000,
+                          "label": "Цена подписки, Stars", "group": "Подписка"},
+    "sub_days":          {"t": "float", "min": 0.01, "max": 365,
+                          "label": "Срок подписки, дней", "group": "Подписка"},
+    "free_signals_per_week": {"t": "int", "min": 0, "max": 100,
+                              "label": "Бесплатных сигналов/нед", "group": "Подписка"},
+    "usdt_bonus_days":   {"t": "int", "min": 0, "max": 30,
+                          "label": "Бонус за USDT, дней", "group": "Подписка"},
+    "affiliate_url":     {"t": "url", "label": "Реф-ссылка биржи", "group": "Прочее"},
+    "executor_enabled":  {"t": "bool", "label": "Executor (демо BingX)", "group": "Прочее"},
+}
+
+
+def _admin_uid() -> int | None:
+    user = _auth_user()
+    if user is None:
+        return None
+    uid = int(user["id"])
+    return uid if uid in get_settings().admin_ids else None
+
+
+def _validate_setting(key: str, value) -> str | None:
+    """-> строка для settings | None если значение не проходит схему."""
+    spec = _ADMIN_SETTINGS.get(key)
+    if spec is None:
+        return None
+    t = spec["t"]
+    if t == "bool":
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        return None
+    if t == "choice":
+        return value if isinstance(value, str) and value in spec["choices"] else None
+    if t == "url":
+        if value in ("", None):
+            return ""
+        ok = isinstance(value, str) and value.startswith("https://") and len(value) < 500
+        return value if ok else None
+    if t in ("int", "float"):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not spec["min"] <= value <= spec["max"]:
+            return None
+        return str(int(value)) if t == "int" else str(float(value))
+    return None
+
+
+def _admin_settings_payload() -> list:
+    cur = {
+        "paused": runtime.paused(), "min_confidence": runtime.min_confidence(),
+        "max_open_per_side": runtime.max_open_per_side(),
+        "channel_enabled": runtime.channel_enabled(), "channel_mode": runtime.channel_mode(),
+        "sub_price_stars": runtime.price_stars(), "sub_days": runtime.sub_days(),
+        "free_signals_per_week": runtime.free_per_week(),
+        "usdt_bonus_days": runtime.usdt_bonus_days(),
+        "affiliate_url": runtime.affiliate_url(),
+        "executor_enabled": runtime.executor_enabled(),
+    }
+    return [{"key": k, "value": cur[k], "label": v["label"], "t": v["t"],
+             "group": v["group"], **({"choices": v["choices"]} if "choices" in v else {}),
+             **({"min": v["min"], "max": v["max"]} if "min" in v else {})}
+            for k, v in _ADMIN_SETTINGS.items()]
+
+
+@app.get("/api/admin")
+def api_admin() -> Response:
+    """Всё для пульта: здоровье, юзеры/деньги, настройки, журнал. Только админам."""
+    if _admin_uid() is None:
+        return _no_store({"ok": False}, 403)
+    from datetime import datetime
+
+    from app.delivery import payments
+    now = clock.utcnow()
+
+    def age_min(iso: str | None) -> float | None:
+        if not iso:
+            return None
+        try:
+            return round((now - datetime.fromisoformat(iso)).total_seconds() / 60, 1)
+        except ValueError:
+            return None
+
+    pays = db.query_one("SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS s "
+                        "FROM payments WHERE status='paid'") or {"n": 0, "s": 0.0}
+    last_pays = [dict(r) for r in db.query(
+        "SELECT tg_id, method, amount, currency, days, paid_at FROM payments "
+        "WHERE status='paid' ORDER BY paid_at DESC LIMIT 10")]
+    now_iso = clock.utcnow_iso()
+    paid_now = db.query_one(
+        "SELECT COUNT(*) AS n FROM users WHERE paid_until > ?", (now_iso,)) or {"n": 0}
+    lapsed = db.query_one(
+        "SELECT COUNT(*) AS n FROM users WHERE tier='paid' AND paid_until <= ?",
+        (now_iso,)) or {"n": 0}
+    recent_users = [dict(r) for r in db.query(
+        "SELECT tg_id, username, tier, paid_until, joined_at FROM users "
+        "ORDER BY joined_at DESC LIMIT 15")]
+    open_full = [dict(r) for r in db.query(
+        "SELECT id, symbol, side, timeframe, entry, stop, created_at, filled_at "
+        "FROM signals WHERE status='open' AND result_r IS NULL ORDER BY created_at DESC")]
+    payload = {
+        "ok": True,
+        "health": {
+            "poller_tick_min": age_min(runtime.last_poller_tick_at()),
+            "backup_min": age_min(runtime.last_backup_at()),
+            "webapp_url": runtime.webapp_url(),
+            "executor_enabled": runtime.executor_enabled(),
+            "paused": runtime.paused(),
+        },
+        "users": {"counts": payments.user_counts(), "paid_now": paid_now["n"],
+                  "lapsed": lapsed["n"], "acquisition": payments.acquisition_breakdown(),
+                  "recent": recent_users},
+        "money": {"payments_n": pays["n"], "payments_sum": round(float(pays["s"]), 2),
+                  "last": last_pays},
+        "settings": _admin_settings_payload(),
+        "open_signals": open_full,
+    }
+    return _no_store(payload)
+
+
+@app.post("/api/admin/set")
+def api_admin_set() -> Response:
+    """Изменение ОДНОЙ настройки по белому списку. 400 — ключ/значение вне схемы."""
+    uid = _admin_uid()
+    if uid is None:
+        return _no_store({"ok": False}, 403)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _no_store({"ok": False}, 400)
+    key = body.get("key")
+    if not isinstance(key, str) or key not in _ADMIN_SETTINGS:
+        return _no_store({"ok": False, "err": "unknown key"}, 400)
+    stored = _validate_setting(key, body.get("value"))
+    if stored is None:
+        return _no_store({"ok": False, "err": "bad value"}, 400)
+    if key == "executor_enabled" and stored == "1":
+        runtime.set_executor_since(clock.utcnow_iso())   # как /executor on: не догонять старое
+    runtime.set_value(key, stored)
+    return _no_store({"ok": True, "settings": _admin_settings_payload()})
+
+
+@app.post("/api/admin/user")
+def api_admin_user() -> Response:
+    """grant/revoke подписки из пульта (те же пути, что /grant и /revoke в боте)."""
+    uid = _admin_uid()
+    if uid is None:
+        return _no_store({"ok": False}, 403)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _no_store({"ok": False}, 400)
+    tg_id, action = body.get("tg_id"), body.get("action")
+    days = body.get("days", 30)
+    if (not isinstance(tg_id, int) or isinstance(tg_id, bool)
+            or not 0 < tg_id < 2 ** 63 or action not in ("grant", "revoke")
+            or isinstance(days, bool) or not isinstance(days, (int, float))
+            or not 0 < days <= 365):
+        return _no_store({"ok": False}, 400)
+    from app.delivery import payments
+    if action == "grant":
+        payments.admin_grant(tg_id, int(days))
+    else:
+        payments.admin_revoke(tg_id)
+    return _no_store({"ok": True})
+
+
 @app.get("/api/me")
 def api_me() -> Response:
     """Платный слой для валидного подписчика/админа. Без валидной подписи — 401."""
@@ -319,7 +497,8 @@ def api_me() -> Response:
     uid = int(user["id"])
     from app.delivery import payments
     private = payments.is_paid(uid) or uid in get_settings().admin_ids
-    payload: dict = {"ok": True, "private": private}
+    payload: dict = {"ok": True, "private": private,
+                     "admin": uid in get_settings().admin_ids}
     if private:
         since = _paid_since(uid)
         payload["positions"] = _open_signals_private()
