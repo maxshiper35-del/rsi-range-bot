@@ -1426,17 +1426,11 @@ def main() -> None:
         """Постоянное меню внизу чата — юзеру не нужно помнить команды.
         is_persistent: Telegram держит клавиатуру на экране всегда (Bot API 6.7),
         даже если юзер её сворачивал; у админа — дополнительные кнопки."""
-        # «📈 Дашборд»: при заданном webapp_url — web_app-кнопка (Mini App внутри
-        # Telegram), иначе обычная (хэндлер отдаёт самодостаточный HTML-файл).
-        wurl = runtime.webapp_url()
-
-        def _btn(text: str) -> KeyboardButton:
-            if text == "📈 Дашборд" and wurl.startswith("https://"):
-                return KeyboardButton(text=text, web_app=WebAppInfo(url=wurl))
-            return KeyboardButton(text=text)
-
+        # «📈 Дашборд» — ВСЕГДА обычная кнопка. web_app в reply-клавиатуре хранится
+        # на клиенте вечно и протухает при смене URL (мёртвый сервер 30.08, ротация
+        # quick-туннеля). Живой дашборд уходит СВЕЖЕЙ инлайн-кнопкой из хэндлера.
         return ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True, keyboard=[
-            [_btn(t) for t in row] for row in main_menu_layout(is_admin)])
+            [KeyboardButton(text=t) for t in row] for row in main_menu_layout(is_admin)])
 
     def _subscribe_kb() -> InlineKeyboardMarkup:
         rows = []
@@ -2194,14 +2188,9 @@ def main() -> None:
                 await _send_offline_dashboard(m)
             return
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="📈 Открыть живой дашборд", web_app=WebAppInfo(url=wurl))]])
-        await m.answer(
-            "Живой дашборд теперь открывается прямо в Telegram — кнопкой ниже.\n"
-            "Обновил и меню: кнопка «📈 Дашборд» дальше будет открывать его сразу.\n"
-            "Офлайн-файл по-прежнему доступен: /dashboard",
-            reply_markup=kb)
-        await m.answer("Меню обновлено ✅",
-                       reply_markup=_main_menu_kb(m.from_user.id in cfg.admin_ids))
+            text="📈 Открыть живой терминал", web_app=WebAppInfo(url=wurl))]])
+        await m.answer("Живой терминал — кнопкой ниже. Офлайн-файл: /dashboard",
+                       reply_markup=kb)
 
     def _is_admin(m) -> bool:
         return bool(m.from_user) and m.from_user.id in cfg.admin_ids
