@@ -222,13 +222,14 @@ def reconcile() -> list[str]:
                 try:
                     # цены — к тику инструмента: сырой стоп ловил 101400
                     # «SL Price must be…» на монетах с крупным тиком (#343 PORTAL 20.08)
-                    ex.create_order(
+                    created = ex.create_order(
                         r["symbol"], "limit", side, qty,
                         float(ex.price_to_precision(r["symbol"], r["entry"])),
                         params={"positionSide": r["side"], "clientOrderID": client_id,
                                 "stopLoss": {"type": "STOP_MARKET",
                                              "stopPrice": float(ex.price_to_precision(
                                                  r["symbol"], r["stop"]))}})
+                    _store_order_id(a.signal_id, (created or {}).get("id"))
                 except Exception:                       # noqa: BLE001
                     # неоднозначный сбой (таймаут после отправки?): сверить по clientOrderID —
                     # ордер реально стоит -> успех; нет -> настоящая ошибка наверх
@@ -279,22 +280,61 @@ def reconcile() -> list[str]:
     return report
 
 
-def _cancel_entry(ex, t) -> None:
-    """Снять лимитку входа по clientOrderID; уже исполнена/отменена — не ошибка:
-    цель состояния «ордера нет» достигнута (факт филла проверяет вызывающий)."""
+def _store_order_id(sid: int, oid) -> None:
+    if oid:
+        db.execute("UPDATE executor_orders SET order_id=?, updated_at=? WHERE signal_id=?",
+                   (str(oid), clock.utcnow_iso(), sid))
+
+
+def _find_by_client_id(ex, t):
+    """Ордер по clientOrderId через СПИСОК открытых: точечный fetch по clientOrderID
+    BingX-демо отвергает 109400 (смоук 31.08) — а в листинге поле отдаётся. Видит
+    только ОТКРЫТЫЕ ордера: исполненный/снятый так не восстановить (редкий случай
+    потерянного ответа create — честно вернём None)."""
     try:
-        ex.cancel_order(None, t["symbol"], params={"clientOrderID": t["client_id"]})
+        for o in ex.fetch_open_orders(t["symbol"]):
+            if (o.get("clientOrderId") or "") == t["client_id"]:
+                return o
+    except Exception:                                   # noqa: BLE001
+        pass
+    return None
+
+
+def _row_order_id(t):
+    try:
+        return t["order_id"]
+    except (KeyError, IndexError):
+        return None
+
+
+def _cancel_entry(ex, t) -> None:
+    """Снять лимитку входа (по order_id, резерв — поиск по clientOrderId в листинге);
+    уже исполнена/отменена — не ошибка: цель «ордера нет» достигнута."""
+    oid = _row_order_id(t)
+    if not oid:
+        found = _find_by_client_id(ex, t)
+        if found is None:
+            return                                       # открытого ордера нет — цель достигнута
+        oid = found.get("id")
+    try:
+        ex.cancel_order(oid, t["symbol"])
     except Exception as e:                              # noqa: BLE001
         if "not exist" not in str(e).lower() and "80016" not in str(e):
             raise
 
 
 def _entry_order(ex, t):
-    """Ордер входа по clientOrderID либо None (не найден/сеть недоступна)."""
-    try:
-        return ex.fetch_order(None, t["symbol"], params={"clientOrderID": t["client_id"]})
-    except Exception:                                   # noqa: BLE001
-        return None
+    """Ордер входа по order_id (резерв — листинг по clientOrderId) либо None."""
+    oid = _row_order_id(t)
+    if oid:
+        try:
+            return ex.fetch_order(oid, t["symbol"])
+        except Exception:                               # noqa: BLE001
+            return None
+    o = _find_by_client_id(ex, t)
+    if o is not None and o.get("id"):
+        _store_order_id(t["signal_id"], o["id"])
+    return o
 
 
 def _executed_qty(ex, t) -> float:
