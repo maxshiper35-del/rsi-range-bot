@@ -161,10 +161,10 @@ def test_build_dashboard_html_empty_fallback():
 
 
 def test_equity_svg_sign_color():
-    up = graphics._equity_svg([1.0, 2.0, 1.0])       # +4R итог -> зелёный
-    assert "#4ADE9C" in up and "+4.0R" in up
-    down = graphics._equity_svg([-1.0, -1.0, 1.0])   # -1R итог -> красный
-    assert "#F16565" in down and "-1.0R" in down
+    up = graphics._equity_svg([1.0, 2.0, 1.0])       # +4R итог -> зелёный (v4)
+    assert "#1f9e6e" in up and "+4.0R" in up
+    down = graphics._equity_svg([-1.0, -1.0, 1.0])   # -1R итог -> красный (v4)
+    assert "#f6465d" in down and "-1.0R" in down
 
 
 def test_render_dashboard_png():

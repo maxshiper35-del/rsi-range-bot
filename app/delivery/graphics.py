@@ -483,53 +483,55 @@ def render_signal_chart(data: dict) -> bytes:
 # ---------------------------------------------------------------------------
 
 _DASH_CSS = """
+  /* v4 «биржевой терминал» — та же палитра, что Mini App (вкус владельца 14.08):
+     тёмный всегда, панели с бордерами, моно-цифры, оранжевый бренд-акцент,
+     зелёный/красный #1f9e6e/#f6465d. Без градиентов и карточек-облаков. */
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:linear-gradient(180deg,#0D0F14,#0B0D11 55%,#0A0C10); color:#EDEFF3;
+  body { background:#0b0e11; color:#eaecef;
          font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-         -webkit-font-smoothing:antialiased; padding:28px 16px; display:flex;
-         justify-content:center; min-height:100vh; }
-  .wrap { width:100%; max-width:900px; display:flex; flex-direction:column; gap:16px; }
-  .brand { display:flex; align-items:center; gap:14px; }
-  .mark { width:44px; height:44px; border-radius:12px; flex:0 0 auto;
-          background:linear-gradient(155deg,#4C6EF5,#7C5CFC); display:flex;
-          align-items:center; justify-content:center; font-weight:800; font-size:20px;
-          color:#F5F6FA; }
-  .brand .name { font-size:20px; font-weight:700; }
-  .brand .sub { font-size:13px; color:#6B7280; margin-top:2px; }
-  .tiles { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+         -webkit-font-smoothing:antialiased; padding:24px 12px; display:flex;
+         justify-content:center; min-height:100vh;
+         font-variant-numeric:tabular-nums; }
+  .mono { font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+  .wrap { width:100%; max-width:900px; display:flex; flex-direction:column; gap:10px; }
+  .brand { display:flex; align-items:center; gap:12px; padding:2px 2px 6px; }
+  .mark { width:14px; height:14px; border-radius:3px; flex:0 0 auto; background:#f7a600; }
+  .brand .name { font-size:16px; font-weight:700; letter-spacing:.08em;
+                 font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+  .brand .sub { font-size:12px; color:#5c6672; margin-top:2px; }
+  .tiles { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
   @media (max-width:620px){ .tiles{ grid-template-columns:repeat(2,1fr); } }
-  .card { background:linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0.012));
-          border:1px solid rgba(255,255,255,0.08); border-radius:16px; padding:18px 20px; }
-  .tile .lbl { font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
-               color:#767C88; }
-  .tile .val { font-size:30px; font-weight:800; letter-spacing:-1px; margin-top:6px;
-               font-variant-numeric:tabular-nums; }
-  .positive { color:#4ADE9C; } .negative { color:#F16565; } .neutral { color:#F1F2F5; }
-  .tile .sub { font-size:12px; color:#868C97; margin-top:4px; }
-  h3 { font-size:14px; color:#D6D9E0; margin-bottom:12px; }
+  .card { background:#14181d; border:1px solid #232a32; border-radius:8px; padding:13px 15px; }
+  .tile .lbl { font-size:10px; font-weight:600; letter-spacing:.1em; text-transform:uppercase;
+               color:#5c6672; }
+  .tile .val { font-size:26px; font-weight:700; letter-spacing:-.5px; margin-top:5px;
+               font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+  .positive { color:#1f9e6e; } .negative { color:#f6465d; } .neutral { color:#eaecef; }
+  .tile .sub { font-size:11px; color:#5c6672; margin-top:3px; }
+  h3 { font-size:11px; color:#8a94a1; margin-bottom:10px; letter-spacing:.1em;
+       text-transform:uppercase; font-weight:600; }
   svg { width:100%; height:auto; display:block; }
-  table { width:100%; border-collapse:collapse; font-size:13.5px; }
-  th { text-align:left; font-size:11px; font-weight:700; letter-spacing:.06em;
-       text-transform:uppercase; color:#767C88; padding:6px 8px; }
-  td { padding:7px 8px; border-top:1px solid rgba(255,255,255,0.06);
-       font-variant-numeric:tabular-nums; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; font-size:10px; font-weight:600; letter-spacing:.08em;
+       text-transform:uppercase; color:#5c6672; padding:5px 8px; }
+  td { padding:6px 8px; border-top:1px solid #1e242b;
+       font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:12.5px; }
   td.r { text-align:right; }
-  .bar-track { height:8px; border-radius:5px; background:rgba(255,255,255,0.07);
-               overflow:hidden; margin-top:10px; }
-  .bar-fill { height:100%; border-radius:5px; background:linear-gradient(90deg,#4C6EF5,#7C5CFC); }
-  .dash-empty { color:#767C88; font-size:14px; padding:24px 0; text-align:center; }
-  .note { font-size:13px; line-height:1.55; color:#868C97; }
-  .note b { color:#C7CBD4; }
-  .foot { font-size:12px; color:#565C68; text-align:center; }
+  .bar-track { height:6px; border-radius:3px; background:#1e242b; overflow:hidden; margin-top:10px; }
+  .bar-fill { height:100%; border-radius:3px; background:#f7a600; }
+  .dash-empty { color:#5c6672; font-size:13px; padding:22px 0; text-align:center; }
+  .note { font-size:12.5px; line-height:1.55; color:#8a94a1; }
+  .note b { color:#eaecef; }
+  .foot { font-size:11px; color:#5c6672; text-align:center; padding-bottom:8px; }
 """
 
 _DASH_DOC = Template("""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RSI Range Signals — дашборд трек-рекорда</title><style>$css</style></head>
 <body><div class="wrap">
-  <div class="brand"><div class="mark">R</div><div>
-    <div class="name">Дашборд трек-рекорда</div>
-    <div class="sub">RSI Range Signals · @rsi_range · $period</div></div></div>
+  <div class="brand"><div class="mark"></div><div>
+    <div class="name">RSI RANGE · ТЕРМИНАЛ</div>
+    <div class="sub">@rsi_range · $period · офлайн-снимок</div></div></div>
   <div class="tiles">
     <div class="card tile"><div class="lbl">Итог</div>
       <div class="val $total_class">$total_r</div><div class="sub">$closed закрытых</div></div>
@@ -537,6 +539,10 @@ _DASH_DOC = Template("""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-
       <div class="val $exp_class">$exp_r</div><div class="sub">на сделку</div></div>
     <div class="card tile"><div class="lbl">Winrate</div>
       <div class="val neutral">$winrate%</div><div class="sub">$wins побед · $losses пораж.</div></div>
+    <div class="card tile"><div class="lbl">Чистый ход</div>
+      <div class="val $move_class">$move_pct</div><div class="sub">забрано без плеча</div></div>
+    <div class="card tile"><div class="lbl">Просадка max</div>
+      <div class="val negative">−$max_dd</div><div class="sub">от пика эквити</div></div>
     <div class="card tile"><div class="lbl">В работе</div>
       <div class="val neutral">$open</div><div class="sub">открытых сигналов</div></div>
   </div>
@@ -573,13 +579,13 @@ def _equity_svg(series: list, w: int = 860, h: int = 240, pad: int = 18) -> str:
     zero = y(0.0)
     line = " ".join(f"{x(i)},{y(v)}" for i, v in pts)
     area = f"{x(0)},{zero} {line} {x(n)},{zero}"
-    color = "#4ADE9C" if cum[-1] >= 0 else "#F16565"
+    color = "#1f9e6e" if cum[-1] >= 0 else "#f6465d"
     end_x, end_y = x(n), y(cum[-1])
     return (
         f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">'
         f'<polygon points="{area}" fill="{color}" fill-opacity="0.10"/>'
         f'<line x1="{pad}" y1="{zero}" x2="{w - pad}" y2="{zero}" '
-        f'stroke="rgba(255,255,255,0.18)" stroke-width="1" stroke-dasharray="4 4"/>'
+        f'stroke="#3a424c" stroke-width="1" stroke-dasharray="4 4"/>'
         f'<polyline points="{line}" fill="none" stroke="{color}" stroke-width="2.4" '
         f'stroke-linejoin="round" stroke-linecap="round"/>'
         f'<circle cx="{end_x}" cy="{end_y}" r="4" fill="{color}"/>'
@@ -652,8 +658,17 @@ def build_dashboard_html(data: dict) -> str:
     Разбивки по сетапам НЕТ (граница публикации стратегии — таксономия сетапов не
     отдаётся никому; ревью 14.08 нашло эту поверхность пропущенной при зачистке)."""
     st = data["stats"]
+    run = peak = dd = 0.0
+    for r in data["equity"]:
+        run += r
+        peak = max(peak, run)
+        dd = max(dd, peak - run)
+    move = st.get("total_move_pct")
     return _DASH_DOC.substitute(
         css=_DASH_CSS,
+        move_pct=(f"{move:+.0f}%" if move is not None else "—"),
+        move_class=_r_class(move or 0.0),
+        max_dd=f"{dd:.1f}R",
         period=_esc(data["period_label"]),
         updated=_esc(data["updated_label"]),
         total_r=f"{st['total_r']:+.1f}R", total_class=_r_class(st["total_r"]),

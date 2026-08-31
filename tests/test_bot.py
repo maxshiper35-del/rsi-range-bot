@@ -1023,3 +1023,18 @@ def test_render_xray_hides_setup_tag():
          "wait_hours": 1.0, "hold_hours": 5.0, "trail_moves": 1, "trail_peak_r": 2.1}
     txt = templates.render_xray(x)
     assert "6226" not in txt and "сетап" not in txt.lower()
+
+
+def test_affiliate_block_in_about_and_board(fresh_db):
+    """Реф-блок появляется только с заданной ссылкой, с честной пометкой «реферальная»."""
+    from app import runtime
+    assert "реферальная" not in bot.format_about()
+    runtime.set_value("affiliate_url", "https://bingx.com/ref/XYZ")
+    about = bot.format_about()
+    assert "https://bingx.com/ref/XYZ" in about and "реферальная" in about
+    st = {"trades": 2, "open": 1, "winrate": 0.5, "expectancy_r": 0.1, "total_r": 0.2,
+          "wins": 1, "losses": 1}
+    board = bot.format_channel_live_board(st, {}, None, [], "2026-08-31T00:00:00+00:00")
+    assert "bingx.com/ref/XYZ" in board
+    runtime.set_value("affiliate_url", "")
+    assert "bingx.com" not in bot.format_about()

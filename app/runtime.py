@@ -192,6 +192,12 @@ def set_og_card_last_day(day: str) -> None:
     set_value("og_card_last_day", day)
 
 
+def affiliate_url() -> str:
+    """Партнёрская ссылка биржи ('' = блоки скрыты) — /affiliate у админа.
+    Монетизация без подписки (пункт PR-кита): реф в /about, /start и закрепе."""
+    return _raw("affiliate_url") or ""
+
+
 def exec_report_last_week() -> str | None:
     """ISO-неделя последнего отчёта «исполнение vs журнал» админам (не слать дважды)."""
     return _raw("exec_report_last_week")

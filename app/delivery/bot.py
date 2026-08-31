@@ -444,7 +444,19 @@ def format_about() -> str:
         "18+. Не предназначено для юрисдикций, где такие услуги запрещены. "
         "Мы никогда не пишем первыми в личку и не просим оплату вне этого бота — "
         "если кто-то пишет от имени RSI Range, это не мы."
+        f"{_affiliate_block()}"
     )
+
+
+def _affiliate_block() -> str:
+    """Реф-блок для /about и /start ('' если ссылка не задана). Честная пометка
+    «реферальная» обязательна — тот же стандарт прозрачности, что и везде."""
+    from app import runtime
+    url = runtime.affiliate_url()
+    if not url.startswith("https://"):
+        return ""
+    return (f"\n\n🤝 Торгуешь сам? Регистрация на бирже по нашей ссылке "
+            f"поддерживает проект (реферальная): {url}")
 
 
 def format_terms() -> str:
@@ -981,6 +993,9 @@ def format_channel_live_board(st: dict, by_symbol: dict, cohort: dict | None = N
         if len(open_rows) > 10:
             lines.append(f"  …и ещё {len(open_rows) - 10}")
         lines.append("  Уровни и живой uR — подписчикам: @rsirange_bot")
+    from app import runtime as _rt
+    if _rt.affiliate_url().startswith("https://"):
+        lines.append(f"🤝 Биржа проекта (реф): {_rt.affiliate_url()}")
     if cohort is not None:
         c, r = cohort["confirmed"], cohort["rejected"]
         lines.append("\n🧪 Подтверждённые оператором vs отклонённые (форвард-эксперимент):")
@@ -1054,6 +1069,7 @@ ADMIN_COMMANDS = USER_COMMANDS + [
     ("post", "разовая сводка статистики в канал"),
     ("price", "stars|usdt|days <N> — цена подписки"),
     ("freeweek", "лимит бесплатных сигналов/нед"),
+    ("affiliate", "реф-ссылка биржи в /about и закреп: /affiliate <url>|off"),
     ("addpromo", "создать промокод: /addpromo <код> <дней> [лимит]"),
     ("usdtlink", "ссылка на ручной USDT-счёт"),
     ("cryptobottoken", "API-токен Crypto Pay — вкл. авто-USDT"),
@@ -2653,6 +2669,27 @@ def main() -> None:
             await m.answer("Формат: /freeweek 3")
             return
         await _set(m, "free_signals_per_week", parts[1], f"Free-лимит: {parts[1]}/нед")
+
+    @dp.message(Command("affiliate"))
+    async def _affiliate(m):
+        if not _is_admin(m):
+            return
+        parts = (m.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            cur = runtime.affiliate_url() or "не задана"
+            await m.answer(f"Реф-ссылка: {cur}\nФормат: /affiliate <https://…> | off")
+            return
+        arg = parts[1].strip()
+        if arg.lower() == "off":
+            await asyncio.to_thread(runtime.set_value, "affiliate_url", "")
+            await m.answer("Реф-блоки выключены")
+            return
+        if not arg.startswith("https://"):
+            await m.answer("Ссылка должна начинаться с https://")
+            return
+        await asyncio.to_thread(runtime.set_value, "affiliate_url", arg)
+        await m.answer("✅ Реф-ссылка задана: покажется в /about и закрепе-табло "
+                       "(обновится в течение часа)")
 
     @dp.message(Command("addpromo"))
     async def _addpromo(m):
