@@ -293,7 +293,9 @@ def _find_by_client_id(ex, t):
     потерянного ответа create — честно вернём None)."""
     try:
         for o in ex.fetch_open_orders(t["symbol"]):
-            if (o.get("clientOrderId") or "") == t["client_id"]:
+            # BingX-демо в листинге приводит clientOrderId к нижнему регистру
+            # ('rsismoke3' вместо 'rsiSMOKE3') — сравниваем без регистра
+            if (o.get("clientOrderId") or "").lower() == t["client_id"].lower():
                 return o
     except Exception:                                   # noqa: BLE001
         pass
