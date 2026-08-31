@@ -2158,6 +2158,8 @@ def main() -> None:
         # команда — всегда офлайн-файл (сознательная фича: переслать/хранить)
         await _send_offline_dashboard(m)
 
+    _dash_last: dict[int, float] = {}
+
     @dp.message(F.text == "📈 Дашборд")
     async def _dashboard_btn(m):
         # Сюда доходит только СТАРАЯ reply-клавиатура (выданная до Mini App): её
@@ -2167,7 +2169,29 @@ def main() -> None:
         # «хочу чтоб дашборд в тг был»). Без webapp_url — прежний офлайн-файл.
         wurl = runtime.webapp_url()
         if not wurl.startswith("https://"):
-            await _send_offline_dashboard(m)
+            # Mini App выключен (локальный режим): шлём КАРТИНКУ терминала — на телефоне
+            # HTML-файл нечитаем без скачивания (фидбэк владельца 31.08 «он мне отправляет
+            # html»). Кулдаун и общий семафор — Chromium на каждый рендер (см. /mycard).
+            uid = m.from_user.id
+            if _monotonic() - _dash_last.get(uid, -1e9) < 60:
+                await m.answer("Дашборд только что рисовался — подожди минуту 🙃")
+                return
+            _dash_last[uid] = _monotonic()
+            try:
+                def _build_html():
+                    updated = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+                    return graphics.build_dashboard_html(dashboard_data(
+                        journal.stats(), journal.equity_series(),
+                        journal.stats_by_symbol(), updated))
+                html = await asyncio.to_thread(_build_html)
+                png = await _render_png(graphics.render_html_to_png, html, 900)
+                await m.answer_photo(
+                    BufferedInputFile(png, filename="dashboard.png"),
+                    caption="📈 Терминал на текущий момент. "
+                            "Интерактивная HTML-версия (офлайн): /dashboard")
+            except Exception as e:                      # noqa: BLE001 — рендер не критичен
+                log.warning("dashboard png: %s — отдаю файлом", e)
+                await _send_offline_dashboard(m)
             return
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
             text="📈 Открыть живой дашборд", web_app=WebAppInfo(url=wurl))]])
