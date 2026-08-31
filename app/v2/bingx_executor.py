@@ -173,6 +173,13 @@ def reconcile() -> list[str]:
     since = runtime.executor_since() or ""
     if not since:
         return []
+    if not os.environ.get("BINGX_API_KEY"):
+        # локальный режим без ключей: тумблер в панели мог включить executor, а ключи
+        # живут в серверном .env (и их вайтлист — на IP сервера). Самовыключение с одним
+        # сообщением вместо AuthenticationError каждые 60с (алерт 31.08).
+        runtime.set_value("executor_enabled", "0")
+        return ["⚠️ Executor выключен сам: в окружении нет ключей BingX "
+                "(локальный режим; включать после возврата на сервер)"]
     report: list[str] = []
     ex = _exchange()
     open_rows = db.query("SELECT * FROM signals WHERE status='open' AND result_r IS NULL")

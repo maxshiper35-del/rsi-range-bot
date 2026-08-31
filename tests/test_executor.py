@@ -118,3 +118,16 @@ def test_calc_qty_symbol_budget(fresh_db):
     # закрытые/ошибочные бюджет не держат
     db_mod.execute("UPDATE executor_orders SET state='closed' WHERE signal_id=901")
     assert ex._active_notional("BBB/USDT:USDT", "SHORT") == 0.0
+
+
+def test_reconcile_self_disables_without_keys(fresh_db, monkeypatch):
+    """Тумблер панели мог включить executor без ключей BingX в окружении (локальный
+    режим) — reconcile самовыключается одним сообщением, не сыплет AuthenticationError."""
+    from app import runtime
+    from app.v2 import bingx_executor as ex
+    monkeypatch.delenv("BINGX_API_KEY", raising=False)
+    runtime.set_value("executor_enabled", "1")
+    runtime.set_executor_since("2026-08-31T00:00:00+00:00")
+    out = ex.reconcile()
+    assert out and "выключен сам" in out[0]
+    assert runtime.executor_enabled() is False

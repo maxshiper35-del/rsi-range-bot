@@ -333,7 +333,7 @@ _ADMIN_SETTINGS: dict[str, dict] = {
     "usdt_bonus_days":   {"t": "int", "min": 0, "max": 30,
                           "label": "Бонус за USDT, дней", "group": "Подписка"},
     "affiliate_url":     {"t": "url", "label": "Реф-ссылка биржи", "group": "Прочее"},
-    "executor_enabled":  {"t": "bool", "label": "Executor (демо BingX)", "group": "Прочее"},
+    "executor_enabled":  {"t": "bool", "label": "Executor (нужны ключи BingX)", "group": "Прочее"},
 }
 
 
