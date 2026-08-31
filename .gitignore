@@ -34,3 +34,4 @@ graphify-out/
 .ruff_cache/
 .coverage
 data/backups-server/
+data/*.bak
