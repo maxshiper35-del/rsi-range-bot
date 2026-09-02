@@ -480,6 +480,7 @@ def test_stats_r_series_for_simulator(fresh_db):
     d = flask_app.test_client().get("/api/stats").get_json()
     assert d["r_all"] == [1.5, -1.0, 2.2]
     assert d["sp_all"] == [2.0, 2.0, 2.0]                 # |100−98|/100 = 2% на сделку
+    assert d["h_all"] == [0.0, 0.0, 0.0]                  # без filled_at — часов в позиции нет
 
 
 def test_trade_chart_open_only_for_private(fresh_db, monkeypatch, webapp_token):

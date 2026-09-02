@@ -311,7 +311,8 @@ function pick() {
            eq: useEpoch ? DATA.equity_epoch : DATA.equity_all,
            hold: useEpoch ? DATA.hold_epoch : DATA.hold_all,
            rs: useEpoch ? (DATA.r_epoch || []) : (DATA.r_all || []),
-           sp: useEpoch ? (DATA.sp_epoch || []) : (DATA.sp_all || []) };
+           sp: useEpoch ? (DATA.sp_epoch || []) : (DATA.sp_all || []),
+           hh: useEpoch ? (DATA.h_epoch || []) : (DATA.h_all || []) };
 }
 
 function navItems() {
@@ -432,9 +433,12 @@ function renderOverview(noAnim) {
     <div class="cell"><b>${DATA.all.open ?? 0}</b><span>открыто</span></div>
     <div class="cell"><b>${hold ? "~" + Math.round(hold) + "ч" : "—"}</b><span>в сделке</span></div>
   </div>`);
-  const rsim = pick().rs, spsim = pick().sp;
+  const pk = pick(), spsim = pk.sp;
+  const rsim = SIM_COSTS ? netR(pk.rs, pk.sp, pk.hh) : pk.rs;
   if (rsim.length >= 5) {
     const sim = simCompute(rsim, SIM_RISK);
+    const simGross = SIM_COSTS ? simCompute(pk.rs, SIM_RISK) : null;
+    const costR = SIM_COSTS ? pk.rs.reduce((a, r) => a + r, 0) - rsim.reduce((a, r) => a + r, 0) : 0;
     // плечо = риск% ÷ ход до стопа%: реальная дистанция стопа каждой сделки
     const levs = spsim.filter(v => v > 0).map(v => SIM_RISK / v);
     const levAvg = levs.length ? levs.reduce((a, v) => a + v, 0) / levs.length : 0;
@@ -443,18 +447,20 @@ function renderOverview(noAnim) {
       ? `<div class="mystat">плечо при риске ${SIM_RISK}%: в среднем <b>×${levAvg.toFixed(1)}</b> · максимум <b class="${levMax > 20 ? "dn" : ""}">×${levMax.toFixed(1)}</b>${levMax > 20 ? " — выше ×20, такие сделки пришлось бы брать меньшим риском" : ""}</div>`
       : "";
     h += sec(`<section><div class="sec-h"><h2>СИМУЛЯТОР ДЕПОЗИТА</h2>
-      <span class="note">риск на сделку: ${[1, 2, 5].map(pp =>
-        `<b class="chip${pp === SIM_RISK ? " on" : ""}" data-risk="${pp}">${pp}%</b>`).join("")}</span></div>
+      <span class="note">риск: ${[1, 2, 5].map(pp =>
+        `<b class="chip${pp === SIM_RISK ? " on" : ""}" data-risk="${pp}">${pp}%</b>`).join("")}
+        <b class="chip${SIM_COSTS ? " on" : ""}" data-costs="1" style="margin-left:10px">издержки</b></span></div>
       <div class="sim-hero"><span class="sim-start">$100 →</span>
         <b class="sim-bal ${sim.bal >= 100 ? "up" : "dn"}">${fmtUsd(sim.bal)}</b>
-        <span class="sim-pct ${sim.pct >= 0 ? "up" : "dn"}">${sim.pct >= 0 ? "+" : ""}${sim.pct.toFixed(1)}%</span></div>
+        <span class="sim-pct ${sim.pct >= 0 ? "up" : "dn"}">${sim.pct >= 0 ? "+" : ""}${sim.pct.toFixed(1)}%</span>
+        ${simGross ? `<span class="dim" style="font-size:11px">без издержек ${fmtUsd(simGross.bal)} · издержки съели ${costR.toFixed(1)}R</span>` : ""}</div>
       ${levLine}
       <div class="mystat">${rsim.length} сделок · макс. просадка −${sim.maxDD.toFixed(1)}% · риск считается от текущего баланса${(() => {
         const kj = SCOPE === "epoch" && DATA.kelly_epoch ? DATA.kelly_epoch : DATA.kelly_all;
         return kj ? ` · полу-Келли по журналу ≈ ${kj.half}%` : "";
       })()}</div>
       <div class="plot">${simSVG(sim.series)}</div>
-      <div class="mystat" style="margin:6px 0 0;color:var(--ink-3)">Модель по закрытым сделкам журнала (порядок закрытий); R — по ценам биржи, комиссии и проскальзывание не учтены. Плечо = риск% ÷ ход до стопа% (размер позиции от риска, не «на всё плечо»). Не прогноз и не гарантия.</div>
+      <div class="mystat" style="margin:6px 0 0;color:var(--ink-3)">Модель по закрытым сделкам журнала (порядок закрытий). Издержки — как в бэктесте стратегии: комиссия тейкера 0.055% на сторону (вход маркетом по касанию), проскальзывание 0.02%, фандинг 0.01%/8ч по времени в позиции; переводятся в R через ход до стопа каждой сделки. Плечо = риск% ÷ ход до стопа%. Не прогноз и не гарантия.</div>
       </section>`);
   }
   if ((DATA.market || []).length) {
@@ -830,7 +836,17 @@ setInterval(() => {
 }, 60000);
 
 // --- симулятор депозита: сложный процент по закрытым сделкам журнала ---
-let SIM_RISK = 2;
+let SIM_RISK = 2, SIM_COSTS = true;
+const COST_FEE = 0.055, COST_SLIP = 0.02, COST_FUND_8H = 0.01;   // %, модель бэктеста
+function netR(rs, sps, hh) {
+  // издержки в R: (2×комиссия + слип)/ход до стопа% + фандинг×часы/8/ход;
+  // сделки без филла (expired, R=0) издержек не несут
+  return rs.map((r, i) => {
+    if (!sps[i] || (r === 0 && !(hh[i] > 0))) return r;
+    const pct = 2 * COST_FEE + COST_SLIP + COST_FUND_8H * ((hh[i] || 0) / 8);
+    return r - pct / sps[i];
+  });
+}
 const fmtUsd = v => "$" + (v >= 1000
   ? v.toLocaleString("en-US", {maximumFractionDigits: 0})
   : v.toFixed(v >= 100 ? 0 : 2));
@@ -985,6 +1001,7 @@ document.addEventListener("click", e => {
   if (rk) { SIM_RISK = +rk.dataset.risk; render(true); return; }
   const cf = e.target.closest("[data-cf]");
   if (cf) { CLOSED_FILTER = cf.dataset.cf; render(true); return; }
+  if (e.target.closest("[data-costs]")) { SIM_COSTS = !SIM_COSTS; render(true); return; }
   const nb = e.target.closest("[data-nav]");
   if (nb) { NAV = nb.dataset.nav; render(true); return; }
   const tglEl = e.target.closest(".tgl[data-set]");
