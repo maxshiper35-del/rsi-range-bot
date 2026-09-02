@@ -40,6 +40,10 @@ def fresh_db(tmp_path, monkeypatch):
     from app import runtime
 
     runtime.set_value("trail_activate_r", "0")
+    # серверный кеш /api/stats переживает границы тестов — каждому тесту чистый
+    import app.webapp as _webapp
+
+    _webapp._STATS_CACHE["body"], _webapp._STATS_CACHE["at"] = None, 0.0
     yield db
     _reset_conn(db)
     get_settings.cache_clear()

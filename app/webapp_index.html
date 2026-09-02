@@ -542,11 +542,14 @@ function renderSystem() {
 
 const authHdr = () => ({"Authorization": "tma " + tg.initData, "Content-Type": "application/json"});
 
-let ADM_ERR = 0;
+let ADM_ERR = 0, ADM_SEQ = 0;
 function admFetch() {
+  // seq защищает от гонки: фоновый фетч, начавшийся ДО сохранения настройки,
+  // не должен откатить ADM.settings устаревшим снимком (аудит 02.09)
+  const seq = ++ADM_SEQ;
   return fetch("api/admin", {headers: authHdr()})
     .then(r => { ADM_ERR = r.ok ? 0 : r.status; return r.ok ? r.json() : null; })
-    .then(a => { if (a && a.ok) ADM = a; return ADM; })
+    .then(a => { if (a && a.ok && seq === ADM_SEQ) ADM = a; return ADM; })
     .catch(() => null);
 }
 
@@ -555,7 +558,7 @@ function admSet(key, value, el) {
     body: JSON.stringify({key, value})})
     .then(r => r.ok ? r.json() : null)
     .then(d => {
-      if (d && d.ok) { ADM.settings = d.settings; toast("Сохранено: " + key); }
+      if (d && d.ok) { ADM_SEQ++; ADM.settings = d.settings; toast("Сохранено: " + key); }
       else toast(d === null ? "Подпись устарела? Переоткрой дашборд" : "Отклонено сервером");
       render(true);
     })
@@ -717,15 +720,18 @@ setInterval(() => {
     DATA = d;
     const t = (d.generated_at || "").slice(11, 16);
     $("#upd").textContent = t ? `live · ${t} UTC` : "live";
+    const hadAdm = !!ADM;
     const chain = Promise.all([ME ? meFetch() : Promise.resolve(),
                                (ME && ME.admin) ? admFetch() : Promise.resolve()]);
     chain.then(() => {
       // не перерисовываем, пока админ печатает (иначе innerHTML стирает ввод до blur),
-      // и вкладки с формами не трогаем автообновлением вовсе (ревью 01.09)
+      // и вкладки с формами не трогаем автообновлением — КРОМЕ первого прихода ADM:
+      // иначе открытая до загрузки вкладка застревала в скелетоне (аудит 02.09)
       const ae = document.activeElement;
       const editing = ae && ae.closest && ae.closest("#app")
         && ["INPUT", "SELECT", "TEXTAREA"].includes(ae.tagName);
-      if (!editing && !["users", "settings"].includes(NAV)) render(true);
+      const formTab = ["users", "settings"].includes(NAV);
+      if (!editing && (!formTab || (!hadAdm && ADM))) render(true);
     });
   }).catch(() => {});
 }, 60000);
@@ -745,7 +751,7 @@ document.addEventListener("click", e => {
     const id = parseInt(($("#g-id") || {}).value, 10);
     const days = Math.trunc(Number(String(($("#g-days") || {}).value).replace(",", "."))) || 30;
     if (!id) { toast("Укажи tg_id"); return; }
-    fetch("api/admin/user", {method: "POST", headers: authHdr(),
+    const doAction = () => fetch("api/admin/user", {method: "POST", headers: authHdr(),
       body: JSON.stringify({tg_id: id, action: act.dataset.act, days})})
       .then(r => r.ok ? r.json() : null)
       .then(d => {
@@ -754,6 +760,12 @@ document.addEventListener("click", e => {
         admFetch().then(() => render(true));
       })
       .catch(() => toast("Сеть недоступна"));
+    if (act.dataset.act === "revoke") {
+      // необратимое одним тапом + опечатка в tg_id = чужая снятая подписка (аудит 02.09)
+      const q = `Снять подписку у ${id}?`;
+      if (tg.showConfirm) tg.showConfirm(q, ok => { if (ok) doAction(); });
+      else if (window.confirm(q)) doAction();
+    } else doAction();
     return;
   }
 });

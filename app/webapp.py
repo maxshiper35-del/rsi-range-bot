@@ -28,7 +28,14 @@ from app.brain import journal
 from app.config import get_settings
 
 app = Flask(__name__)
+# публичные POST не должны принимать гигантский JSON (аудит 02.09): самый большой
+# легитимный запрос — /api/admin/set с url-настройкой, десятки байт
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
 _INDEX = Path(__file__).with_name("webapp_index.html")
+
+import logging  # noqa: E402
+
+_wlog = logging.getLogger("webapp")
 
 # ------------------- приватный режим (подписчики) -------------------
 # Аутентификация — подпись initData Telegram Mini App (HMAC-SHA256 на токене бота):
@@ -37,9 +44,11 @@ _INDEX = Path(__file__).with_name("webapp_index.html")
 # НИКОМУ и здесь — граница публикации стратегии единая для всех поверхностей.
 
 _AUTH_MAX_AGE_S = 24 * 3600            # replay-защита: initData старше суток не принимаем
+_ADMIN_WRITE_MAX_AGE_S = 6 * 3600      # пишущие админ-ручки: окно replay ужато (аудит 02.09)
 
 
-def _validate_init_data(raw: str, bot_token: str) -> dict | None:
+def _validate_init_data(raw: str, bot_token: str,
+                        max_age_s: int = _AUTH_MAX_AGE_S) -> dict | None:
     """initData -> словарь user | None. Официальная схема Telegram:
     secret = HMAC(\"WebAppData\", bot_token); hash = HMAC(secret, sorted k=v)."""
     try:
@@ -60,7 +69,7 @@ def _validate_init_data(raw: str, bot_token: str) -> dict | None:
         auth_ts = int(pairs.get("auth_date", "0"))
     except ValueError:
         return None
-    if clock.utcnow().timestamp() - auth_ts > _AUTH_MAX_AGE_S:
+    if clock.utcnow().timestamp() - auth_ts > max_age_s:
         return None
     try:
         user = json.loads(pairs.get("user", ""))
@@ -231,13 +240,13 @@ def _no_store(payload: dict, status: int = 200) -> Response:
     return resp
 
 
-def _auth_user() -> dict | None:
+def _auth_user(max_age_s: int = _AUTH_MAX_AGE_S) -> dict | None:
     """user из Authorization: tma <initData> | None. initData едет в Authorization:
     Caddy в access-логах редактирует именно этот заголовок — PII и 24-часовой
     replay-токен не осядут в логах (ревью 13.08)."""
     auth = request.headers.get("Authorization", "")
     raw = auth[4:] if auth.startswith("tma ") else ""
-    return _validate_init_data(raw, get_settings().tg_bot_token)
+    return _validate_init_data(raw, get_settings().tg_bot_token, max_age_s)
 
 
 def _taken_ids(tg_id: int) -> list[int]:
@@ -337,8 +346,8 @@ _ADMIN_SETTINGS: dict[str, dict] = {
 }
 
 
-def _admin_uid() -> int | None:
-    user = _auth_user()
+def _admin_uid(max_age_s: int = _AUTH_MAX_AGE_S) -> int | None:
+    user = _auth_user(max_age_s)
     if user is None:
         return None
     uid = int(user["id"])
@@ -412,8 +421,11 @@ def api_admin() -> Response:
         "SELECT tg_id, method, amount, currency, days, paid_at FROM payments "
         "WHERE status='paid' ORDER BY paid_at DESC LIMIT 10")]
     now_iso = clock.utcnow_iso()
+    # tier='paid' обязателен: триальщики тоже имеют paid_until в будущем — без
+    # фильтра владелец видел ложную метрику монетизации (аудит 02.09)
     paid_now = db.query_one(
-        "SELECT COUNT(*) AS n FROM users WHERE paid_until > ?", (now_iso,)) or {"n": 0}
+        "SELECT COUNT(*) AS n FROM users WHERE tier='paid' AND paid_until > ?",
+        (now_iso,)) or {"n": 0}
     lapsed = db.query_one(
         "SELECT COUNT(*) AS n FROM users WHERE tier='paid' AND paid_until <= ?",
         (now_iso,)) or {"n": 0}
@@ -446,7 +458,7 @@ def api_admin() -> Response:
 @app.post("/api/admin/set")
 def api_admin_set() -> Response:
     """Изменение ОДНОЙ настройки по белому списку. 400 — ключ/значение вне схемы."""
-    uid = _admin_uid()
+    uid = _admin_uid(_ADMIN_WRITE_MAX_AGE_S)
     if uid is None:
         return _no_store({"ok": False}, 403)
     body = request.get_json(silent=True)
@@ -461,13 +473,14 @@ def api_admin_set() -> Response:
     if key == "executor_enabled" and stored == "1":
         runtime.set_executor_since(clock.utcnow_iso())   # как /executor on: не догонять старое
     runtime.set_value(key, stored)
+    _wlog.info("admin %s: настройка %s -> %r", uid, key, stored)  # аудит-след записи
     return _no_store({"ok": True, "settings": _admin_settings_payload()})
 
 
 @app.post("/api/admin/user")
 def api_admin_user() -> Response:
     """grant/revoke подписки из пульта (те же пути, что /grant и /revoke в боте)."""
-    uid = _admin_uid()
+    uid = _admin_uid(_ADMIN_WRITE_MAX_AGE_S)
     if uid is None:
         return _no_store({"ok": False}, 403)
     body = request.get_json(silent=True)
@@ -485,6 +498,8 @@ def api_admin_user() -> Response:
         payments.admin_grant(tg_id, int(days))
     else:
         payments.admin_revoke(tg_id)
+    _wlog.info("admin %s: %s подписки юзеру %s (%s дн)",
+               uid, action, tg_id, int(days))            # аудит-след записи
     return _no_store({"ok": True})
 
 
@@ -540,8 +555,21 @@ def api_take() -> Response:
     return _no_store({"ok": True, "taken": _taken_ids(uid), "my_stats": _my_stats(uid)})
 
 
+_STATS_CACHE: dict = {"at": 0.0, "body": None}
+_STATS_CACHE_LOCK = threading.Lock()
+_STATS_TTL_S = 20.0
+
+
 @app.get("/api/stats")
 def api_stats() -> Response:
+    # публичный неаутентифицированный эндпоинт с ~8 агрегатами (2 скана эквити):
+    # 20с серверного кеша срезают DoS-поверхность, Cache-Control клиентский и так 30с
+    with _STATS_CACHE_LOCK:
+        if _STATS_CACHE["body"] is not None \
+                and time.monotonic() - _STATS_CACHE["at"] < _STATS_TTL_S:
+            resp = Response(_STATS_CACHE["body"], mimetype="application/json")
+            resp.headers["Cache-Control"] = "public, max-age=30"
+            return resp
     epoch = runtime.strategy_epoch()
     payload = {
         "generated_at": clock.utcnow_iso(),
@@ -555,13 +583,22 @@ def api_stats() -> Response:
         "open_signals": _open_signals_public(),
         "symbols": _symbols_best_worst(),
     }
-    resp = Response(json.dumps(payload, ensure_ascii=False),
-                    mimetype="application/json")
+    body = json.dumps(payload, ensure_ascii=False)
+    with _STATS_CACHE_LOCK:
+        _STATS_CACHE["body"], _STATS_CACHE["at"] = body, time.monotonic()
+    resp = Response(body, mimetype="application/json")
     resp.headers["Cache-Control"] = "public, max-age=30"   # SQLite щадим, свежесть ок
     return resp
 
 
 _OG_PNG = Path("data/og.png")            # рисует бот раз в сутки (cwd обоих — корень репо)
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    """Лёгкий пульс для сторожа туннеля (deploy/tunnel_webapp.sh) и мониторинга:
+    без БД и рендера — отвечает, пока жив процесс waitress."""
+    return {"ok": True}
 
 
 @app.get("/og.png")
