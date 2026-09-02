@@ -405,7 +405,7 @@ function renderOverview(noAnim) {
       <div class="mrow"><span>профит-фактор</span><b>${d.pf ? d.pf.toFixed(2) : "—"}</b></div>
       <div class="mrow"><span>просадка max</span><b>−${d.maxDD.toFixed(1)}R</b></div>
       ${st.total_move_pct != null ? `<div class="mrow"><span>чистого хода забрано</span><b class="${st.total_move_pct >= 0 ? "up" : "dn"}">${(st.total_move_pct > 0 ? "+" : "")}${st.total_move_pct.toFixed(1)}%</b></div>` : ""}
-      <div class="mrow"><span>сред. плюс/минус</span><b><span class="up">${fmtR(d.avgWin, 1)}</span>/<span class="dn">${fmtR(d.avgLoss, 1)}</span></b></div>
+      <div class="mrow"><span>сред. &plusmn;</span><b><span class="up">${fmtR(d.avgWin, 1)}</span>/<span class="dn">${fmtR(d.avgLoss, 1)}</span></b></div>
       <div class="mrow"><span>серии max</span><b><span class="up">${d.maxWs}▲</span> <span class="dn">${d.maxLs}▼</span></b></div>
     </div></div>`);
   h += sec(`<div class="strip">
