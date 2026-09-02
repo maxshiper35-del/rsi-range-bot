@@ -186,6 +186,30 @@ select.inp{width:auto}
 .skel-grid .skel{flex:1;margin-top:0;height:58px}
 @keyframes sh{to{background-position:-220% 0}}
 @media (prefers-reduced-motion: reduce){.fx,.live i,.skel::after{animation:none;opacity:1;transform:none}}
+
+/* --- монеты (вотчлист с ценой и суточным ходом) --- */
+.coins{display:flex;gap:8px;overflow-x:auto;padding:2px 0 6px;scrollbar-width:none}
+.coins::-webkit-scrollbar{display:none}
+.coin{display:flex;align-items:center;gap:7px;padding:6px 10px;flex:0 0 auto;
+  border:1px solid rgba(139,147,167,.14);border-radius:8px;font-size:11.5px}
+.coin b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:600}
+.cbadge{display:inline-block;padding:2px 6px;border-radius:6px;font-weight:700;
+  font-size:9.5px;color:#fff;letter-spacing:.4px;font-family:ui-monospace,monospace}
+/* --- сделка на графике --- */
+tr[data-chart]{cursor:pointer}
+tr[data-chart]:active{background:rgba(139,147,167,.08)}
+.pos-t .chb{width:26px;text-align:right;cursor:pointer;font-size:12px;opacity:.75}
+#chartModal{display:none;position:fixed;inset:0;background:rgba(5,7,12,.88);z-index:100;
+  align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+.cm-box{position:relative;width:min(96vw,860px);height:min(74vh,560px);
+  background:var(--bg,#0b0e14);border:1px solid rgba(139,147,167,.2);border-radius:10px;
+  display:flex;flex-direction:column;overflow:hidden}
+.cm-head{display:flex;align-items:center;gap:8px;padding:10px 40px 10px 12px;
+  border-bottom:1px solid rgba(139,147,167,.12);font-size:13px}
+.cm-head .res{margin-left:auto;font-family:"IBM Plex Mono",ui-monospace,monospace}
+.cm-body{flex:1;min-height:0;position:relative}
+.cm-x{position:absolute;top:5px;right:8px;background:none;border:0;color:var(--ink-2);
+  font-size:22px;cursor:pointer;line-height:1;padding:4px}
 </style>
 </head>
 <body>
@@ -342,7 +366,7 @@ function renderMine(noAnim) {
     const rcRows = rc.map(o =>
       `<tr data-sid="${o.id}" class="${rcls(o, false)}">${ckb(o.id)}<td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span></td>
        <td class="dim">${esc(o.tf)}</td><td class="urc"><b class="${o.r >= 0 ? "up" : "dn"}">${fmtR(o.r, 2)}</b></td>
-       <td class="dim">${esc(o.d)}</td></tr>`).join("");
+       <td class="dim">${esc(o.d)}</td><td class="chb" data-chart="${o.id}">📈</td></tr>`).join("");
     const share = ms.trades && ME.bot
       ? `<div class="mystat" style="margin-top:10px"><a href="#" id="shareCard"
          style="color:var(--pos);text-decoration:none">📤 поделиться карточкой итога</a></div>` : "";
@@ -389,6 +413,14 @@ function renderOverview(noAnim) {
     <div class="cell"><b>${DATA.all.open ?? 0}</b><span>открыто</span></div>
     <div class="cell"><b>${hold ? "~" + Math.round(hold) + "ч" : "—"}</b><span>в сделке</span></div>
   </div>`);
+  if ((DATA.market || []).length) {
+    h += sec(`<section><div class="sec-h"><h2>МОНЕТЫ</h2>
+      <span class="note">вотчлист · ход за сутки</span></div>
+      <div class="coins">${DATA.market.map(c =>
+        `<div class="coin"><span class="cbadge" style="background:${coinColor(c.s)}">${esc(c.s.slice(0, 5))}</span>
+         <b>${fmtPx(c.px)}</b>${c.pct != null ? `<span class="${c.pct >= 0 ? "up" : "dn"}">${c.pct >= 0 ? "+" : ""}${c.pct.toFixed(1)}%</span>` : ""}</div>`).join("")}
+      </div></section>`);
+  }
   h += sec(`<section><div class="sec-h"><h2>ЭКВИТИ · R</h2>
     <span class="note">по закрытиям</span></div>
     <div class="plot">${equitySVG(eq)}</div>
@@ -432,6 +464,15 @@ function renderOverview(noAnim) {
          <td class="dim">${esc(o.tf)}</td><td class="st">${o.in_pos == null ? "" : o.in_pos ? "в позиции" : "ждёт входа"}</td>
          <td class="dim">${o.age_h != null ? Math.round(o.age_h) + "ч" : ""}</td></tr>`).join("")
       }</table></section>`);
+  }
+  if ((DATA.last_closed || []).length) {
+    h += sec(`<section><div class="sec-h"><h2>ЗАКРЫТЫЕ</h2>
+      <span class="note">тап — сделка на графике</span></div>
+      <table class="pos-t">${DATA.last_closed.map(o =>
+        `<tr data-chart="${o.id}"><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.s)}</span></td>
+         <td class="dim">${esc(o.tf)}</td><td class="dim">${esc(o.d)}</td>
+         <td class="urc"><b class="${(o.r || 0) >= 0 ? "up" : "dn"}">${fmtR(o.r || 0)}</b></td>
+         <td class="chb">📈</td></tr>`).join("")}</table></section>`);
   }
   h += sec(`<div class="foot">Каждая сделка — в проверяемом журнале: /trackrecord у
     @rsirange_bot (CSV + SHA-256, историю нельзя переписать задним числом).
@@ -736,8 +777,106 @@ setInterval(() => {
   }).catch(() => {});
 }, 60000);
 
+// --- монеты: формат цены и цвет бейджа (детерминированный от тикера) ---
+function fmtPx(p) {
+  if (p >= 1000) return p.toLocaleString("en-US", {maximumFractionDigits: 0});
+  if (p >= 100) return p.toFixed(2);
+  if (p >= 1) return p.toFixed(3);
+  return p.toFixed(p >= 0.01 ? 5 : 7).replace(/0+$/, "").replace(/\.$/, "");
+}
+function coinColor(t) {
+  let h = 0;
+  for (const ch of t) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return `hsl(${h},52%,34%)`;
+}
+
+// --- «сделка на графике»: lightweight-charts грузится лениво при первом открытии ---
+let LWC_READY = null, CHART = null;
+function loadLWC() {
+  if (!LWC_READY) LWC_READY = new Promise((res, rej) => {
+    const sc = document.createElement("script");
+    sc.src = "lwc.js"; sc.onload = res; sc.onerror = rej;
+    document.head.appendChild(sc);
+  });
+  return LWC_READY;
+}
+function pxPrec(p) { return p >= 1000 ? 1 : p >= 100 ? 2 : p >= 1 ? 3 : p >= 0.01 ? 5 : 7; }
+function openChart(id) {
+  const m = $("#chartModal");
+  m.style.display = "flex";
+  $("#chartHead").innerHTML = `<span class="dim">сделка #${id}…</span>`;
+  $("#chartBody").innerHTML = `<div class="skel" style="padding:16px"><div class="sk t"></div><div class="sk big"></div><div class="sk w60"></div></div>`;
+  Promise.all([fetch("api/trade_chart?id=" + id).then(r => r.json()).catch(() => null), loadLWC()])
+    .then(([d]) => {
+      if ($("#chartModal").style.display === "none") return;   // успели закрыть
+      if (!d || !d.ok) {
+        $("#chartBody").innerHTML = `<div class="warn" style="padding:24px;text-align:center">${esc((d && d.err) || "график недоступен")}</div>`;
+        return;
+      }
+      renderTradeChart(d);
+    })
+    .catch(() => { $("#chartBody").innerHTML = `<div class="warn" style="padding:24px;text-align:center">график недоступен</div>`; });
+}
+function renderTradeChart(d) {
+  $("#chartHead").innerHTML =
+    `<span class="side-tag ${d.side === "LONG" ? "l" : "s"}">${d.side === "LONG" ? "▲" : "▼"}</span>
+     <span class="sym">${esc(d.symbol)}</span>
+     <span class="dim">${esc(d.tf_signal)}${d.tf !== d.tf_signal ? " · свечи " + esc(d.tf) : ""} · #${d.id}</span>
+     <b class="res ${d.result_r >= 0 ? "up" : "dn"}">${fmtR(d.result_r)}</b>`;
+  const el = $("#chartBody");
+  el.innerHTML = "";
+  if (CHART) { try { CHART.remove(); } catch (_) {} }
+  const chart = LightweightCharts.createChart(el, {
+    layout: {background: {type: "solid", color: "transparent"},
+             textColor: "#8b93a7", fontSize: 10,
+             fontFamily: '"IBM Plex Mono",ui-monospace,monospace'},
+    grid: {vertLines: {color: "rgba(139,147,167,.07)"}, horzLines: {color: "rgba(139,147,167,.07)"}},
+    timeScale: {timeVisible: true, secondsVisible: false, borderColor: "rgba(139,147,167,.2)"},
+    rightPriceScale: {borderColor: "rgba(139,147,167,.2)"},
+    crosshair: {mode: 0},
+  });
+  CHART = chart;
+  const prec = pxPrec(d.entry);
+  const sr = chart.addCandlestickSeries({
+    upColor: "#1f9e6e", downColor: "#f6465d", borderVisible: false,
+    wickUpColor: "#1f9e6e", wickDownColor: "#f6465d",
+    priceFormat: {type: "price", precision: prec, minMove: Math.pow(10, -prec)},
+  });
+  sr.setData(d.candles.map(c => ({time: c[0], open: c[1], high: c[2], low: c[3], close: c[4]})));
+  const line = (px, color, title, style) => px && sr.createPriceLine(
+    {price: px, color, lineWidth: 1, lineStyle: style == null ? 2 : style, title});
+  line(d.entry, "#f7a600", "вход");
+  line(d.stop, "#f6465d", "стоп");
+  (d.tps || []).forEach((tp, i) => line(tp, "#1f9e6e", "цель" + (d.tps.length > 1 ? i + 1 : "")));
+  if (d.exit_price) line(d.exit_price, "#8b93a7", "выход", 0);
+  const ts = iso => iso ? Math.floor(new Date(iso).getTime() / 1000) : null;
+  const snap = t => {                                     // к ближайшей свече слева
+    let best = d.candles.length ? d.candles[0][0] : t;
+    for (const c of d.candles) { if (c[0] <= t) best = c[0]; else break; }
+    return best;
+  };
+  const mk = [], tF = ts(d.filled_at), tC = ts(d.closed_at);
+  if (tF) mk.push({time: snap(tF), position: d.side === "LONG" ? "belowBar" : "aboveBar",
+                   color: "#f7a600", shape: d.side === "LONG" ? "arrowUp" : "arrowDown", text: "вход"});
+  if (tC) mk.push({time: snap(tC), position: d.side === "LONG" ? "aboveBar" : "belowBar",
+                   color: d.result_r >= 0 ? "#1f9e6e" : "#f6465d",
+                   shape: d.side === "LONG" ? "arrowDown" : "arrowUp", text: fmtR(d.result_r)});
+  sr.setMarkers(mk);
+  chart.timeScale().fitContent();
+}
+function closeChart() {
+  $("#chartModal").style.display = "none";
+  if (CHART) { try { CHART.remove(); } catch (_) {} CHART = null; }
+  $("#chartBody").innerHTML = "";
+}
+document.addEventListener("click", e => {
+  if (e.target.closest("#chartClose") || e.target === $("#chartModal")) closeChart();
+});
+
 // навигация по вкладкам
 document.addEventListener("click", e => {
+  const ch = e.target.closest("[data-chart]");
+  if (ch) { openChart(ch.dataset.chart); return; }
   const nb = e.target.closest("[data-nav]");
   if (nb) { NAV = nb.dataset.nav; render(true); return; }
   const tglEl = e.target.closest(".tgl[data-set]");
@@ -793,6 +932,7 @@ document.addEventListener("click", e => {
     if (ME && ME.bot && inTg) tg.openTelegramLink(`https://t.me/${ME.bot}?start=mycard`);
     return;
   }
+  if (e.target.closest("[data-chart]")) return;     // тап по графику — не отметка
   const tr = e.target.closest("tr[data-sid]");
   if (!tr || !(ME && ME.private) || !inTg) return;
   const sid = +tr.dataset.sid;
@@ -817,5 +957,12 @@ document.addEventListener("click", e => {
     .catch(() => { PENDING.delete(sid); render(true); });
 });
 </script>
+<div id="chartModal">
+  <div class="cm-box">
+    <div class="cm-head" id="chartHead"></div>
+    <div class="cm-body" id="chartBody"></div>
+    <button class="cm-x" id="chartClose" aria-label="закрыть">&times;</button>
+  </div>
+</div>
 </body>
 </html>

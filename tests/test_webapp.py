@@ -392,3 +392,74 @@ def test_api_admin_user_grant_revoke(fresh_db, admin_env):
         assert c.post("/api/admin/user", json={"tg_id": 800200, "action": "grant",
                                                "days": 0.5},
                       headers=hdr).status_code == 400     # int(0.5)=0 давал ложный успех
+
+
+def test_trade_chart_closed_only_and_shape(fresh_db, monkeypatch):
+    """«Сделка на графике»: закрытая отдаёт свечи+уровни+метки; ОТКРЫТАЯ — 404
+    (уровни открытых — платный контент, та же граница, что /trackrecord CSV);
+    мусорный id — 400. Свечи мокаются — сети в тестах нет."""
+    from app import db
+    from app import webapp as W
+    from app.webapp import app as flask_app
+
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, tp1, risk_reward, "
+        "confidence, snapshot_json, status, created_at, closed_at, result_r, exit_price, "
+        "filled_at) VALUES (700,'BTC/USDT:USDT','LONG','1h',100,98,106,3.0,0.7,'{}',"
+        "'stopped','2026-08-10T00:00:00+00:00','2026-08-11T00:00:00+00:00',2.5,105.0,"
+        "'2026-08-10T02:00:00+00:00')")
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at) VALUES "
+        "(701,'ETH/USDT:USDT','SHORT','1h',10,11,2.0,0.7,'{}','open',"
+        "'2026-08-10T00:00:00+00:00')")
+    fake = [[1754770800000 + i * 3600000, 100 + i, 101 + i, 99 + i, 100.5 + i]
+            for i in range(30)]
+    monkeypatch.setattr(W, "_chart_candles", lambda *a, **k: fake)
+    W._CHART_CACHE.clear()
+    c = flask_app.test_client()
+
+    r = c.get("/api/trade_chart?id=700")
+    assert r.status_code == 200
+    d = r.get_json()
+    assert d["ok"] and d["entry"] == 100 and d["stop"] == 98 and d["tps"] == [106]
+    assert d["exit_price"] == 105.0 and d["result_r"] == 2.5
+    assert len(d["candles"]) == 30 and len(d["candles"][0]) == 5
+    assert d["candles"][0][0] == 1754770800          # секунды, не миллисекунды
+    assert "setup" not in d and "snapshot" not in d  # таксономия не утекает
+
+    assert c.get("/api/trade_chart?id=701").status_code == 404   # открытая — нельзя
+    assert c.get("/api/trade_chart?id=abc").status_code == 400
+    assert c.get("/api/trade_chart?id=99999").status_code == 404
+
+    # эскалация ТФ: сделка на 1h длиной в 3 месяца рисуется укрупнёнными свечами
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at, closed_at, result_r) VALUES "
+        "(702,'BTC/USDT:USDT','LONG','1h',100,98,2.0,0.7,'{}','stopped',"
+        "'2026-05-01T00:00:00+00:00','2026-08-01T00:00:00+00:00',-1.0)")
+    d = c.get("/api/trade_chart?id=702").get_json()
+    assert d["ok"] and d["tf"] in ("4h", "1d") and d["tf_signal"] == "1h"
+
+
+def test_stats_market_and_last_closed(fresh_db, monkeypatch):
+    """/api/stats: секция «Монеты» (цена+суточный ход из кеша тикеров) и публичный
+    список последних закрытых с id (для «сделки на графике»)."""
+    from app import db, runtime
+    from app import webapp as W
+    from app.webapp import app as flask_app
+
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at, closed_at, result_r) VALUES "
+        "(710,'BTC/USDT:USDT','LONG','1h',100,98,2.0,0.7,'{}','tp1',"
+        "'2026-08-10T00:00:00+00:00','2026-08-11T00:00:00+00:00',1.0)")
+    runtime.set_value("symbols", "BTC/USDT:USDT,ETH/USDT:USDT")
+    monkeypatch.setattr(W, "_last_prices",
+                        lambda syms: {"BTC/USDT:USDT": 76000.0})
+    W._TICKERS["pcts"]["BTC/USDT:USDT"] = -1.7
+    d = flask_app.test_client().get("/api/stats").get_json()
+    assert d["market"] == [{"s": "BTC", "px": 76000.0, "pct": -1.7}]
+    lc = d["last_closed"]
+    assert lc and lc[0]["id"] == 710 and lc[0]["s"] == "BTC" and lc[0]["r"] == 1.0
+    assert "entry" not in lc[0] and "stop" not in lc[0]   # уровни не в этом списке

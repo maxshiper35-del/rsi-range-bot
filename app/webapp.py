@@ -78,7 +78,7 @@ def _validate_init_data(raw: str, bot_token: str,
     return user if isinstance(user, dict) and "id" in user else None
 
 
-_TICKERS: dict = {"at": 0.0, "ok_at": 0.0, "prices": {}}
+_TICKERS: dict = {"at": 0.0, "ok_at": 0.0, "prices": {}, "pcts": {}}
 _TICKERS_LOCK = threading.Lock()
 _TICKERS_TTL_S = 45.0                  # unrealized R не тик-в-тик — биржу щадим
 _PRICES_MAX_STALE_S = 600.0            # кеш старше 10 мин «живым» R не прикидывается
@@ -98,7 +98,7 @@ def _exchange():
         return _EX["ex"]
 
 
-def _fetch_tickers(symbols: list[str]) -> dict[str, float] | None:
+def _fetch_tickers(symbols: list[str]) -> dict[str, dict] | None:
     """Сетевой фетч БЕЗ лока кеша. None = попытка не удалась (кеш не трогаем).
     Неизвестные бирже символы (делистинг) отфильтровываются, а не роняют остальных."""
     try:
@@ -107,7 +107,13 @@ def _fetch_tickers(symbols: list[str]) -> dict[str, float] | None:
         if not known:
             return {}
         data = ex.fetch_tickers(known)
-        return {s: float(t["last"]) for s, t in data.items() if t.get("last")}
+        out = {}
+        for s, t in data.items():
+            if t.get("last"):
+                out[s] = {"px": float(t["last"]),
+                          "pct": (float(t["percentage"])
+                                  if t.get("percentage") is not None else None)}
+        return out
     except Exception:                                     # noqa: BLE001
         return None
 
@@ -130,7 +136,9 @@ def _last_prices(symbols: list[str]) -> dict[str, float]:
     got = _fetch_tickers(symbols)                         # сеть — вне лока
     with _TICKERS_LOCK:
         if got is not None:
-            _TICKERS["prices"].update(got)
+            _TICKERS["prices"].update({s: v["px"] for s, v in got.items()})
+            _TICKERS["pcts"].update({s: v["pct"] for s, v in got.items()
+                                     if v["pct"] is not None})
             _TICKERS["ok_at"] = time.monotonic()
         stale = time.monotonic() - _TICKERS["ok_at"] > _PRICES_MAX_STALE_S
         return {} if stale else dict(_TICKERS["prices"])
@@ -255,6 +263,33 @@ def _taken_ids(tg_id: int) -> list[int]:
 
 
 _CLOSED = "status IN ('tp1','tp2','tp3','stopped','expired') AND result_r IS NOT NULL"
+
+
+def _market_overview() -> list:
+    """Вотчлист с последней ценой и суточным ходом — секция «Монеты» дашборда.
+    Пусто при протухшем кеше цен (секция честно прячется, а не показывает старьё)."""
+    syms = runtime.symbols()
+    prices = _last_prices(syms)
+    if not prices:
+        return []
+    with _TICKERS_LOCK:
+        pcts = dict(_TICKERS["pcts"])
+    out = []
+    for sym in syms:
+        px = prices.get(sym)
+        if px:
+            out.append({"s": sym.split("/")[0], "px": px, "pct": pcts.get(sym)})
+    return out
+
+
+def _last_closed_public(limit: int = 12) -> list:
+    """Последние закрытые с id — публичная таблица «Закрытые» (тап -> график сделки).
+    Исходы закрытых и так публичны (/trackrecord CSV) — граница публикации та же."""
+    return [{"id": r["id"], "s": r["symbol"].split("/")[0], "side": r["side"],
+             "tf": r["timeframe"], "r": r["result_r"], "d": (r["closed_at"] or "")[5:10]}
+            for r in db.query(
+                f"SELECT id, symbol, side, timeframe, result_r, closed_at FROM signals "
+                f"WHERE {_CLOSED} ORDER BY closed_at DESC LIMIT ?", (limit,))]
 
 
 def _my_stats(tg_id: int) -> dict:
@@ -582,6 +617,8 @@ def api_stats() -> Response:
         "equity_epoch": _equity(epoch) if epoch else [],
         "open_signals": _open_signals_public(),
         "symbols": _symbols_best_worst(),
+        "market": _market_overview(),
+        "last_closed": _last_closed_public(),
     }
     body = json.dumps(payload, ensure_ascii=False)
     with _STATS_CACHE_LOCK:
@@ -592,6 +629,83 @@ def api_stats() -> Response:
 
 
 _OG_PNG = Path("data/og.png")            # рисует бот раз в сутки (cwd обоих — корень репо)
+
+
+_LWC_JS = Path(__file__).with_name("webapp_lwc.js")
+_CHART_CACHE: dict = {}
+_CHART_CACHE_LOCK = threading.Lock()
+_CHART_TTL_S = 600.0
+_CHART_MAX_BARS = 420
+_TF_SEC = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+
+
+def _chart_candles(symbol: str, tf: str, since_ms: int, limit: int) -> list:
+    """OHLCV bybit для графика сделки (отдельная функция — мокается в тестах)."""
+    return _exchange().fetch_ohlcv(symbol, tf, since=since_ms, limit=limit)
+
+
+@app.get("/lwc.js")
+def lwc_js() -> Response:
+    """Вендоренный lightweight-charts (Apache-2.0) — график сделки без внешних CDN."""
+    resp = Response(_LWC_JS.read_bytes(), mimetype="application/javascript")
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
+
+
+@app.get("/api/trade_chart")
+def api_trade_chart() -> Response:
+    """Свечи ЗАКРЫТОЙ сделки с уровнями и метками входа/выхода («сделка на графике»).
+
+    Только закрытые: их уровни и так публичны (/trackrecord CSV) — открытые остаются
+    платным контентом, та же граница публикации, что везде. Кеш 10 мин на сделку:
+    эндпоинт публичный, а за ним сетевой fetch_ohlcv."""
+    sid_s = request.args.get("id", "")
+    if not sid_s.isdigit() or len(sid_s) > 12:
+        return _no_store({"ok": False}, 400)
+    sid = int(sid_s)
+    with _CHART_CACHE_LOCK:
+        hit = _CHART_CACHE.get(sid)
+        if hit and time.monotonic() - hit[0] < _CHART_TTL_S:
+            return _no_store(hit[1])
+    row = db.query_one(f"SELECT * FROM signals WHERE id=? AND {_CLOSED}", (sid,))
+    if row is None:
+        return _no_store({"ok": False, "err": "сделка не найдена или ещё открыта"}, 404)
+    from datetime import datetime, timedelta
+
+    tf = row["timeframe"] if row["timeframe"] in _TF_SEC else "1h"
+    t0 = datetime.fromisoformat(row["created_at"])
+    t1 = datetime.fromisoformat(row["closed_at"] or row["created_at"])
+    # эскалация ТФ: долгая сделка не влезает в лимит баров — укрупняем свечи,
+    # чтобы вход и выход всегда были видны на одном экране
+    span = _CHART_MAX_BARS
+    for cand in [tf] + [x for x in ("4h", "1d") if _TF_SEC[x] > _TF_SEC[tf]]:
+        tf = cand
+        span = int((t1 - t0).total_seconds() / _TF_SEC[tf]) + 40
+        if span <= _CHART_MAX_BARS:
+            break
+    since = t0 - timedelta(seconds=30 * _TF_SEC[tf])
+    try:
+        raw = _chart_candles(row["symbol"], tf, int(since.timestamp() * 1000),
+                             min(_CHART_MAX_BARS + 60, span + 40))
+    except Exception:                                     # noqa: BLE001 — сеть/делистинг
+        raw = None
+    if not raw:
+        return _no_store({"ok": False, "err": "биржа не отдала свечи"}, 502)
+    payload = {
+        "ok": True, "id": sid, "symbol": row["symbol"].split("/")[0],
+        "side": row["side"], "tf_signal": row["timeframe"], "tf": tf,
+        "entry": row["entry"], "stop": row["stop"],
+        "tps": [row[k] for k in ("tp1", "tp2", "tp3") if row[k]],
+        "exit_price": row["exit_price"], "result_r": row["result_r"],
+        "status": row["status"], "filled_at": row["filled_at"],
+        "closed_at": row["closed_at"], "created_at": row["created_at"],
+        "candles": [[int(c[0] / 1000), c[1], c[2], c[3], c[4]] for c in raw],
+    }
+    with _CHART_CACHE_LOCK:
+        if len(_CHART_CACHE) > 64:                        # публичный эндпоинт: кеш не пухнет
+            _CHART_CACHE.clear()
+        _CHART_CACHE[sid] = (time.monotonic(), payload)
+    return _no_store(payload)
 
 
 @app.get("/healthz")
