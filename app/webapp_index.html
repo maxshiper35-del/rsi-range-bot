@@ -365,9 +365,10 @@ function renderMine(noAnim) {
       .filter(Boolean).join(" ");
     const rows = pos.map(o =>
       `<tr data-sid="${o.id}" class="${rcls(o, o.in_pos === false)}">${ckb(o.id)}<td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span></td>
-       <td class="dim">${esc(o.tf)}</td><td class="lv">${fmtP(o.entry)} → ${fmtP(o.stop)}</td>
+       <td class="dim">${esc(o.tf)}</td><td class="lv">${fmtP(o.entry)} → ${fmtP(o.stop)}${o.tp1 ? `<span class="dim"> · цель ${fmtP(o.tp1)}</span>` : ""}</td>
        <td class="urc">${o.in_pos === false ? `<span class="st">ждёт входа</span>` : o.ur != null ? `<b class="${o.ur >= 0 ? "up" : "dn"}">${fmtR(o.ur, 2)}</b>` : `<span class="dim">—</span>`}</td>
-       <td class="dim">${o.age_h != null ? Math.round(o.age_h) + "ч" : ""}</td></tr>`).join("");
+       <td class="dim">${o.age_h != null ? Math.round(o.age_h) + "ч" : ""}</td>
+       <td class="chb" data-chart="${o.id}">📈</td></tr>`).join("");
     h += sec(`<section><div class="sec-h"><h2>МОИ ПОЗИЦИИ</h2>
       <span class="note">видно только тебе</span></div>
       <div class="mystat">${stat}</div>
@@ -890,7 +891,8 @@ function openChart(id) {
   m.style.display = "flex";
   $("#chartHead").innerHTML = `<span class="dim">сделка #${id}…</span>`;
   $("#chartBody").innerHTML = `<div class="skel" style="padding:16px"><div class="sk t"></div><div class="sk big"></div><div class="sk w60"></div></div>`;
-  Promise.all([fetch("api/trade_chart?id=" + id).then(r => r.json()).catch(() => null), loadLWC()])
+  Promise.all([fetch("api/trade_chart?id=" + id, ME ? {headers: authHdr()} : {})
+                 .then(r => r.json()).catch(() => null), loadLWC()])
     .then(([d]) => {
       if ($("#chartModal").style.display === "none") return;   // успели закрыть
       if (!d || !d.ok) {
@@ -902,11 +904,20 @@ function openChart(id) {
     .catch(() => { $("#chartBody").innerHTML = `<div class="warn" style="padding:24px;text-align:center">график недоступен</div>`; });
 }
 function renderTradeChart(d) {
+  let res;
+  if (d.open) {
+    const last = d.candles.length ? d.candles[d.candles.length - 1][4] : null;
+    const risk = Math.abs(d.entry - d.stop);
+    if (d.in_pos && last && risk) {
+      const ur = (d.side === "LONG" ? last - d.entry : d.entry - last) / risk;
+      res = `<b class="res ${ur >= 0 ? "up" : "dn"}">${fmtR(ur, 2)} <span class="dim">сейчас</span></b>`;
+    } else res = `<b class="res dim">ждёт входа</b>`;
+  } else res = `<b class="res ${d.result_r >= 0 ? "up" : "dn"}">${fmtR(d.result_r)}</b>`;
   $("#chartHead").innerHTML =
     `<span class="side-tag ${d.side === "LONG" ? "l" : "s"}">${d.side === "LONG" ? "▲" : "▼"}</span>
      <span class="sym">${esc(d.symbol)}</span>
-     <span class="dim">${esc(d.tf_signal)}${d.tf !== d.tf_signal ? " · свечи " + esc(d.tf) : ""} · #${d.id}</span>
-     <b class="res ${d.result_r >= 0 ? "up" : "dn"}">${fmtR(d.result_r)}</b>`;
+     <span class="dim">${esc(d.tf_signal)}${d.tf !== d.tf_signal ? " · свечи " + esc(d.tf) : ""} · #${d.id}${d.open ? " · открыта" : ""}</span>
+     ${res}`;
   const el = $("#chartBody");
   el.innerHTML = "";
   if (CHART) { try { CHART.remove(); } catch (_) {} }
@@ -942,7 +953,7 @@ function renderTradeChart(d) {
   const mk = [], tF = ts(d.filled_at), tC = ts(d.closed_at);
   if (tF) mk.push({time: snap(tF), position: d.side === "LONG" ? "belowBar" : "aboveBar",
                    color: "#f7a600", shape: d.side === "LONG" ? "arrowUp" : "arrowDown", text: "вход"});
-  if (tC) mk.push({time: snap(tC), position: d.side === "LONG" ? "aboveBar" : "belowBar",
+  if (tC && !d.open) mk.push({time: snap(tC), position: d.side === "LONG" ? "aboveBar" : "belowBar",
                    color: d.result_r >= 0 ? "#1f9e6e" : "#f6465d",
                    shape: d.side === "LONG" ? "arrowDown" : "arrowUp", text: fmtR(d.result_r)});
   sr.setMarkers(mk);

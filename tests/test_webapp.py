@@ -480,3 +480,35 @@ def test_stats_r_series_for_simulator(fresh_db):
     d = flask_app.test_client().get("/api/stats").get_json()
     assert d["r_all"] == [1.5, -1.0, 3.2] or d["r_all"] == [1.5, -1.0, 2.2]
     assert d["r_all"] == [1.5, -1.0, 2.2]
+
+
+def test_trade_chart_open_only_for_private(fresh_db, monkeypatch, webapp_token):
+    """График ОТКРЫТОЙ сделки: публике 404 (уровни — платный контент), валидному
+    подписчику/админу — 200 с флагом open и без закрывающих полей."""
+    from app import db
+    from app import webapp as W
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, tp1, risk_reward, "
+        "confidence, snapshot_json, status, created_at, filled_at) VALUES "
+        "(730,'BTC/USDT:USDT','LONG','1h',100,98,106,3.0,0.7,'{}','open',"
+        "'2026-08-10T00:00:00+00:00','2026-08-10T02:00:00+00:00')")
+    fake = [[1754784000000 + i * 3600000, 100 + i * .1, 101, 99, 100.5] for i in range(20)]
+    monkeypatch.setattr(W, "_chart_candles", lambda *a, **k: fake)
+    payments.register_user(800200, "sub")
+    db.execute("UPDATE users SET tier='paid', paid_until='2099-01-01T00:00:00+00:00' "
+               "WHERE tg_id=800200")
+    c = flask_app.test_client()
+    assert c.get("/api/trade_chart?id=730").status_code == 404          # публика
+    r = c.get("/api/trade_chart?id=730",
+              headers={"Authorization": "tma " + _init_data(webapp_token, 800200)})
+    assert r.status_code == 200
+    d = r.get_json()
+    assert d["open"] is True and d["in_pos"] is True and d["result_r"] is None
+    assert d["entry"] == 100 and d["tps"] == [106]
+    # фри-юзер с валидной подписью — тоже 404
+    payments.register_user(800201, "free")
+    assert c.get("/api/trade_chart?id=730",
+                 headers={"Authorization": "tma " + _init_data(webapp_token, 800201)}
+                 ).status_code == 404

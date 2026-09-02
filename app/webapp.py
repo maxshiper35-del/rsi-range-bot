@@ -213,7 +213,7 @@ def _open_signals_private() -> list:
     """Открытые С УРОВНЯМИ (вход/стоп — платный слой) и живым unrealized R.
     Тегов сетапов нет и здесь: таксономия — собственность стратегии, её не видит никто."""
     rows = list(db.query(
-        "SELECT id, symbol, side, timeframe, entry, stop, created_at, filled_at "
+        "SELECT id, symbol, side, timeframe, entry, stop, tp1, created_at, filled_at "
         "FROM signals WHERE status='open' AND result_r IS NULL "
         "ORDER BY created_at DESC"))
     prices = _last_prices(sorted({r["symbol"] for r in rows})) if rows else {}
@@ -236,7 +236,7 @@ def _open_signals_private() -> list:
         out.append({"id": r["id"], "symbol": r["symbol"].split("/")[0],
                     "side": r["side"], "tf": r["timeframe"], "age_h": age_h,
                     "in_pos": in_pos, "entry": r["entry"], "stop": r["stop"],
-                    "ur": ur})
+                    "tp1": r["tp1"], "ur": ur})
     return out
 
 
@@ -682,18 +682,32 @@ def api_trade_chart() -> Response:
     if not sid_s.isdigit() or len(sid_s) > 12:
         return _no_store({"ok": False}, 400)
     sid = int(sid_s)
+    # приватный слой: валидный подписчик/админ видит и ОТКРЫТЫЕ (уровни он и так
+    # видит в «Моём»); публике — только закрытые. Без подписи открытая = 404, как раньше
+    user = _auth_user()
+    private = False
+    if user is not None:
+        from app.delivery import payments
+        private = payments.is_paid(int(user["id"])) \
+            or int(user["id"]) in get_settings().admin_ids
     with _CHART_CACHE_LOCK:
         hit = _CHART_CACHE.get(sid)
         if hit and time.monotonic() - hit[0] < _CHART_TTL_S:
             return _no_store(hit[1])
     row = db.query_one(f"SELECT * FROM signals WHERE id=? AND {_CLOSED}", (sid,))
+    is_open = False
+    if row is None and private:
+        row = db.query_one("SELECT * FROM signals WHERE id=? AND status='open' "
+                           "AND result_r IS NULL", (sid,))
+        is_open = row is not None
     if row is None:
         return _no_store({"ok": False, "err": "сделка не найдена или ещё открыта"}, 404)
     from datetime import datetime, timedelta
 
     tf = row["timeframe"] if row["timeframe"] in _TF_SEC else "1h"
     t0 = datetime.fromisoformat(row["created_at"])
-    t1 = datetime.fromisoformat(row["closed_at"] or row["created_at"])
+    t1 = clock.utcnow() if is_open else datetime.fromisoformat(
+        row["closed_at"] or row["created_at"])
     # эскалация ТФ: долгая сделка не влезает в лимит баров — укрупняем свечи,
     # чтобы вход и выход всегда были видны на одном экране
     span = _CHART_MAX_BARS
@@ -718,8 +732,11 @@ def api_trade_chart() -> Response:
         "exit_price": row["exit_price"], "result_r": row["result_r"],
         "status": row["status"], "filled_at": row["filled_at"],
         "closed_at": row["closed_at"], "created_at": row["created_at"],
+        "open": is_open, "in_pos": bool(row["filled_at"]),
         "candles": [[int(c[0] / 1000), c[1], c[2], c[3], c[4]] for c in raw],
     }
+    if is_open:
+        return _no_store(payload)                         # живая — не кешируем (uR по свечам)
     with _CHART_CACHE_LOCK:
         if len(_CHART_CACHE) > 64:                        # публичный эндпоинт: кеш не пухнет
             _CHART_CACHE.clear()
