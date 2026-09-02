@@ -310,7 +310,8 @@ function pick() {
   return { st: useEpoch ? DATA.epoch : DATA.all,
            eq: useEpoch ? DATA.equity_epoch : DATA.equity_all,
            hold: useEpoch ? DATA.hold_epoch : DATA.hold_all,
-           rs: useEpoch ? (DATA.r_epoch || []) : (DATA.r_all || []) };
+           rs: useEpoch ? (DATA.r_epoch || []) : (DATA.r_all || []),
+           sp: useEpoch ? (DATA.sp_epoch || []) : (DATA.sp_all || []) };
 }
 
 function navItems() {
@@ -431,21 +432,29 @@ function renderOverview(noAnim) {
     <div class="cell"><b>${DATA.all.open ?? 0}</b><span>открыто</span></div>
     <div class="cell"><b>${hold ? "~" + Math.round(hold) + "ч" : "—"}</b><span>в сделке</span></div>
   </div>`);
-  const rsim = pick().rs;
+  const rsim = pick().rs, spsim = pick().sp;
   if (rsim.length >= 5) {
     const sim = simCompute(rsim, SIM_RISK);
+    // плечо = риск% ÷ ход до стопа%: реальная дистанция стопа каждой сделки
+    const levs = spsim.filter(v => v > 0).map(v => SIM_RISK / v);
+    const levAvg = levs.length ? levs.reduce((a, v) => a + v, 0) / levs.length : 0;
+    const levMax = levs.length ? Math.max(...levs) : 0;
+    const levLine = levs.length
+      ? `<div class="mystat">плечо при риске ${SIM_RISK}%: в среднем <b>×${levAvg.toFixed(1)}</b> · максимум <b class="${levMax > 20 ? "dn" : ""}">×${levMax.toFixed(1)}</b>${levMax > 20 ? " — выше ×20, такие сделки пришлось бы брать меньшим риском" : ""}</div>`
+      : "";
     h += sec(`<section><div class="sec-h"><h2>СИМУЛЯТОР ДЕПОЗИТА</h2>
       <span class="note">риск на сделку: ${[1, 2, 5].map(pp =>
         `<b class="chip${pp === SIM_RISK ? " on" : ""}" data-risk="${pp}">${pp}%</b>`).join("")}</span></div>
       <div class="sim-hero"><span class="sim-start">$100 →</span>
         <b class="sim-bal ${sim.bal >= 100 ? "up" : "dn"}">${fmtUsd(sim.bal)}</b>
         <span class="sim-pct ${sim.pct >= 0 ? "up" : "dn"}">${sim.pct >= 0 ? "+" : ""}${sim.pct.toFixed(1)}%</span></div>
+      ${levLine}
       <div class="mystat">${rsim.length} сделок · макс. просадка −${sim.maxDD.toFixed(1)}% · риск считается от текущего баланса${(() => {
         const kj = SCOPE === "epoch" && DATA.kelly_epoch ? DATA.kelly_epoch : DATA.kelly_all;
         return kj ? ` · полу-Келли по журналу ≈ ${kj.half}%` : "";
       })()}</div>
       <div class="plot">${simSVG(sim.series)}</div>
-      <div class="mystat" style="margin:6px 0 0;color:var(--ink-3)">Модель по закрытым сделкам журнала (порядок закрытий); R — по ценам биржи, комиссии и проскальзывание не учтены. Не прогноз и не гарантия.</div>
+      <div class="mystat" style="margin:6px 0 0;color:var(--ink-3)">Модель по закрытым сделкам журнала (порядок закрытий); R — по ценам биржи, комиссии и проскальзывание не учтены. Плечо = риск% ÷ ход до стопа% (размер позиции от риска, не «на всё плечо»). Не прогноз и не гарантия.</div>
       </section>`);
   }
   if ((DATA.market || []).length) {

@@ -265,16 +265,22 @@ def _taken_ids(tg_id: int) -> list[int]:
 _CLOSED = "status IN ('tp1','tp2','tp3','stopped','expired') AND result_r IS NOT NULL"
 
 
-def _r_series(since_created: str | None = None) -> list:
-    """Последовательность result_r в порядке закрытий — сырьё симулятора депозита
-    на дашборде (сложный процент считается на клиенте по выбранному риску)."""
-    q = f"SELECT result_r FROM signals WHERE {_CLOSED} "
+def _r_series(since_created: str | None = None) -> tuple[list, list]:
+    """(result_r, дистанция стопа в % от входа) в порядке закрытий — сырьё симулятора
+    депозита: сложный процент и требуемое плечо (риск% ÷ ход до стопа%) считаются
+    на клиенте по выбранному риску."""
+    q = f"SELECT result_r, entry, stop FROM signals WHERE {_CLOSED} "
     args: tuple = ()
     if since_created:
         q += "AND created_at >= ? "
         args = (since_created,)
     q += "ORDER BY closed_at, id"
-    return [round(r["result_r"], 3) for r in db.query(q, args)]
+    rs, sps = [], []
+    for r in db.query(q, args):
+        rs.append(round(r["result_r"], 3))
+        sps.append(round(abs(r["entry"] - r["stop"]) / r["entry"] * 100, 3)
+                   if r["entry"] else 0.0)
+    return rs, sps
 
 
 def _market_overview() -> list:
@@ -621,6 +627,8 @@ def api_stats() -> Response:
             resp.headers["Cache-Control"] = "public, max-age=30"
             return resp
     epoch = runtime.strategy_epoch()
+    r_all, sp_all = _r_series()
+    r_ep, sp_ep = _r_series(epoch) if epoch else ([], [])
     payload = {
         "generated_at": clock.utcnow_iso(),
         "epoch_since": (epoch or "")[:10],
@@ -634,8 +642,8 @@ def api_stats() -> Response:
         "symbols": _symbols_best_worst(),
         "market": _market_overview(),
         "last_closed": _last_closed_public(),
-        "r_all": _r_series(),
-        "r_epoch": _r_series(epoch) if epoch else [],
+        "r_all": r_all, "sp_all": sp_all,
+        "r_epoch": r_ep, "sp_epoch": sp_ep,
         "kelly_all": journal.kelly_stats(),
         "kelly_epoch": journal.kelly_stats(epoch) if epoch else None,
     }

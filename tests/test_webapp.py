@@ -478,8 +478,8 @@ def test_stats_r_series_for_simulator(fresh_db):
             f"(72{i},'BTC/USDT:USDT','LONG','1h',100,98,2.0,0.7,'{{}}','stopped',"
             f"'2026-08-0{i + 1}T00:00:00+00:00','{closed}T00:00:00+00:00',{r})")
     d = flask_app.test_client().get("/api/stats").get_json()
-    assert d["r_all"] == [1.5, -1.0, 3.2] or d["r_all"] == [1.5, -1.0, 2.2]
     assert d["r_all"] == [1.5, -1.0, 2.2]
+    assert d["sp_all"] == [2.0, 2.0, 2.0]                 # |100−98|/100 = 2% на сделку
 
 
 def test_trade_chart_open_only_for_private(fresh_db, monkeypatch, webapp_token):
