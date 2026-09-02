@@ -59,6 +59,14 @@ clean:
 	rm -rf .pytest_cache .mypy_cache .ruff_cache
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
-# деплой закоммиченного HEAD на прод (Hetzner): тесты на сервере, рестарт только при зелёных
+# ПРОД ЖИВЁТ ЛОКАЛЬНО на этом Mac (launchd, с 30.08.2026 — Hetzner не оплачен).
+# Старый deploy рестартовал бота на сервере = двойной getUpdates и дубли постов
+# в канал (инцидент 27-29.08). Вернётся сервер — вернуть zsh scripts/deploy.sh.
 deploy:
-	zsh scripts/deploy.sh
+	@echo "⛔ Прод локальный (launchd на Mac). Деплой на Hetzner отключён —"
+	@echo "   рестарт локально: make restart-local"
+	@exit 1
+
+restart-local:
+	launchctl kickstart -k gui/$$(id -u)/com.rsirange.bot
+	launchctl kickstart -k gui/$$(id -u)/com.rsirange.webapp

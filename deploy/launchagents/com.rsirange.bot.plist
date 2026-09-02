@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd-агент: держит RSI Range бота живым (автозапуск при входе в систему + рестарт при краше).
+  Установка:
+    cp deploy/com.rsirange.bot.plist ~/Library/LaunchAgents/
+    launchctl load  ~/Library/LaunchAgents/com.rsirange.bot.plist   # запустить + автозапуск
+  Управление:
+    launchctl unload ~/Library/LaunchAgents/com.rsirange.bot.plist  # остановить + отключить
+    launchctl list | grep rsirange                                  # статус
+  Логи — logs/bot.log (ротация 10МБ×5 средствами процесса, LOG_FILE ниже). launchd
+  редиректит только stdout/stderr в logs/bot.stderr.log (редкие некаугнутые трейсбеки
+  до инициализации логгера) — иначе два писателя в один файл ломали бы ротацию.
+-->
+
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rsirange.bot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- venv на python.org 3.11, а НЕ /usr/bin/python3: системный питон — шим Xcode,
+             и после апдейта Xcode он отказывается стартовать («You have not agreed to the
+             Xcode license agreements»), из-за чего 30.07.2026 бот молча лежал 9 суток
+             в крэш-лупе. venv от состояния лицензии Xcode не зависит. -->
+        <string>/Users/mac/bot ctypto/.venv/bin/python</string>
+        <string>-m</string>
+        <string>app.delivery.bot</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/mac/bot ctypto</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <!-- процесс сам пишет ротируемый лог сюда (app.logging_conf.setup_logging) -->
+        <key>LOG_FILE</key>
+        <string>/Users/mac/bot ctypto/logs/bot.log</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- только некаугнутый stdout/stderr (краши до инициализации логгера); основной
+         лог пишет сам процесс в LOG_FILE с ротацией -->
+    <key>StandardOutPath</key>
+    <string>/Users/mac/bot ctypto/logs/bot.stderr.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mac/bot ctypto/logs/bot.stderr.log</string>
+</dict>
+</plist>

@@ -82,11 +82,62 @@ def _rotate(dst_dir: Path, keep_last: int) -> None:
             Path(str(old) + suffix).unlink(missing_ok=True)
 
 
+_ICLOUD_DIR = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" \
+    / "RSIRange-Backups"
+
+
+def offsite_copy(src: Path, keep_last: int = 7) -> Path | None:
+    """Копия свежего бэкапа в iCloud Drive (единственный «другой диск» локального
+    прода на Mac): смерть SSD не уносит подписчиков/платежи/трек-рекорд вместе с
+    основными бэкапами (аудит 02.09). Нет iCloud — молча пропускаем (не macOS/CI)."""
+    if not _ICLOUD_DIR.parent.exists():
+        return None
+    _ICLOUD_DIR.mkdir(parents=True, exist_ok=True)
+    import shutil
+    dst = _ICLOUD_DIR / src.name
+    shutil.copy2(src, dst)
+    for old in sorted(_ICLOUD_DIR.glob("signals-*.db"))[:-keep_last]:
+        old.unlink()
+    return dst
+
+
+def rotate_logs(log_dir: Path = Path("logs"), max_bytes: int = 10 * 1024 * 1024) -> int:
+    """Разросшиеся логи: copy-truncate в .1 (одно поколение). Без ротации bot.log
+    растёт бесконечно (tunnel.log надуло 5.9 МБ ретрай-спама за 2.5 суток — аудит
+    02.09; свой лог туннель теперь ротирует сам при старте). Именно copy-truncate:
+    launchd и FileHandler держат fd открытым — rename оставил бы запись в .1 навсегда,
+    truncate по живому O_APPEND-fd безопасен (теряем разве что строку на гонке)."""
+    import shutil
+    n = 0
+    for f in log_dir.glob("*.log"):
+        try:
+            if f.stat().st_size > max_bytes:
+                shutil.copy2(f, f.with_suffix(f.suffix + ".1"))
+                with open(f, "r+b") as fh:
+                    fh.truncate(0)
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
 def main() -> None:
     log = get_logger("backup_db")
     db.init_db()                                # settings-таблица гарантированно существует
     path = backup_once()
     log.info("бэкап создан: %s (%d байт)", path, path.stat().st_size)
+    try:
+        off = offsite_copy(path)
+        if off is not None:
+            log.info("оффсайт-копия: %s", off)
+    except Exception as e:                      # noqa: BLE001 — оффсайт не валит основной бэкап
+        log.warning("оффсайт-копия не удалась: %s", e)
+    try:
+        rotated = rotate_logs()
+        if rotated:
+            log.info("ротация логов: %d файлов", rotated)
+    except Exception as e:                      # noqa: BLE001
+        log.warning("ротация логов: %s", e)
     # timestamp в settings (WAL, тот же файл, что и боевая БД) — не отдельный лог-файл,
     # который бот не читает; /health и алерт о пропуске (_maintenance) читают отсюда
     runtime.set_last_backup_at(clock.utcnow_iso())

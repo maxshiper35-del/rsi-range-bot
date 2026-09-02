@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Mini App локально: waitress на 127.0.0.1:8091, наружу — через com.rsirange.tunnel -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.rsirange.webapp</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mac/bot ctypto/.venv/bin/python</string>
+        <string>-m</string>
+        <string>waitress</string>
+        <string>--listen=127.0.0.1:8091</string>
+        <string>app.webapp:app</string>
+    </array>
+    <key>WorkingDirectory</key><string>/Users/mac/bot ctypto</string>
+    <key>KeepAlive</key><true/>
+    <key>RunAtLoad</key><true/>
+    <key>StandardOutPath</key><string>/Users/mac/bot ctypto/logs/webapp.log</string>
+    <key>StandardErrorPath</key><string>/Users/mac/bot ctypto/logs/webapp.log</string>
+</dict>
+</plist>

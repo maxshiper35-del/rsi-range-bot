@@ -35,3 +35,4 @@ graphify-out/
 .coverage
 data/backups-server/
 data/*.bak
+data/og.png

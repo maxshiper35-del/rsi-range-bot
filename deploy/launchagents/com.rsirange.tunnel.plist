@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Cloudflare quick-tunnel для Mini App; свежий URL сам пишется в webapp_url -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.rsirange.tunnel</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>/Users/mac/bot ctypto/deploy/tunnel_webapp.sh</string>
+    </array>
+    <key>KeepAlive</key><true/>
+    <key>RunAtLoad</key><true/>
+    <key>StandardOutPath</key><string>/Users/mac/bot ctypto/logs/tunnel-agent.log</string>
+    <key>StandardErrorPath</key><string>/Users/mac/bot ctypto/logs/tunnel-agent.log</string>
+</dict>
+</plist>
