@@ -12,10 +12,34 @@ signal_engine.Signal.format_message). Правила:
 from __future__ import annotations
 
 import html
+import re
 
 from app.core.signal_engine import Signal
 
 LINE = "━━━━━━━━━━━━━━"
+
+# --- граница публикации стратегии (мандат владельца: конструкция сетапов — секрет) ---
+# Санитизация ТОЛЬКО на рендере: snapshot_json хранит полные reasons для админ-разбора,
+# а наружу конструкция (фибо-рецепт, параметры входа от блока) не уходит. Найдено
+# аудитом 02.09: «фибо 1/0.62/0/-0.26» = сам рецепт флагмана (имя 6226 из этих уровней).
+_REASON_SCRUB: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"фибо [\d./,\- ]+ по импульсу"), "расчётная сетка уровней по импульсу"),
+    (re.compile(r"импульс, фибо [\d./,\- ]+"), "импульс, расчётная сетка уровней"),
+    (re.compile(r"вход [\d.]+, стоп [\d.]+, тейк [\d.]+ \(RR [\d.:]+\)"),
+     "вход/стоп/цель по расчётной сетке"),
+    (re.compile(r"вход от (?:OB|BB) \(MT ?\d+%\), стоп за дальнюю границу блока"),
+     "вход от зоны интереса, стоп за её границу"),
+)
+
+
+def scrub_reasons(reasons) -> list[str]:
+    """Причины сигнала без деталей конструкции сетапа (для канала/DM/любых юзер-поверхностей)."""
+    out = []
+    for r in reasons or ():
+        for pat, repl in _REASON_SCRUB:
+            r = pat.sub(repl, r)
+        out.append(r)
+    return out
 
 
 def esc(v: object) -> str:
@@ -91,12 +115,12 @@ def render_signal_channel(sig: Signal, signal_id: int) -> str:
     tps = " / ".join(f"<code>{_price(t)}</code> ({_tp_r(sig.entry, sig.stop, t):.1f}R)"
                      for t in sig.take_profits)
     stop_dist = _stop_dist_pct(sig.entry, sig.stop)
-    reasons = "\n".join(f"• {esc(r)}" for r in sig.reasons)
+    reasons = "\n".join(f"• {esc(r)}" for r in scrub_reasons(sig.reasons))
     return (
         f"📊 <b>RSI RANGE — Сигнал #{signal_id}</b>\n{LINE}\n"
         f"{_sig_head(sig)}\n\n"
         f"{_market_line(sig)}"
-        f"📍 Вход:  <code>{_price(sig.entry)}</code>  (лимит)\n"
+        f"📍 Вход:  <code>{_price(sig.entry)}</code>  (по касанию)\n"
         f"🛑 Стоп:  <code>{_price(sig.stop)}</code>  (ход {stop_dist:.1f}%)\n"
         f"{trail_line(sig)}"
         f"🎯 Цели:  {tps}\n"
@@ -115,12 +139,12 @@ def render_signal_dm(sig: Signal, signal_id: int) -> str:
         f"   • TP{i}: <code>{_price(tp)}</code>  ({_tp_r(sig.entry, sig.stop, tp):.1f}R)"
         for i, tp in enumerate(sig.take_profits, 1))
     stop_dist = _stop_dist_pct(sig.entry, sig.stop)
-    reasons = "\n".join(f"— {esc(r)}" for r in sig.reasons)
+    reasons = "\n".join(f"— {esc(r)}" for r in scrub_reasons(sig.reasons))
     return (
         f"🔔 <b>СИГНАЛ #{signal_id}</b>\n"
         f"{_sig_head(sig)}\n{LINE}\n"
         f"{_market_line(sig)}"
-        f"📍 Вход:  <code>{_price(sig.entry)}</code>  (лимит)\n"
+        f"📍 Вход:  <code>{_price(sig.entry)}</code>  (по касанию)\n"
         f"🛑 Стоп:  <code>{_price(sig.stop)}</code>  (ход до стопа {stop_dist:.1f}%)\n"
         f"{trail_line(sig)}"
         f"🎯 Тейки:\n{tps}\n"
@@ -306,7 +330,7 @@ def render_expired(c: dict) -> str:
 TRIAL_DRIP: dict = {
     1: (
         "📖 <b>День 1: как читать наши сигналы</b>\n"
-        "• <b>Вход (лимит)</b> — ордер по этой цене; если цена не дошла, сделки нет "
+        "• <b>Вход (по касанию)</b> — ордер по этой цене; если цена не дошла, сделки нет "
         "(мы честно пишем «отменён»).\n"
         "• <b>Стоп</b> — обязателен, риск 1–2% депозита (посчитать: 🧮 Калькулятор).\n"
         "• <b>Цели</b> — где фиксируется результат; исход запишется автоматически.\n"

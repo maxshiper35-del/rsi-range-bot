@@ -227,9 +227,20 @@ def export_public_trades() -> list:
     Исключаются и TTL-истёкшие кандидаты (status='expired', но никогда не подтверждались
     и не публиковались — аудит-2 математики [8]). ORDER BY created_at, id: у created_at
     массовые совпадения (один бар), без вторичного ключа порядок строк при равных ключах
-    не гарантирован SQLite — два экспорта одинаковых данных могли бы дать разные sha256."""
+    не гарантирован SQLite — два экспорта одинаковых данных могли бы дать разные sha256.
+
+    Уровни ОТКРЫТЫХ сигналов (вход/стоп/тейки) маскируются (аудит 02.09): это платный
+    контент — CSV доступен любому фри-юзеру и каналу, открытая строка была обходом
+    подписки. Строка присутствует сразу (факт сигнала фиксируется), уровни появляются
+    после закрытия — проверяемость исходов не страдает."""
     return db.query(
-        "SELECT id, symbol, side, timeframe, entry, stop, tp1, tp2, tp3, status, result_r, "
+        "SELECT id, symbol, side, timeframe, "
+        "CASE WHEN status='open' THEN NULL ELSE entry END AS entry, "
+        "CASE WHEN status='open' THEN NULL ELSE stop END AS stop, "
+        "CASE WHEN status='open' THEN NULL ELSE tp1 END AS tp1, "
+        "CASE WHEN status='open' THEN NULL ELSE tp2 END AS tp2, "
+        "CASE WHEN status='open' THEN NULL ELSE tp3 END AS tp3, "
+        "status, result_r, "
         "created_at, closed_at FROM signals WHERE status NOT IN ('candidate','rejected') "
         "AND NOT (status='expired' "
         "AND EXISTS (SELECT 1 FROM signal_events e WHERE e.signal_id = signals.id "

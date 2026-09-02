@@ -157,8 +157,14 @@ def test_format_backtest_summary():
 
 def test_format_glossary():
     txt = bot.format_glossary()
-    for term in ("BOS", "CHOCH", "FVG", "killzone", "Setup 1:1", "Свип"):
+    for term in ("BOS", "CHOCH", "FVG", "killzone", "Свип"):
         assert term.lower() in txt.lower(), term
+    # граница публикации стратегии: таксономия сетапов НЕ публикуется никому
+    # (мандат владельца; утечка «Setup 1:1»/«LTF-POI» найдена аудитом 02.09)
+    for secret in ("1:1", "ltf", "6226"):
+        assert secret not in txt.lower(), secret
+    assert "6226" not in bot.format_backtest_summary()
+    assert "1:1" not in bot.format_backtest_summary()
 
 
 def test_format_cornix_block():
@@ -1038,3 +1044,40 @@ def test_affiliate_block_in_about_and_board(fresh_db):
     assert "bingx.com/ref/XYZ" in board
     runtime.set_value("affiliate_url", "")
     assert "bingx.com" not in bot.format_about()
+
+
+def test_stars_payload_contract():
+    """Контракт payload Stars-платежа: отправка пишет 'sub:{days}', приём парсит
+    float(split(':')[1]) — рассинхрон форматов дал бы фолбэк на sub_days для ВСЕХ
+    тарифов (квартал/год/lifetime получили бы 30 дней). Закрепляем формат."""
+    days = 36500.0
+    payload = f"sub:{days}"                     # как в _send_stars_invoice
+    assert float(payload.split(":")[1]) == days  # как в _paid
+    # дробные дни (тестовый тариф 0.208333) тоже проходят
+    assert float(f"sub:{0.208333}".split(":")[1]) == 0.208333
+
+
+def test_scrub_reasons_hides_construction():
+    """Граница публикации: конструкция сетапов (фибо-рецепт, параметры входа от блока)
+    вычищается на рендере; generic-SMC формулировки не трогаются (аудит 02.09)."""
+    from app.delivery import templates as t
+    out = t.scrub_reasons([
+        "фибо 1/0.62/0/-0.26 по импульсу",
+        "вход 0.5, стоп 1, тейк 0 (RR 1:1)",
+        "вход от OB (MT 50%), стоп за дальнюю границу блока",
+        "свип лоя (снятие ликвидности)",
+        "слом структуры BOS (закреп телом)",
+    ])
+    joined = " ".join(out)
+    assert "0.62" not in joined and "0.26" not in joined and "MT 50%" not in joined
+    assert "RR 1:1" not in joined
+    assert "свип лоя (снятие ликвидности)" in out
+    assert "слом структуры BOS (закреп телом)" in out
+    # рендеры канала/DM реально применяют скраб
+    from app.core.signal_engine import Side, Signal
+    sig = Signal(symbol="BTC/USDT:USDT", side=Side.LONG, timeframe="1h", entry=100.0,
+                 stop=98.0, take_profits=[104.0], risk_reward=2.0, confidence=0.7,
+                 reasons=["фибо 1/0.62/0/-0.26 по импульсу"],
+                 created_at="2026-01-01T00:00:00+00:00", indicators_snapshot={})
+    assert "0.62" not in t.render_signal_channel(sig, 1)
+    assert "0.62" not in t.render_signal_dm(sig, 1)

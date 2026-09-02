@@ -506,9 +506,9 @@ def format_backtest_summary() -> str:
         "Метод: walk-forward без лукахеда — движку подавались только закрытые бары, "
         "комиссии и проскальзывание учтены, при касании стопа и тейка в одном баре "
         "консервативно засчитывался стоп.\n\n"
-        "Вывод: устойчивого механического края НЕ обнаружено. Все сетапы после издержек "
-        "около нуля или в минусе; лучший кандидат (Setup 1:1 на ETH/15m) фальсифицирован "
-        "на генуинной out-of-sample проверке.\n\n"
+        "Вывод: устойчивого механического края НЕ обнаружено. Все кандидаты после "
+        "издержек около нуля или в минусе; лучший из них фальсифицирован на генуинной "
+        "out-of-sample проверке.\n\n"
         "⚠️ Важно: бэктест — это смоделированный расчёт задним числом. Гипотетические "
         "результаты имеют врождённые ограничения: hindsight bias, идеализированное "
         "исполнение, не учитывают реальную ликвидность. В отличие от бэктеста, /stats "
@@ -534,10 +534,7 @@ def format_glossary() -> str:
         "• Свип ликвидности — прокол очевидного максимума/минимума со сбором стопов "
         "и возвратом: часто предшествует развороту.\n"
         "• Killzone — окно повышенной активности (Азия / Лондон / Нью-Йорк), когда "
-        "сетапы статистически чаще отрабатывают.\n"
-        "• Setup 1:1 — сетап с равным риском и целью (RR 1:1) после свипа и импульса.\n"
-        "• LTF-POI — зона интереса на младшем таймфрейме (вход от блока после слома "
-        "структуры).\n\n"
+        "сетапы статистически чаще отрабатывают.\n\n"
         "Эти термины встречаются в блоке «Почему» каждого сигнала."
     )
 
@@ -1534,9 +1531,15 @@ def main() -> None:
             if x is not None:
                 await m.answer(templates.render_xray(x), parse_mode="HTML",
                                reply_markup=_main_menu_kb(m.from_user.id in cfg.admin_ids))
-                return
-            await m.answer("Сделка ещё открыта или не найдена — рентген доступен "
-                           "после закрытия. Пока: /stats")
+            else:
+                await m.answer("Сделка ещё открыта или не найдена — рентген доступен "
+                               "после закрытия. Пока: /stats")
+            # главная точка входа из канала: НОВЫЙ юзер не должен уйти без триала
+            # (аудит 02.09) — grant_trial идемпотентен, бывалых не трогает
+            xr_days = runtime.trial_days()
+            if await asyncio.to_thread(payments.grant_trial, m.from_user.id, xr_days):
+                await m.answer(f"🎁 Открыт полный доступ на {xr_days:g} дн. — все "
+                               "сигналы без ограничений. Меню внизу; /help — команды.")
             return
         trial_days = runtime.trial_days()
         applied = await asyncio.to_thread(payments.grant_trial, m.from_user.id, trial_days)
@@ -1799,6 +1802,8 @@ def main() -> None:
         # lifetime = 36500 дней (100 лет): без спец-статуса в БД — просто далёкий paid_until
         await _pay_tier(cq, 36500, runtime.lifetime_price_stars(), label="навсегда (lifetime)")
 
+    _unlock_last: dict[int, float] = {}
+
     @dp.callback_query(F.data.startswith("unlock:"))
     async def _unlock(cq):
         # разовая покупка сигнала: PNG-карта + полный разбор как paid media (Stars).
@@ -1822,6 +1827,11 @@ def main() -> None:
                                    parse_mode="HTML")
             await cq.answer("У вас полный доступ — сигнал отправлен бесплатно.")
             return
+        # троттлинг: рендер идёт ДО оплаты — без кулдауна это бесплатная DoS-поверхность
+        if _monotonic() - _unlock_last.get(uid, -1e9) < 30:
+            await cq.answer("Сигнал уже готовится — подождите полминуты.")
+            return
+        _unlock_last[uid] = _monotonic()
         try:
             png = await _render_png(_signal_chart_png, sig, sid)
         except Exception as e:                          # noqa: BLE001 — биржа/рендер
@@ -1829,7 +1839,10 @@ def main() -> None:
             await cq.answer("Не удалось подготовить сигнал — попробуйте чуть позже.",
                             show_alert=True)
             return
-        caption = templates.render_signal_dm(sig, sid)
+        # caption у paid media виден ДО оплаты (пейволлится только сама медиа!) —
+        # уровни в него класть нельзя (аудит 02.09): тизер до покупки, полный текст
+        # досылает _paid_media_bought после факта оплаты
+        caption = templates.render_teaser(sig, sid)
         try:
             await bot.send_paid_media(
                 chat_id=uid, star_count=price,
@@ -1853,8 +1866,18 @@ def main() -> None:
         try:
             parts = (p.paid_media_payload or "").split(":")
             if len(parts) >= 2 and parts[0] == "unlock" and parts[1].isdigit():
+                sid = int(parts[1])
                 await asyncio.to_thread(payments.mark_delivery_unlocked,
-                                        p.from_user.id, int(parts[1]))
+                                        p.from_user.id, sid)
+                # полный текст — ПОСЛЕ оплаты: в caption paid media его класть нельзя
+                # (виден до покупки), а купивший должен получить уровни, даже если
+                # caption не влез в лимит (старый баг «голый PNG»)
+                row = await asyncio.to_thread(journal.signal_row, sid)
+                if row is not None:
+                    await bot.send_message(
+                        p.from_user.id,
+                        templates.render_signal_dm(journal.row_to_signal(row), sid),
+                        parse_mode="HTML")
         except Exception as e:                          # noqa: BLE001 — учёт не критичен
             log.warning("mark_delivery_unlocked: %s", e)
 
@@ -1867,25 +1890,43 @@ def main() -> None:
         ]])
 
     async def _load_signal_for_action(cq):
-        """Общая часть sigchart/sigcalc: распарсить sid и достать сигнал.
+        """Общая часть sigchart/sigcalc: распарсить sid, достать сигнал, ПРОВЕРИТЬ ПРАВО.
 
-        -> (sid, sig), либо (None, None) если не найден (ответ юзеру уже отправлен)."""
+        Гейт (аудит 02.09): callback_data подделывается тривиально — уровни через
+        «график/риск» отдаём только тем, кто имеет полный доступ или уже получил
+        ЭТОТ сигнал полным (full/unlock), teaser не считается.
+        -> (sid, sig), либо (None, None) если не найден/нет прав (ответ уже отправлен)."""
         sid_s = cq.data.split(":", 1)[1]
         if not sid_s.isdigit():
             await cq.answer("Сигнал не найден.", show_alert=True)
             return None, None
         sid = int(sid_s)
+        uid = cq.from_user.id
+        if uid not in cfg.admin_ids \
+                and not await asyncio.to_thread(payments.is_paid, uid) \
+                and not await asyncio.to_thread(payments.delivered_full, uid, sid):
+            await cq.answer("Доступно получателям полного сигнала — /subscribe.",
+                            show_alert=True)
+            return None, None
         row = await asyncio.to_thread(journal.signal_row, sid)
         if row is None:
             await cq.answer("Сигнал не найден.", show_alert=True)
             return None, None
         return sid, journal.row_to_signal(row)
 
+    _chart_last: dict[int, float] = {}
+
     @dp.callback_query(F.data.startswith("sigchart:"))
     async def _sig_chart(cq):
         sid, sig = await _load_signal_for_action(cq)
         if sig is None:
             return
+        # троттлинг Chromium-рендера: 30с на юзера (аудит 02.09 — DoS-поверхность)
+        now = _monotonic()
+        if now - _chart_last.get(cq.from_user.id, 0.0) < 30:
+            await cq.answer("График уже готовится — подождите полминуты.")
+            return
+        _chart_last[cq.from_user.id] = now
         # ack ДО рендера: биржа+Chromium занимают до десятков секунд, просроченный callback
         # давал вечный спиннер и алерт админу на каждый повторный тап (аудит-2 UX [7])
         await cq.answer("Готовлю график…")
@@ -2200,7 +2241,20 @@ def main() -> None:
     async def _confirm(m):
         if not _is_admin(m):
             return
-        await m.answer(await asyncio.to_thread(handle_confirm, parse_id_arg(m.text)))
+        sid = parse_id_arg(m.text)
+        answer = await asyncio.to_thread(handle_confirm, sid)
+        await m.answer(answer)
+        # доставка подтверждённого: раньше кандидат становился open молча — ни канала,
+        # ни подписчиков (аудит 02.09). Успех подтверждения различаем по тексту ответа
+        if sid is not None and answer.startswith("✅"):
+            row = await asyncio.to_thread(journal.signal_row, sid)
+            if row is not None:
+                try:
+                    await _deliver_signal(journal.row_to_signal(row), sid)
+                except Exception:                       # noqa: BLE001 — доставка не роняет хендлер
+                    log.exception("доставка подтверждённого #%s", sid)
+                    await m.answer(f"⚠️ #{sid}: подтверждён, но доставка упала — "
+                                   "детали в журнале.")
 
     @dp.message(Command("reject"))
     async def _reject(m):
@@ -3029,6 +3083,25 @@ def main() -> None:
         return (watchlist_gate_decision(rep.expectancy_r, rep.trades),
                 rep.expectancy_r, rep.trades)
 
+    def _dead_recipient(e: Exception) -> bool:
+        """Мёртвый получатель (заблокировал бота/удалил чат) — пометить, не ретраить."""
+        low_ = str(e).lower()
+        return "blocked" in low_ or "chat not found" in low_ or "deactivated" in low_
+
+    async def _send_retry(uid: int, text: str, *, parse_mode: str | None = None,
+                          reply_markup=None) -> None:
+        """Один повтор после 429 (flood-wait): без него rate-limit Telegram молча
+        съедал сообщение — для рассылки сигналов это потеря ядра продукта
+        (аудит 02.09; паттерн из дайджеста, ревью 14.08)."""
+        from aiogram.exceptions import TelegramRetryAfter
+        try:
+            await bot.send_message(uid, text, parse_mode=parse_mode,
+                                   reply_markup=reply_markup)
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(min(float(e.retry_after), 30.0) + 1.0)
+            await bot.send_message(uid, text, parse_mode=parse_mode,
+                                   reply_markup=reply_markup)
+
     async def _broadcast(sig, sid):
         # semiauto: КАНДИДАТ уходит ТОЛЬКО оператору — ни канала, ни подписчиков.
         # Раньше _broadcast был слеп к режиму дальше выбора текста: неподтверждённый сетап
@@ -3046,6 +3119,14 @@ def main() -> None:
                 except Exception as e:                 # noqa: BLE001
                     log.warning("candidate alert %s: %s", admin_id, e)
             return
+        await _deliver_signal(sig, sid)
+
+    async def _deliver_signal(sig, sid):
+        """Доставка ГОТОВОГО сигнала: пост в канал + рассылка по воронке.
+
+        Отдельно от _broadcast, потому что зовётся из ДВУХ мест: auto-ветки поллера
+        и /confirm в semiauto — раньше подтверждённый кандидат не доставлялся никому
+        (аудит 02.09: комментарий обещал «рассылка после /confirm», кода не было)."""
         try:
             full = templates.render_signal_dm(sig, sid)
         except Exception:                              # noqa: BLE001 — формат не роняет цикл
@@ -3088,9 +3169,12 @@ def main() -> None:
                     if photo is not None:               # подпись не влезла — фото отдельно
                         await bot.send_photo(
                             channel, BufferedInputFile(photo, filename=f"signal_{sid}.png"))
+                    # тизер всегда несёт хотя бы CTA-кнопку в бота: «/subscribe» в тексте
+                    # канала некликабелен — пост без кнопки был тупиком воронки (аудит 02.09)
                     msg = await bot.send_message(
                         channel, ch_text, parse_mode="HTML",
-                        reply_markup=unlock_kb if ch_is_teaser else _channel_kb("chsig"))
+                        reply_markup=(unlock_kb or _channel_kb("chsig")) if ch_is_teaser
+                        else _channel_kb("chsig"))
                     log.info("сигнал #%s: пост в канал OK (msg_id=%s%s)", sid, msg.message_id,
                              ", фото отдельно" if photo is not None else "")
             except Exception as e:                     # noqa: BLE001 — канал не роняет рассылку
@@ -3119,18 +3203,66 @@ def main() -> None:
                 except Exception as e:                 # noqa: BLE001
                     log.warning("depo-строка %s: %s", uid, e)
             try:
-                await bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
+                await _send_retry(uid, text, parse_mode="HTML", reply_markup=markup)
                 await asyncio.to_thread(payments.record_delivery, uid, sid, kind)
                 sent += 1
             except Exception as e:                     # noqa: BLE001 — один получатель не роняет рассылку
                 log.warning("send %s: %s", uid, e)
-                low = str(e).lower()
-                if "blocked" in low or "chat not found" in low or "deactivated" in low:
+                if _dead_recipient(e):
                     # мёртвый получатель — не слать каждый сигнал; /start вернёт (аудит-2 ops [8])
                     await asyncio.to_thread(payments.mark_blocked, uid)
+            # пауза между отправками: ~20 msg/с — под глобальным лимитом Telegram,
+            # без неё flood-wait гарантирован при росте базы
+            await asyncio.sleep(0.05)
         log.info("сигнал #%s: отправлено %d из %d (план)", sid, sent, len(plan))
 
+    _webapp_watch = {"fails": 0}
+
+    async def _watch_webapp():
+        """Сторож Mini App: публичный URL должен отвечать. Инцидент 31.08-02.09 —
+        cloudflared 2 суток висел в ретрай-лупе, дашборд лежал БЕЗ единого алерта
+        (dead-man switch пингует только пульс бота). 5 фейлов подряд -> алерт админу
+        + kickstart туннель-агента (launchd поднимет новый URL и впишет его сам)."""
+        wurl = runtime.webapp_url()
+        if not wurl.startswith("https://"):
+            return
+        def _probe() -> bool:
+            import urllib.request
+            req = urllib.request.Request(wurl.rstrip("/") + "/healthz",
+                                         headers={"User-Agent": "rsirange-watchdog"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status == 200
+        try:
+            ok = await asyncio.to_thread(_probe)
+        except Exception:                              # noqa: BLE001 — любой сбой = не отвечает
+            ok = False
+        if ok:
+            _webapp_watch["fails"] = 0
+            return
+        _webapp_watch["fails"] += 1
+        n = _webapp_watch["fails"]
+        if n == 5 or n % 60 == 0:              # алерт через ~5 мин, дальше ~раз в час
+            for admin_id in cfg.admin_ids:
+                try:
+                    await bot.send_message(
+                        admin_id, f"🕸 Mini App не отвечает {n} мин ({wurl}) — "
+                                  "перезапускаю туннель.")
+                except Exception as e:                 # noqa: BLE001
+                    log.warning("webapp-watch алерт %s: %s", admin_id, e)
+            try:
+                import os as _os
+                import subprocess as _sp
+                _sp.run(["launchctl", "kickstart", "-k",
+                         f"gui/{_os.getuid()}/com.rsirange.tunnel"],
+                        timeout=15, check=False, capture_output=True)
+            except Exception as e:                     # noqa: BLE001 — не-launchd окружение
+                log.warning("kickstart туннеля: %s", e)
+
     async def _maintenance():
+        try:
+            await _watch_webapp()
+        except Exception as e:                         # noqa: BLE001 — сторож не роняет такт
+            log.warning("webapp watch: %s", e)
         # автобэкап не подтверждён/устарел — алерт админу (троттлинг: не чаще раза в сутки)
         now_ = clock.utcnow_iso()
         if should_alert_backup_stale(runtime.last_backup_at(),
@@ -3193,22 +3325,30 @@ def main() -> None:
                 log.info("TTL: просрочено кандидатов: %s", expired_ids)
         except Exception as e:                             # noqa: BLE001
             log.warning("expire_stale_candidates: %s", e)
-        # истёкшие подписки -> free + уведомление
+        # истёкшие подписки -> free + уведомление (точка максимального интента:
+        # кнопки оплаты прямо в сообщении, не голый /subscribe — аудит 02.09)
         for uid in await asyncio.to_thread(payments.expire_overdue):
             try:
-                await bot.send_message(uid, "⌛ Подписка истекла. /subscribe — продлить и снова "
-                                            "получать все сигналы.")
+                await _send_retry(uid, "⌛ Подписка истекла. Продлить — и снова получать "
+                                       "все сигналы:", reply_markup=_subscribe_kb())
             except Exception as e:                     # noqa: BLE001
                 log.warning("expire notify %s: %s", uid, e)
-        # напоминания о продлении (за 3 дня, единожды)
+                if _dead_recipient(e):
+                    await asyncio.to_thread(payments.mark_blocked, uid)
+        # напоминания о продлении (за 3 дня, единожды). mark_reminded ставится и при
+        # сбое: заблокировавший бота платник ретраился каждые 60с все ~2.5 суток окна
+        # (аудит 02.09; паттерн дрипа)
         for row in await asyncio.to_thread(payments.due_for_reminder, 3):
             try:
-                await bot.send_message(
+                await _send_retry(
                     row["tg_id"],
-                    f"⏳ Подписка истекает {row['paid_until'][:10]}. /subscribe — продлить.")
-                await asyncio.to_thread(payments.mark_reminded, row["tg_id"])
+                    f"⏳ Подписка истекает {row['paid_until'][:10]}. Продлить:",
+                    reply_markup=_subscribe_kb())
             except Exception as e:                     # noqa: BLE001
                 log.warning("reminder %s: %s", row["tg_id"], e)
+                if _dead_recipient(e):
+                    await asyncio.to_thread(payments.mark_blocked, row["tg_id"])
+            await asyncio.to_thread(payments.mark_reminded, row["tg_id"])
         # автоактивация оплаченных USDT-инвойсов (уведомления изолированы per-юзер)
         try:
             activated = await asyncio.to_thread(payments.poll_cryptobot)
@@ -3428,7 +3568,11 @@ def main() -> None:
         d_now = datetime.now(timezone.utc)
         d_year, d_week, _ = d_now.isocalendar()
         d_week_key = f"{d_year}-W{d_week:02d}"
-        if should_post_weekly(runtime.weekly_digest_last_week(), d_week_key):
+        # не раньше 08:00 UTC: первый такт новой ISO-недели — полночь понедельника,
+        # личный пуш уходил прямо в тихие часы аудитории (аудит 02.09); маркер недели
+        # ставится при фактической отправке, так что дайджест просто ждёт утра
+        if d_now.hour >= 8 and should_post_weekly(runtime.weekly_digest_last_week(),
+                                                  d_week_key):
             await asyncio.to_thread(runtime.set_weekly_digest_last_week, d_week_key)
             try:
                 # заодно раз в неделю чистим давно сработавшие прайс-алерты
@@ -3463,23 +3607,9 @@ def main() -> None:
         (payments.missed_teaser_r). Мьют (/notify) уважается: непрошеный маркетинговый
         пуш замьютившему = прямой путь к блокировке бота. Мёртвые получатели
         списываются mark_blocked — не молотить по ним каждую неделю."""
-        def _dead(e: Exception) -> bool:
-            low_ = str(e).lower()
-            return "blocked" in low_ or "chat not found" in low_ or "deactivated" in low_
-
         async def _muted(uid: int) -> bool:
             prefs = await asyncio.to_thread(payments.notify_prefs, uid)
             return bool(prefs.get("muted"))
-
-        async def _send_retry(uid: int, text: str) -> None:
-            """Один повтор после 429 — иначе rate-limit Telegram молча съедает
-            дайджест юзера до следующей недели (ревью 14.08)."""
-            from aiogram.exceptions import TelegramRetryAfter
-            try:
-                await bot.send_message(uid, text, parse_mode="HTML")
-            except TelegramRetryAfter as e:
-                await asyncio.sleep(min(float(e.retry_after), 30.0) + 1.0)
-                await bot.send_message(uid, text, parse_mode="HTML")
 
         sent = f_sent = 0
         try:
@@ -3496,11 +3626,12 @@ def main() -> None:
                         block = templates.render_discipline_block(coach) if coach else ""
                     except Exception as e:              # noqa: BLE001
                         log.warning("коуч -> %s: %s", uid, e)
-                    await _send_retry(uid, d_text + ("\n" + block if block else ""))
+                    await _send_retry(uid, d_text + ("\n" + block if block else ""),
+                                      parse_mode="HTML")
                     sent += 1
                 except Exception as e:                  # noqa: BLE001
                     log.warning("дайджест -> %s: %s", uid, e)
-                    if _dead(e):
+                    if _dead_recipient(e):
                         await asyncio.to_thread(payments.mark_blocked, uid)
             # тизерных закрытий не было — блок молча отсутствует, дайджест уходит всё равно
             for uid in await asyncio.to_thread(payments.free_active_ids):
@@ -3510,11 +3641,12 @@ def main() -> None:
                     missed = await asyncio.to_thread(
                         payments.missed_teaser_r, uid, start_iso, end_iso)
                     await _send_retry(
-                        uid, templates.render_weekly_digest(d_label, d_wk, d_st, missed))
+                        uid, templates.render_weekly_digest(d_label, d_wk, d_st, missed),
+                        parse_mode="HTML")
                     f_sent += 1
                 except Exception as e:                  # noqa: BLE001
                     log.warning("дайджест(free) -> %s: %s", uid, e)
-                    if _dead(e):
+                    if _dead_recipient(e):
                         await asyncio.to_thread(payments.mark_blocked, uid)
             log.info("недельный дайджест разослан: %d подписчикам + %d free", sent, f_sent)
         except Exception as e:                          # noqa: BLE001 — таска не роняет процесс

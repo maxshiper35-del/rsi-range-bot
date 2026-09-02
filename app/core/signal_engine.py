@@ -15,10 +15,9 @@ ANALYZE отделён от FETCH — движок тестируется на �
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -120,7 +119,8 @@ class Signal:
             f"   • TP{i+1}: {_fmt(tp)}" for i, tp in enumerate(self.take_profits)
         )
         reasons = "\n".join(f"   — {r}" for r in self.reasons)
-        market = self.indicators_snapshot.get("market") if isinstance(self.indicators_snapshot, dict) else None
+        market = (self.indicators_snapshot.get("market")
+                  if isinstance(self.indicators_snapshot, dict) else None)
         market_line = f"💹 Цена сейчас:  {_fmt(market)}\n" if market else ""
         return (
             f"{arrow}  |  {self.symbol}  ({self.timeframe})\n"
@@ -150,7 +150,7 @@ def _fmt(x: float) -> float:
 # Движок
 # ---------------------------------------------------------------------------
 class SignalEngine:
-    def __init__(self, config: Optional[StrategyConfig] = None):
+    def __init__(self, config: StrategyConfig | None = None):
         self.cfg = config or StrategyConfig()
 
     def _enrich(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -163,7 +163,7 @@ class SignalEngine:
         out["vol_ratio"] = Indicators.volume_ratio(out["volume"], c.vol_period)
         return out
 
-    def analyze(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Optional[Signal]:
+    def analyze(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Signal | None:
         """
         df: OHLCV с колонками open/high/low/close/volume, ТОЛЬКО закрытые бары.
         Возвращает Signal или None (нет сетапа).
@@ -282,6 +282,13 @@ def calculate_position(deposit: float, risk_pct: float, entry: float,
     Размер позиции от РИСКА, а не от «на всё плечо».
     Если стоп сработает — теряешь ровно risk_pct% депозита.
     """
+    import math
+
+    # /calc с депозитом 0 ронял хендлер ZeroDivisionError, inf/nan проходили float()
+    # без валидации (аудит 02.09) — вырожденные входы отвечают текстом, не крэшем
+    if not all(math.isfinite(x) for x in (deposit, risk_pct, entry, stop)) \
+            or deposit <= 0 or risk_pct <= 0 or entry <= 0 or stop <= 0:
+        return {"error": "числа вне диапазона: депозит/риск/цены должны быть > 0"}
     risk_amount = deposit * risk_pct / 100.0
     per_unit_risk = abs(entry - stop)
     if per_unit_risk == 0:

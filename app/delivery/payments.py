@@ -318,6 +318,15 @@ def delivered(tg_id: int, signal_id: int) -> bool:
                         (tg_id, signal_id)) is not None
 
 
+def delivered_full(tg_id: int, signal_id: int) -> bool:
+    """Получал ли юзер ПОЛНЫЙ сигнал (full/unlock, не teaser) — гейт кнопок
+    «график/риск»: поддельный callback_data не должен отдавать платные уровни
+    (аудит 02.09)."""
+    return db.query_one(
+        "SELECT 1 FROM deliveries WHERE tg_id=? AND signal_id=? "
+        "AND kind IN ('full','unlock')", (tg_id, signal_id)) is not None
+
+
 def record_delivery(tg_id: int, signal_id: int, kind: str) -> bool:
     """Отметить доставку (idempotent через UNIQUE). -> False если уже была."""
     try:

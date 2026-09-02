@@ -39,6 +39,14 @@ def _scoring_limit(symbol: str, tf: str) -> int:
             return 200
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(anchor)).total_seconds()
         need = int(age / _TF_SECONDS.get(tf, 3600)) + 80    # запас на окно ожидания/лаг
+        if need > 1000:
+            # кап сработал: якорь старше окна -> сигнал не скорится ВООБЩЕ, публичная
+            # статистика молча недосчитывает исход (аудит 02.09). Warning вместо
+            # тишины: виден в bot.log и в ERROR-буфере не всплывает (не спам)
+            from app.logging_conf import get_logger
+            get_logger("market_data").warning(
+                "скоринг %s %s: нужно %d баров, кап 1000 — старый сигнал вне окна "
+                "не скорится (якорь %s)", symbol, tf, need, anchor)
         return min(1000, max(200, need))
     except Exception:                                       # noqa: BLE001 — глубина не роняет цикл
         return 200
