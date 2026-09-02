@@ -260,6 +260,7 @@ if (inTg) { tg.ready(); tg.expand();
   if (tg.setBackgroundColor) try { tg.setBackgroundColor("#0b0e11"); } catch (e) {} }
 
 let DATA = null, ME = null, ADM = null, SCOPE = "epoch", NAV = "over";
+let CLOSED_FILTER = "all";
 let toastT = 0;
 function toast(t) {
   const el = $("#toast"); el.textContent = t; el.classList.add("show");
@@ -438,7 +439,10 @@ function renderOverview(noAnim) {
       <div class="sim-hero"><span class="sim-start">$100 →</span>
         <b class="sim-bal ${sim.bal >= 100 ? "up" : "dn"}">${fmtUsd(sim.bal)}</b>
         <span class="sim-pct ${sim.pct >= 0 ? "up" : "dn"}">${sim.pct >= 0 ? "+" : ""}${sim.pct.toFixed(1)}%</span></div>
-      <div class="mystat">${rsim.length} сделок · макс. просадка −${sim.maxDD.toFixed(1)}% · риск считается от текущего баланса</div>
+      <div class="mystat">${rsim.length} сделок · макс. просадка −${sim.maxDD.toFixed(1)}% · риск считается от текущего баланса${(() => {
+        const kj = SCOPE === "epoch" && DATA.kelly_epoch ? DATA.kelly_epoch : DATA.kelly_all;
+        return kj ? ` · полу-Келли по журналу ≈ ${kj.half}%` : "";
+      })()}</div>
       <div class="plot">${simSVG(sim.series)}</div>
       <div class="mystat" style="margin:6px 0 0;color:var(--ink-3)">Модель по закрытым сделкам журнала (порядок закрытий); R — по ценам биржи, комиссии и проскальзывание не учтены. Не прогноз и не гарантия.</div>
       </section>`);
@@ -496,13 +500,21 @@ function renderOverview(noAnim) {
       }</table></section>`);
   }
   if ((DATA.last_closed || []).length) {
+    const cfDefs = [["all", "все"], ["long", "▲"], ["short", "▼"], ["win", "+"], ["loss", "−"]];
+    const cfFn = {all: () => true, long: o => o.side === "LONG", short: o => o.side !== "LONG",
+                  win: o => (o.r || 0) > 0, loss: o => (o.r || 0) <= 0};
+    const rowsCf = DATA.last_closed.filter(cfFn[CLOSED_FILTER] || cfFn.all);
+    const netCf = rowsCf.reduce((a, o) => a + (o.r || 0), 0);
     h += sec(`<section><div class="sec-h"><h2>ЗАКРЫТЫЕ</h2>
-      <span class="note">тап — сделка на графике</span></div>
-      <table class="pos-t">${DATA.last_closed.map(o =>
+      <span class="note">${cfDefs.map(([k, lbl]) =>
+        `<b class="chip${CLOSED_FILTER === k ? " on" : ""}" data-cf="${k}">${lbl}</b>`).join("")}</span></div>
+      ${rowsCf.length ? `<div class="mystat">${rowsCf.length} сд. · итог <b class="${netCf >= 0 ? "up" : "dn"}">${fmtR(netCf)}</b> · тап — сделка на графике</div>
+      <table class="pos-t">${rowsCf.map(o =>
         `<tr data-chart="${o.id}"><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.s)}</span></td>
          <td class="dim">${esc(o.tf)}</td><td class="dim">${esc(o.d)}</td>
          <td class="urc"><b class="${(o.r || 0) >= 0 ? "up" : "dn"}">${fmtR(o.r || 0)}</b></td>
-         <td class="chb">📈</td></tr>`).join("")}</table></section>`);
+         <td class="chb">📈</td></tr>`).join("")}</table>`
+      : `<div class="warn" style="padding:8px 0">по фильтру пусто</div>`}</section>`);
   }
   h += sec(`<div class="foot">Каждая сделка — в проверяемом журнале: /trackrecord у
     @rsirange_bot (CSV + SHA-256, историю нельзя переписать задним числом).
@@ -951,6 +963,8 @@ document.addEventListener("click", e => {
   if (ch) { openChart(ch.dataset.chart); return; }
   const rk = e.target.closest("[data-risk]");
   if (rk) { SIM_RISK = +rk.dataset.risk; render(true); return; }
+  const cf = e.target.closest("[data-cf]");
+  if (cf) { CLOSED_FILTER = cf.dataset.cf; render(true); return; }
   const nb = e.target.closest("[data-nav]");
   if (nb) { NAV = nb.dataset.nav; render(true); return; }
   const tglEl = e.target.closest(".tgl[data-set]");

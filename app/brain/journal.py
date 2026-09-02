@@ -910,3 +910,46 @@ def signal_xray(sid: int) -> dict | None:
         "trail_peak_r": max((float(t["r_at_event"]) for t in trail
                              if t["r_at_event"] is not None), default=None),
     }
+
+
+def kelly_stats(since_created: str | None = None) -> dict | None:
+    """Критерий Келли по закрытым сделкам журнала: f* = p − (1−p)/b, где b — средний
+    плюс к среднему минусу (в R). Приближение (Келли писан под бинарную ставку,
+    у нас распределение R) — потому наружу идёт ПОЛУ-Келли и только как справка.
+    None: мало сделок (<20), нет плюсов/минусов или f*<=0 — Келли на шуме
+    опаснее его отсутствия."""
+    q = ("SELECT result_r FROM signals WHERE status IN ('tp1','tp2','tp3','stopped') "
+         "AND result_r IS NOT NULL ")
+    args: tuple = ()
+    if since_created:
+        q += "AND created_at >= ? "
+        args = (since_created,)
+    rs = [r["result_r"] for r in db.query(q, args)]
+    n = len(rs)
+    if n < 20:
+        return None
+    wins = [r for r in rs if r > 0]
+    losses = [-r for r in rs if r < 0]
+    if not wins or not losses:
+        return None
+    p = len(wins) / n
+    b = (sum(wins) / len(wins)) / (sum(losses) / len(losses))
+    f = p - (1 - p) / b
+    if f <= 0:
+        return None
+    return {"full": round(f * 100, 1), "half": round(f * 50, 1),
+            "wr": round(p * 100), "b": round(b, 2), "n": n}
+
+
+def best_worst_closed(start_iso: str, end_iso: str) -> tuple[dict | None, dict | None]:
+    """Лучшая и худшая закрытые сделки периода (по result_r) — «разбор недели».
+    (None, None) при пустом периоде; одна сделка -> она же лучшая, худшей нет."""
+    rows = [dict(r) for r in db.query(
+        "SELECT * FROM signals WHERE status IN ('tp1','tp2','tp3','stopped') "
+        "AND result_r IS NOT NULL AND closed_at >= ? AND closed_at < ? "
+        "ORDER BY result_r DESC, id", (start_iso, end_iso))]
+    if not rows:
+        return None, None
+    best = rows[0]
+    worst = rows[-1] if len(rows) > 1 else None
+    return best, worst

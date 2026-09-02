@@ -852,3 +852,50 @@ def test_stats_period_and_epoch_total_move_pct(fresh_db):
     from app.delivery import templates
     txt = templates.render_weekly_digest("18–24.08", wk, journal.stats())
     assert "Чистого хода забрано: <b>+4.0%</b>" in txt
+
+
+def _ins_closed(db, sid, r, closed):
+    # created_at уникален на sid: UNIQUE(exchange,symbol,tf,side,created_at)
+    created = f"2026-07-01T{sid % 24:02d}:{sid % 60:02d}:{sid % 60:02d}+00:00"
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at, closed_at, result_r) VALUES "
+        "(?, 'BTC/USDT:USDT','LONG','1h',100,98,2.0,0.7,'{}','stopped',?,?,?)",
+        (sid, created, closed, r))
+
+
+def test_kelly_stats_gates_and_math(fresh_db):
+    """Келли: None при <20 сделках; при валидной выборке f* = p − (1−p)/b,
+    наружу full/half в процентах; при отрицательном эдже — None."""
+    from app.brain import journal
+    assert journal.kelly_stats() is None                  # пусто
+    # 24 сделки: 12 плюсов по +2R, 12 минусов по −1R -> p=0.5, b=2, f*=0.25
+    for i in range(24):
+        _ins_closed(fresh_db, 800 + i, 2.0 if i % 2 == 0 else -1.0,
+                    f"2026-08-{10 + i % 15:02d}T00:00:00+00:00")
+    ks = journal.kelly_stats()
+    assert ks is not None
+    assert ks["full"] == 25.0 and ks["half"] == 12.5
+    assert ks["wr"] == 50 and ks["b"] == 2.0 and ks["n"] == 24
+    # отрицательный эдж: заменяем плюсы на мелкие -> f*<=0 -> None
+    fresh_db.execute("UPDATE signals SET result_r=0.3 WHERE result_r=2.0")
+    assert journal.kelly_stats() is None
+    # окно since_created отфильтровывает старые
+    assert journal.kelly_stats("2027-01-01") is None
+
+
+def test_best_worst_closed_period(fresh_db):
+    """Разбор недели: лучшая/худшая по result_r строго внутри [start, end);
+    одна сделка -> худшей нет; пустой период -> (None, None)."""
+    from app.brain import journal
+    _ins_closed(fresh_db, 850, 2.5, "2026-08-11T10:00:00+00:00")
+    _ins_closed(fresh_db, 851, -1.0, "2026-08-12T10:00:00+00:00")
+    _ins_closed(fresh_db, 852, 0.5, "2026-08-13T10:00:00+00:00")
+    _ins_closed(fresh_db, 853, 9.9, "2026-08-20T10:00:00+00:00")   # вне периода
+    best, worst = journal.best_worst_closed("2026-08-11T00:00:00+00:00",
+                                            "2026-08-14T00:00:00+00:00")
+    assert best["id"] == 850 and worst["id"] == 851
+    best2, worst2 = journal.best_worst_closed("2026-08-13T00:00:00+00:00",
+                                              "2026-08-14T00:00:00+00:00")
+    assert best2["id"] == 852 and worst2 is None
+    assert journal.best_worst_closed("2025-01-01", "2025-01-02") == (None, None)

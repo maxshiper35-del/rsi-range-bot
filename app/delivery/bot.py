@@ -241,6 +241,20 @@ def format_stats(st: dict, epoch_st: dict | None = None,
     )
 
 
+def format_kelly_line() -> str:
+    """Справка Келли по трек-рекорду ТЕКУЩЕЙ стратегии — приложение к /calc.
+    Пустая строка, если выборка мала или эджа нет (journal.kelly_stats -> None):
+    Келли на шуме опаснее его отсутствия. Наружу — только ПОЛУ-Келли."""
+    from app import runtime
+    ks = journal.kelly_stats(runtime.strategy_epoch())
+    if not ks:
+        return ""
+    return ("\n📐 Справка по трек-рекорду стратегии: полу-Келли ≈ "
+            f"{ks['half']:g}% риска на сделку (WR {ks['wr']}%, "
+            f"плюс/минус ×{ks['b']:g}, n={ks['n']}).\n"
+            "Полный Келли агрессивен и растёт на шуме — больше половины не берут.")
+
+
 def format_calc(deposit: float, risk_pct: float, entry: float, stop: float,
                 max_leverage: int = 20) -> str:
     """Текст /calc: калькулятор позиции через risk.calculate_position."""
@@ -1076,6 +1090,7 @@ ADMIN_COMMANDS = USER_COMMANDS + [
     ("vipchannel", "VIP-канал на нативной Stars-подписке: /vipchannel <@канал> <цена> | status"),
     ("revoke", "снять подписку: /revoke <tg_id>"),
     ("users", "счётчики юзеров"),
+    ("review", "разбор недели в канал сейчас (не ждать понедельника)"),
     ("announce", "объявление в канал + подписчикам"),
     ("confirm", "подтвердить кандидата (semiauto): /confirm <id>"),
     ("reject", "отклонить кандидата (semiauto): /reject <id>"),
@@ -2064,7 +2079,8 @@ def main() -> None:
             await m.answer("Не понял числа. Пример: /calc 1000 2 62340 62980")
             return
         await m.answer(await asyncio.to_thread(
-            format_calc, dep, risk, entry, stop, cfg.max_leverage))
+            lambda: format_calc(dep, risk, entry, stop, cfg.max_leverage)
+            + format_kelly_line()))
 
     # кнопка "Калькулятор" — пошаговый FSM-ввод вместо одной строки с 4 числами.
     # ~F.text.startswith("/") на каждом шаге: если юзер вместо ответа набрал команду
@@ -2149,7 +2165,8 @@ def main() -> None:
         data = await state.get_data()
         await state.clear()
         await m.answer(await asyncio.to_thread(
-            format_calc, data["deposit"], data["risk"], data["entry"], stop, cfg.max_leverage))
+            lambda: format_calc(data["deposit"], data["risk"], data["entry"], stop,
+                                cfg.max_leverage) + format_kelly_line()))
 
     @dp.message(Command("help"))
     @dp.message(F.text == "❓ Помощь")
@@ -2896,6 +2913,26 @@ def main() -> None:
         except Exception as e:                          # noqa: BLE001
             log.warning("refund notify %s: %s", uid, e)
 
+    @dp.message(Command("review"))
+    async def _review_cmd(m):
+        """Ручной «разбор недели»: прошлая полная неделя + текущая до сейчас —
+        всегда есть контент, не надо ждать понедельничного такта."""
+        if not _is_admin(m):
+            return
+        channel = runtime.signals_channel()
+        if not channel or not runtime.channel_enabled():
+            await m.answer("Канал не настроен или постинг выключен.")
+            return
+        now_dt = datetime.now(timezone.utc)
+        w_start, _ = weekly_report_period(now_dt)
+        await m.answer("Собираю разбор недели (карты рендерятся ~полминуты)…")
+        try:
+            await _post_weekly_review(channel, w_start.isoformat(), now_dt.isoformat())
+            await m.answer("✅ Разбор недели запощен в канал.")
+        except Exception as e:                          # noqa: BLE001
+            log.exception("ручной разбор недели")
+            await m.answer(f"⚠️ Не получилось: {str(e)[:150]}")
+
     @dp.message(Command("users"))
     @dp.message(F.text == "👥 Юзеры")
     async def _users(m):
@@ -3070,6 +3107,47 @@ def main() -> None:
         data = build_signal_chart_data(
             sig, sid, df, datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC"))
         return graphics.render_signal_chart(data)
+
+    def _review_chart_png(row):
+        # синхронно (ccxt + Playwright) — только через _render_png. Окно баров тянется
+        # до создания сделки: разбор недели должен показывать ЖИЗНЬ сделки целиком,
+        # стандартные 57 баров у старых закрытий оставляли вход за левым краем
+        from app.data.market_data import fetch_closed_ohlcv
+        sig = journal.row_to_signal(row)
+        tf_s = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(sig.timeframe, 3600)
+        age_s = (datetime.now(timezone.utc)
+                 - datetime.fromisoformat(row["created_at"])).total_seconds()
+        need = min(400, max(57, int(age_s / tf_s) + 20))
+        df = fetch_closed_ohlcv(sig.symbol, sig.timeframe, limit=need)
+        data = build_signal_chart_data(
+            sig, row["id"], df, datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC"))
+        return graphics.render_signal_chart(data)
+
+    async def _post_weekly_review(channel, start_iso, end_iso):
+        """«Разбор недели» в канал: лучшая и худшая сделка с картой и deep-link
+        «Рентген» (идея вкладки Lessons из CryptoCouncil поверх честного журнала).
+        Публикуем И минус — статистика без минусов была бы рекламой."""
+        best, worst = await asyncio.to_thread(journal.best_worst_closed,
+                                              start_iso, end_iso)
+        posts = [(best, "🏆 <b>Сделка недели</b>", "Полный разбор — в один тап ↓")]
+        if worst is not None and worst["result_r"] < 0:
+            posts.append((worst, "🧨 <b>Худшая сделка недели</b>",
+                          "Публикуем и минусы: без них статистика — реклама. Разбор ↓"))
+        for row, head, note in posts:
+            if row is None:
+                continue
+            txt = (f"{head}: {templates.esc(row['symbol'].split('/')[0])} "
+                   f"{row['side']} · {templates.esc(row['timeframe'])} — "
+                   f"<b>{row['result_r']:+.2f}R</b>\n{note}")
+            kb = xray_channel_markup(bot_info["username"], row["id"])
+            try:
+                png = await _render_png(_review_chart_png, row)
+                await bot.send_photo(
+                    channel, BufferedInputFile(png, filename=f"review_{row['id']}.png"),
+                    caption=txt, parse_mode="HTML", reply_markup=kb)
+            except Exception as e:                     # noqa: BLE001 — карта не критична
+                log.warning("разбор недели #%s: карта не собралась: %s", row["id"], e)
+                await bot.send_message(channel, txt, parse_mode="HTML", reply_markup=kb)
 
     def _chart_for_id(sid):
         # синхронно (DB + ccxt + Playwright) — только через asyncio.to_thread. Достаём сигнал
@@ -3617,6 +3695,11 @@ def main() -> None:
                     await asyncio.to_thread(journal.record_ledger_hash, len(rows), checksum)
                 except Exception as e:                      # noqa: BLE001
                     log.warning("еженедельный трек-рекорд: %s", e)
+                try:
+                    await _post_weekly_review(channel, week_start.isoformat(),
+                                              week_end.isoformat())
+                except Exception as e:                      # noqa: BLE001
+                    log.warning("разбор недели: %s", e)
         # недельный ЛИЧНЫЙ дайджест подписчикам (ретеншн) — ВНЕ гейта канала: выключение
         # канала не должно молча убивать подписческую фичу (аудит-2 UX [4]). Отдельный
         # маркер от карточки; маркер ставим ДО рассылки: краш посреди рассылки не должен

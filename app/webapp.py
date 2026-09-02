@@ -294,7 +294,7 @@ def _market_overview() -> list:
     return out
 
 
-def _last_closed_public(limit: int = 12) -> list:
+def _last_closed_public(limit: int = 30) -> list:
     """Последние закрытые с id — публичная таблица «Закрытые» (тап -> график сделки).
     Исходы закрытых и так публичны (/trackrecord CSV) — граница публикации та же."""
     return [{"id": r["id"], "s": r["symbol"].split("/")[0], "side": r["side"],
@@ -636,6 +636,8 @@ def api_stats() -> Response:
         "last_closed": _last_closed_public(),
         "r_all": _r_series(),
         "r_epoch": _r_series(epoch) if epoch else [],
+        "kelly_all": journal.kelly_stats(),
+        "kelly_epoch": journal.kelly_stats(epoch) if epoch else None,
     }
     body = json.dumps(payload, ensure_ascii=False)
     with _STATS_CACHE_LOCK:
