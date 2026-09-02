@@ -265,6 +265,18 @@ def _taken_ids(tg_id: int) -> list[int]:
 _CLOSED = "status IN ('tp1','tp2','tp3','stopped','expired') AND result_r IS NOT NULL"
 
 
+def _r_series(since_created: str | None = None) -> list:
+    """Последовательность result_r в порядке закрытий — сырьё симулятора депозита
+    на дашборде (сложный процент считается на клиенте по выбранному риску)."""
+    q = f"SELECT result_r FROM signals WHERE {_CLOSED} "
+    args: tuple = ()
+    if since_created:
+        q += "AND created_at >= ? "
+        args = (since_created,)
+    q += "ORDER BY closed_at, id"
+    return [round(r["result_r"], 3) for r in db.query(q, args)]
+
+
 def _market_overview() -> list:
     """Вотчлист с последней ценой и суточным ходом — секция «Монеты» дашборда.
     Пусто при протухшем кеше цен (секция честно прячется, а не показывает старьё)."""
@@ -365,6 +377,8 @@ _ADMIN_SETTINGS: dict[str, dict] = {
                           "label": "Мин. confidence", "group": "Сигналы"},
     "max_open_per_side": {"t": "int", "min": 0, "max": 50,
                           "label": "Лимит на сторону (0 = БЕЗ лимита!)", "group": "Сигналы"},
+    "watchlist_auto_enabled": {"t": "bool", "group": "Сигналы",
+                               "label": "Авто-вотчлист (подбирает и экзотику)"},
     "channel_enabled":   {"t": "bool", "label": "Постить в канал", "group": "Канал"},
     "channel_mode":      {"t": "choice", "choices": ("full", "teaser"),
                           "label": "Режим канала", "group": "Канал"},
@@ -419,6 +433,7 @@ def _admin_settings_payload() -> list:
     cur = {
         "paused": runtime.paused(), "min_confidence": runtime.min_confidence(),
         "max_open_per_side": runtime.max_open_per_side(),
+        "watchlist_auto_enabled": runtime.watchlist_auto_enabled(),
         "channel_enabled": runtime.channel_enabled(), "channel_mode": runtime.channel_mode(),
         "sub_price_stars": runtime.price_stars(), "sub_days": runtime.sub_days(),
         "free_signals_per_week": runtime.free_per_week(),
@@ -619,6 +634,8 @@ def api_stats() -> Response:
         "symbols": _symbols_best_worst(),
         "market": _market_overview(),
         "last_closed": _last_closed_public(),
+        "r_all": _r_series(),
+        "r_epoch": _r_series(epoch) if epoch else [],
     }
     body = json.dumps(payload, ensure_ascii=False)
     with _STATS_CACHE_LOCK:

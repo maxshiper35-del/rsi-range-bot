@@ -1429,6 +1429,14 @@ def main() -> None:
         return ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True, keyboard=[
             [KeyboardButton(text=t) for t in row] for row in main_menu_layout(is_admin)])
 
+    def _usdt_tier_price(stars: int) -> float:
+        """Цена тира в USDT: пропорция его Stars-цены к базовому тарифу × базовая
+        USDT-цена — длинные тиры в USDT без отдельных настроек (запрос владельца 02.09)."""
+        base = runtime.price_stars()
+        if base <= 0 or stars <= 0 or runtime.price_usdt() <= 0:
+            return 0.0
+        return round(runtime.price_usdt() * stars / base, 2)
+
     def _subscribe_kb() -> InlineKeyboardMarkup:
         rows = []
         if runtime.intro_price_stars() > 0 and runtime.intro_hours() > 0:
@@ -1463,6 +1471,23 @@ def main() -> None:
             rows.append([InlineKeyboardButton(
                 text=f"💵 {runtime.price_usdt():g} USDT / {runtime.sub_days()} дн",
                 callback_data="pay_usdt")])
+            # длинные тиры в USDT: цена — пропорцией от Stars-цены тира к базовому
+            # (скидки переносятся автоматически, отдельных настроек не нужно)
+            tier_row = []
+            if q > 0 and _usdt_tier_price(q) > 0:
+                tier_row.append(InlineKeyboardButton(
+                    text=f"💵 90д · {_usdt_tier_price(q):g}$",
+                    callback_data="pay_usdt_quarter"))
+            if y > 0 and _usdt_tier_price(y) > 0:
+                tier_row.append(InlineKeyboardButton(
+                    text=f"💵 год · {_usdt_tier_price(y):g}$",
+                    callback_data="pay_usdt_year"))
+            if lf > 0 and _usdt_tier_price(lf) > 0:
+                tier_row.append(InlineKeyboardButton(
+                    text=f"💵 ∞ · {_usdt_tier_price(lf):g}$",
+                    callback_data="pay_usdt_life"))
+            if tier_row:
+                rows.append(tier_row)
         elif runtime.usdt_invoice_url():                # полу-ручной: ссылка на счёт + «Я оплатил»
             rows.append([InlineKeyboardButton(
                 text=f"💵 Оплатить USDT (от {runtime.price_usdt():g}$)",
@@ -1953,11 +1978,12 @@ def main() -> None:
             parse_mode="HTML")
         await cq.answer()
 
-    @dp.callback_query(F.data == "pay_usdt")
-    async def _pay_usdt(cq):
+    async def _usdt_invoice(cq, days: float, amount: float | None, label: str):
+        """Общий путь USDT-инвойсов всех тиров (poll_cryptobot активирует по days
+        из payload, бонус-дни добавляются там же — тиры едут без изменений ядра)."""
         try:
             res = await asyncio.to_thread(payments.create_cryptobot_invoice,
-                                          cq.from_user.id, runtime.sub_days())
+                                          cq.from_user.id, days, amount)
         except Exception as e:                         # noqa: BLE001 — сеть/невалидный токен
             log.warning("create_cryptobot_invoice %s: %s", cq.from_user.id, e)
             res = None
@@ -1972,9 +1998,39 @@ def main() -> None:
         bonus_line = f" +{bonus} дн. бонусом за оплату в USDT." if bonus > 0 else ""
         await bot.send_message(
             cq.from_user.id,
-            "Счёт на оплату в USDT создан. После оплаты подписка активируется "
-            f"автоматически (проверка раз в ~минуту).{bonus_line}", reply_markup=kb)
+            f"Счёт на оплату в USDT создан ({label}). После оплаты подписка "
+            f"активируется автоматически (проверка раз в ~минуту).{bonus_line}",
+            reply_markup=kb)
         await cq.answer()
+
+    @dp.callback_query(F.data == "pay_usdt")
+    async def _pay_usdt(cq):
+        await _usdt_invoice(cq, runtime.sub_days(), None,
+                            f"{_fmt_days(runtime.sub_days())}")
+
+    @dp.callback_query(F.data == "pay_usdt_quarter")
+    async def _pay_usdt_quarter(cq):
+        amount = _usdt_tier_price(runtime.quarter_price_stars())
+        if amount <= 0:
+            await cq.answer("Тариф выключен.", show_alert=True)
+            return
+        await _usdt_invoice(cq, 90, amount, "90 дней")
+
+    @dp.callback_query(F.data == "pay_usdt_year")
+    async def _pay_usdt_year(cq):
+        amount = _usdt_tier_price(runtime.year_price_stars())
+        if amount <= 0:
+            await cq.answer("Тариф выключен.", show_alert=True)
+            return
+        await _usdt_invoice(cq, 365, amount, "год")
+
+    @dp.callback_query(F.data == "pay_usdt_life")
+    async def _pay_usdt_life(cq):
+        amount = _usdt_tier_price(runtime.lifetime_price_stars())
+        if amount <= 0:
+            await cq.answer("Тариф выключен.", show_alert=True)
+            return
+        await _usdt_invoice(cq, 36500, amount, "навсегда (lifetime)")
 
     @dp.callback_query(F.data == "usdt_claim")
     async def _usdt_claim(cq):

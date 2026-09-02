@@ -56,6 +56,8 @@ header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;
 .hero{display:grid;grid-template-columns:1.15fr 1fr;gap:0;background:var(--panel);
   border:1px solid var(--line);border-radius:8px;margin-top:8px;overflow:hidden}
 .hero-main{padding:16px 14px 14px}
+.hero-num.up{text-shadow:0 0 30px rgba(31,158,110,.3)}
+.hero-num.dn{text-shadow:0 0 30px rgba(246,70,93,.28)}
 .hero-num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:700;
   font-size:clamp(34px,10vw,44px);line-height:1;letter-spacing:-.03em}
 .hero-num.up{color:var(--pos)} .hero-num.dn{color:var(--neg)}
@@ -187,6 +189,19 @@ select.inp{width:auto}
 @keyframes sh{to{background-position:-220% 0}}
 @media (prefers-reduced-motion: reduce){.fx,.live i,.skel::after{animation:none;opacity:1;transform:none}}
 
+/* --- симулятор депозита --- */
+.chip{display:inline-block;padding:2px 10px;margin-left:5px;border:1px solid rgba(139,147,167,.25);
+  border-radius:20px;cursor:pointer;font-size:10.5px;color:var(--ink-2);
+  font-family:"IBM Plex Mono",ui-monospace,monospace;transition:all .15s}
+.chip:active{transform:scale(.94)}
+.chip.on{background:var(--acc);border-color:var(--acc);color:#0b0e14;font-weight:700}
+.sim-hero{display:flex;align-items:baseline;gap:10px;margin:2px 0 4px;flex-wrap:wrap}
+.sim-start{font-size:15px;color:var(--ink-2);font-family:"IBM Plex Mono",ui-monospace,monospace}
+.sim-bal{font-size:34px;font-weight:800;font-family:"IBM Plex Mono",ui-monospace,monospace;
+  letter-spacing:-.5px}
+.sim-bal.up{text-shadow:0 0 26px rgba(31,158,110,.35)}
+.sim-bal.dn{text-shadow:0 0 26px rgba(246,70,93,.3)}
+.sim-pct{font-size:14px;font-family:"IBM Plex Mono",ui-monospace,monospace}
 /* --- монеты (вотчлист с ценой и суточным ходом) --- */
 .coins{display:flex;gap:8px;overflow-x:auto;padding:2px 0 6px;scrollbar-width:none}
 .coins::-webkit-scrollbar{display:none}
@@ -220,8 +235,8 @@ tr[data-chart]:active{background:rgba(139,147,167,.08)}
 </header>
 <div class="nav" id="nav" style="display:none"></div>
 <div class="tabs" id="scope">
-  <div class="tab on" data-s="epoch">новый код</div>
-  <div class="tab" data-s="all">всё время</div>
+  <div class="tab on" data-s="epoch">текущая стратегия</div>
+  <div class="tab" data-s="all">вся история</div>
 </div>
 <div id="app">
   <div class="skel"><div class="sk t"></div><div class="sk big"></div><div class="sk w40"></div></div>
@@ -293,7 +308,8 @@ function pick() {
   const useEpoch = SCOPE === "epoch" && DATA.epoch;
   return { st: useEpoch ? DATA.epoch : DATA.all,
            eq: useEpoch ? DATA.equity_epoch : DATA.equity_all,
-           hold: useEpoch ? DATA.hold_epoch : DATA.hold_all };
+           hold: useEpoch ? DATA.hold_epoch : DATA.hold_all,
+           rs: useEpoch ? (DATA.r_epoch || []) : (DATA.r_all || []) };
 }
 
 function navItems() {
@@ -413,6 +429,20 @@ function renderOverview(noAnim) {
     <div class="cell"><b>${DATA.all.open ?? 0}</b><span>открыто</span></div>
     <div class="cell"><b>${hold ? "~" + Math.round(hold) + "ч" : "—"}</b><span>в сделке</span></div>
   </div>`);
+  const rsim = pick().rs;
+  if (rsim.length >= 5) {
+    const sim = simCompute(rsim, SIM_RISK);
+    h += sec(`<section><div class="sec-h"><h2>СИМУЛЯТОР ДЕПОЗИТА</h2>
+      <span class="note">риск на сделку: ${[1, 2, 5].map(pp =>
+        `<b class="chip${pp === SIM_RISK ? " on" : ""}" data-risk="${pp}">${pp}%</b>`).join("")}</span></div>
+      <div class="sim-hero"><span class="sim-start">$100 →</span>
+        <b class="sim-bal ${sim.bal >= 100 ? "up" : "dn"}">${fmtUsd(sim.bal)}</b>
+        <span class="sim-pct ${sim.pct >= 0 ? "up" : "dn"}">${sim.pct >= 0 ? "+" : ""}${sim.pct.toFixed(1)}%</span></div>
+      <div class="mystat">${rsim.length} сделок · макс. просадка −${sim.maxDD.toFixed(1)}% · риск считается от текущего баланса</div>
+      <div class="plot">${simSVG(sim.series)}</div>
+      <div class="mystat" style="margin:6px 0 0;color:var(--ink-3)">Модель по закрытым сделкам журнала (порядок закрытий); R — по ценам биржи, комиссии и проскальзывание не учтены. Не прогноз и не гарантия.</div>
+      </section>`);
+  }
   if ((DATA.market || []).length) {
     h += sec(`<section><div class="sec-h"><h2>МОНЕТЫ</h2>
       <span class="note">вотчлист · ход за сутки</span></div>
@@ -777,6 +807,48 @@ setInterval(() => {
   }).catch(() => {});
 }, 60000);
 
+// --- симулятор депозита: сложный процент по закрытым сделкам журнала ---
+let SIM_RISK = 2;
+const fmtUsd = v => "$" + (v >= 1000
+  ? v.toLocaleString("en-US", {maximumFractionDigits: 0})
+  : v.toFixed(v >= 100 ? 0 : 2));
+function simCompute(rs, riskPct) {
+  let bal = 100, peak = 100, maxDD = 0;
+  const series = [100];
+  for (const r of rs) {
+    bal = Math.max(0, bal * (1 + riskPct / 100 * r));
+    peak = Math.max(peak, bal);
+    if (peak > 0) maxDD = Math.max(maxDD, (peak - bal) / peak * 100);
+    series.push(+bal.toFixed(2));
+  }
+  return {bal, pct: (bal / 100 - 1) * 100, maxDD, series};
+}
+function simSVG(series) {
+  if (series.length < 2) return "";
+  const W = 640, H = 190, P = {l: 8, r: 62, t: 12, b: 8};
+  const yMin = Math.min(...series), yMax = Math.max(...series);
+  const X = i => P.l + i * (W - P.l - P.r) / (series.length - 1);
+  const Y = v => P.t + (yMax - v) * (H - P.t - P.b) / (yMax - yMin || 1);
+  const good = series[series.length - 1] >= 100;
+  const col = good ? "var(--pos)" : "var(--neg)";
+  let g = `<defs><linearGradient id="simfade" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="${col}" stop-opacity=".16"/>
+    <stop offset="1" stop-color="${col}" stop-opacity="0"/></linearGradient></defs>`;
+  for (let k = 0; k <= 2; k++) {
+    const v = yMin + k * (yMax - yMin) / 2, y = Y(v);
+    g += `<line x1="${P.l}" x2="${W - P.r}" y1="${y}" y2="${y}" stroke="var(--grid)"/>
+          <text x="${W - P.r + 6}" y="${y + 4}" font-size="10" font-family="IBM Plex Mono,monospace" fill="var(--ink-3)">${fmtUsd(v)}</text>`;
+  }
+  if (yMin < 100 && yMax > 100)
+    g += `<line x1="${P.l}" x2="${W - P.r}" y1="${Y(100)}" y2="${Y(100)}" stroke="var(--zero)" stroke-dasharray="3 3"/>`;
+  const pts = series.map((v, i) => X(i).toFixed(1) + " " + Y(v).toFixed(1));
+  const path = "M" + pts.join("L");
+  g += `<path d="${path}L${X(series.length - 1)} ${Y(yMin)}L${X(0)} ${Y(yMin)}Z" fill="url(#simfade)"/>`;
+  g += `<path d="${path}" fill="none" stroke="${col}" stroke-width="2" stroke-linejoin="round"/>`;
+  g += `<circle cx="${X(series.length - 1)}" cy="${Y(series[series.length - 1])}" r="3.5" fill="${col}"/>`;
+  return `<svg viewBox="0 0 ${W} ${H}">${g}</svg>`;
+}
+
 // --- монеты: формат цены и цвет бейджа (детерминированный от тикера) ---
 function fmtPx(p) {
   if (p >= 1000) return p.toLocaleString("en-US", {maximumFractionDigits: 0});
@@ -877,6 +949,8 @@ document.addEventListener("click", e => {
 document.addEventListener("click", e => {
   const ch = e.target.closest("[data-chart]");
   if (ch) { openChart(ch.dataset.chart); return; }
+  const rk = e.target.closest("[data-risk]");
+  if (rk) { SIM_RISK = +rk.dataset.risk; render(true); return; }
   const nb = e.target.closest("[data-nav]");
   if (nb) { NAV = nb.dataset.nav; render(true); return; }
   const tglEl = e.target.closest(".tgl[data-set]");

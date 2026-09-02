@@ -437,7 +437,7 @@ def _cryptobot_call(method: str, params: dict, post: bool = True):
     return body["result"]
 
 
-def create_cryptobot_invoice(tg_id: int, days: int, amount: float | None = None):
+def create_cryptobot_invoice(tg_id: int, days: float, amount: float | None = None):
     """Создать USDT-инвойс, записать pending-платёж. -> (pay_url, invoice_id) | None."""
     from app import runtime
 

@@ -463,3 +463,20 @@ def test_stats_market_and_last_closed(fresh_db, monkeypatch):
     lc = d["last_closed"]
     assert lc and lc[0]["id"] == 710 and lc[0]["s"] == "BTC" and lc[0]["r"] == 1.0
     assert "entry" not in lc[0] and "stop" not in lc[0]   # уровни не в этом списке
+
+
+def test_stats_r_series_for_simulator(fresh_db):
+    """r_all/r_epoch — последовательность result_r в порядке закрытий: сырьё
+    симулятора депозита (сложный процент считается на клиенте)."""
+    from app import db
+    from app.webapp import app as flask_app
+    for i, (r, closed) in enumerate([(1.5, "2026-08-10"), (-1.0, "2026-08-11"),
+                                     (2.2, "2026-08-12")]):
+        db.execute(
+            "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+            "confidence, snapshot_json, status, created_at, closed_at, result_r) VALUES "
+            f"(72{i},'BTC/USDT:USDT','LONG','1h',100,98,2.0,0.7,'{{}}','stopped',"
+            f"'2026-08-0{i + 1}T00:00:00+00:00','{closed}T00:00:00+00:00',{r})")
+    d = flask_app.test_client().get("/api/stats").get_json()
+    assert d["r_all"] == [1.5, -1.0, 3.2] or d["r_all"] == [1.5, -1.0, 2.2]
+    assert d["r_all"] == [1.5, -1.0, 2.2]
