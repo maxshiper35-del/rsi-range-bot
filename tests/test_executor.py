@@ -120,6 +120,99 @@ def test_calc_qty_symbol_budget(fresh_db):
     assert ex._active_notional("BBB/USDT:USDT", "SHORT") == 0.0
 
 
+def test_cancel_deferred_stop_parses_note():
+    """Снятие довешенного стопа: только note 'sl:<id>'; чужие/пустые note — no-op;
+    «ордера нет» на бирже — не ошибка (цель достигнута)."""
+    from app.v2 import bingx_executor as ex
+
+    calls = []
+
+    class _Ex:
+        def cancel_order(self, oid, symbol):
+            calls.append((oid, symbol))
+            raise RuntimeError("order not exist")
+
+    ex._cancel_deferred_stop(_Ex(), {"note": "sl:123", "symbol": "AAA/USDT:USDT"})
+    assert calls == [("123", "AAA/USDT:USDT")]
+    ex._cancel_deferred_stop(_Ex(), {"note": "стоп отложен до филла", "symbol": "A"})
+    ex._cancel_deferred_stop(_Ex(), {"note": None, "symbol": "A"})
+    ex._cancel_deferred_stop(_Ex(), {"note": "sl:", "symbol": "A"})
+    assert len(calls) == 1                                   # прочие note не трогают биржу
+
+    class _ExBad:
+        def cancel_order(self, oid, symbol):
+            raise RuntimeError("timeout")
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError):                       # настоящий сбой не глотается
+        ex._cancel_deferred_stop(_ExBad(), {"note": "sl:9", "symbol": "A"})
+
+
+def test_effective_filled_trigger_semantics():
+    """Сработавший TRIGGER_MARKET у BingX: status=closed, filled=0 (исполнение в
+    отдельном ордере, смоук 02.09) — считается филлом на ПОЛНЫЙ учётный объём.
+    canceled/open без филла — не филл; обычный частичный филл — как есть."""
+    from app.v2 import bingx_executor as ex
+    t = {"qty": 5.0}
+    assert ex._effective_filled({"status": "closed", "filled": 0.0}, t) == 5.0
+    assert ex._effective_filled({"status": "closed", "filled": 3.0}, t) == 3.0
+    assert ex._effective_filled({"status": "canceled", "filled": 0.0}, t) == 0.0
+    assert ex._effective_filled({"status": "open", "filled": 0.0}, t) == 0.0
+    assert ex._effective_filled(None, t) == 0.0
+
+
+def test_record_fill_idempotent(fresh_db):
+    """_record_fill пишет цену/объём/комиссию входа и НЕ перетирает уже записанное
+    (COALESCE): повторный вызов из другого пути не портит данные отчёта."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at) VALUES "
+        "(902,'CCC/USDT:USDT','LONG','1h',100,98,2.0,0.7,'{}','open',"
+        "'2026-08-31T00:00:00+00:00')")
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, created_at) VALUES (902,'CCC/USDT:USDT','LONG',10,100,98,"
+        "'rsiE902','placed','2026-08-31T00:00:00+00:00')")
+    ex._record_fill(902, {"filled": 10, "average": 100.05, "fee": {"cost": 0.5}})
+    row = db.query_one("SELECT fill_px, fill_qty, fill_fee FROM executor_orders "
+                       "WHERE signal_id=902")
+    assert row["fill_px"] == 100.05 and row["fill_qty"] == 10 and row["fill_fee"] == 0.5
+    ex._record_fill(902, {"filled": 10, "average": 999.0, "fee": {"cost": 9.9}})
+    row = db.query_one("SELECT fill_px FROM executor_orders WHERE signal_id=902")
+    assert row["fill_px"] == 100.05                          # не перетёрто
+    # пустой/нефилленный ордер — no-op
+    ex._record_fill(902, None)
+    ex._record_fill(902, {"filled": 0})
+
+
+def test_bump_retry_and_budget_requeue(fresh_db):
+    """Ретраи cancel/close считаются в note ('retry#N'); скип по бюджету возвращается
+    в очередь удалением строки, когда бюджет освободился и прошло 30 мин."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at) VALUES "
+        "(903,'DDD/USDT:USDT','LONG','1h',10,9,2.0,0.7,'{}','open',"
+        "'2026-08-31T00:00:00+00:00')")
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, created_at, updated_at, note) VALUES "
+        "(903,'DDD/USDT:USDT','LONG',0,10,9,'','error','2026-08-31T00:00:00+00:00',"
+        "'2026-08-31T00:00:00+00:00','бюджет номинала символа/стороны исчерпан')")
+    assert ex._bump_retry(903, RuntimeError("сеть")) == 1
+    assert ex._bump_retry(903, RuntimeError("сеть")) == 2
+    # note перезаписан ретраем — вернём бюджетный текст для проверки requeue
+    db.execute("UPDATE executor_orders SET note='бюджет номинала', "
+               "updated_at='2026-08-31T00:00:00+00:00' WHERE signal_id=903")
+    ex._retry_budget_skips({903})
+    assert db.query_one("SELECT 1 FROM executor_orders WHERE signal_id=903") is None
+    # сигнал уже не open -> строка (если была бы) не трогается: проверка ветки
+    ex._retry_budget_skips(set())
+
+
 def test_reconcile_self_disables_without_keys(fresh_db, monkeypatch):
     """Тумблер панели мог включить executor без ключей BingX в окружении (локальный
     режим) — reconcile самовыключается одним сообщением, не сыплет AuthenticationError."""
