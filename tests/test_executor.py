@@ -224,3 +224,30 @@ def test_reconcile_self_disables_without_keys(fresh_db, monkeypatch):
     out = ex.reconcile()
     assert out and "выключен сам" in out[0]
     assert runtime.executor_enabled() is False
+
+
+def test_match_orphans_pure():
+    """Сироты: позиция биржи без учёта -> сирота; учтённая (placed/filled) — нет;
+    два сигнала одного символа/стороны сливаются в одну позицию — сравниваем сумму;
+    излишек в пределах 2% — не сирота (округление биржи)."""
+    from app.v2 import bingx_executor as ex
+    positions = [
+        {"symbol": "HYPE/USDT:USDT", "side": "long", "contracts": 81.0643,
+         "entryPrice": 55.545, "unrealizedPnl": 2163.1},
+        {"symbol": "HYPE/USDT:USDT", "side": "short", "contracts": 18.1597,
+         "entryPrice": 82.6, "unrealizedPnl": 6.7},
+        {"symbol": "ZEC/USDT:USDT", "side": "short", "contracts": 3.64,
+         "entryPrice": 824.0, "unrealizedPnl": -14.0},
+        {"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.0},
+    ]
+    tracked = [
+        {"symbol": "HYPE/USDT:USDT", "side": "SHORT", "qty": 18.1597},
+        {"symbol": "ZEC/USDT:USDT", "side": "SHORT", "qty": 1.82},
+        {"symbol": "ZEC/USDT:USDT", "side": "SHORT", "qty": 1.8},   # второй сигнал (сумма 3.62)
+    ]
+    orph = ex._match_orphans(positions, tracked)
+    assert [o["symbol"] for o in orph] == ["HYPE/USDT:USDT"]
+    assert orph[0]["side"] == "LONG" and orph[0]["qty"] == 81.0643
+    assert "uPnL +2163" in ex._orphan_line(orph[0])
+    # без учёта вообще — все ненулевые позиции сироты
+    assert len(ex._match_orphans(positions, [])) == 3

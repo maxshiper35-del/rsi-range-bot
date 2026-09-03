@@ -193,10 +193,12 @@ def reconcile() -> list[str]:
     _retry_budget_skips({r["id"] for r in open_rows})
     tracked = _tracked()
     todo = plan(open_rows, tracked, set(ex.markets), since)
-    if not todo:
-        return []
     rows_by_id = {r["id"]: r for r in open_rows}
-    balance = float(ex.fetch_balance().get("total", {}).get("VST", 0.0))
+    # баланс нужен только постановке; без действий такт всё равно идёт дальше —
+    # раньше ранний return пропускал _sync_fill_states и филлы распознавались только
+    # на тактах с другими действиями (задержка в часы, найдено 03.09)
+    balance = (float(ex.fetch_balance().get("total", {}).get("VST", 0.0))
+               if any(a.kind == "place" for a in todo) else 0.0)
 
     for a in todo:
         try:
@@ -355,6 +357,17 @@ def reconcile() -> list[str]:
 
     # переход placed -> filled (информативно): вход исчез из открытых, позиция есть
     _sync_fill_states(ex, report)
+    # сироты: позиции биржи без учёта (наследие сломанного детектора филлов) —
+    # алерт не чаще раза в час, закрытие только по /executor sweep
+    import time as _time
+    if _time.monotonic() - _ORPHAN_ALERT["at"] > 3600:
+        try:
+            orph = _orphan_lines(ex)
+        except Exception as e:                          # noqa: BLE001 — сироты не роняют такт
+            orph = [f"⚠️ проверка сирот: {str(e)[:80]}"]
+        if orph:
+            _ORPHAN_ALERT["at"] = _time.monotonic()
+            report.extend(orph)
     return report
 
 
@@ -686,6 +699,82 @@ def _sync_fill_states(ex, report: list[str]) -> None:
             else:
                 _set_state(t["signal_id"], "cancelled", "снят вне executor")
                 report.append(f"🚫 #{t['signal_id']} {t['symbol']}: вход снят вне executor")
+
+
+_ORPHAN_ALERT: dict = {"at": 0.0}
+
+
+def _match_orphans(positions: list, tracked: list, tol: float = 0.02) -> list:
+    """Позиции биржи, не покрытые учётом executor (placing/placed/filled того же
+    символа/стороны). Несколько сигналов одного символа/стороны сливаются в одну
+    позицию — сравниваем биржевой объём с СУММОЙ учётного; излишек сверх допуска —
+    сирота. -> [{symbol, side, qty, entry, upnl}] (чистая функция, тестируется)."""
+    acct: dict = {}
+    for t in tracked:
+        key = (t["symbol"], t["side"])
+        acct[key] = acct.get(key, 0.0) + float(t["qty"] or 0.0)
+    out = []
+    for p in positions:
+        qty = float(p.get("contracts") or 0.0)
+        if qty <= 0:
+            continue
+        side = (p.get("side") or "").upper()
+        excess = qty - acct.get((p["symbol"], side), 0.0)
+        if excess > qty * tol:
+            out.append({"symbol": p["symbol"], "side": side, "qty": round(excess, 8),
+                        "entry": p.get("entryPrice"), "upnl": p.get("unrealizedPnl")})
+    return out
+
+
+def orphan_positions(ex) -> list:
+    tracked = db.query("SELECT symbol, side, qty FROM executor_orders "
+                       "WHERE state IN ('placing','placed','filled')")
+    return _match_orphans(ex.fetch_positions(), tracked)
+
+
+def _orphan_line(o: dict) -> str:
+    try:
+        upnl = float(o.get("upnl") or 0.0)
+    except (TypeError, ValueError):
+        upnl = 0.0
+    return f"{o['symbol']} {o['side']} {o['qty']:g} @ {o.get('entry')} (uPnL {upnl:+.0f} VST)"
+
+
+def _orphan_lines(ex) -> list[str]:
+    orphans = orphan_positions(ex)
+    if not orphans:
+        return []
+    return ["👻 сирота (позиция без учёта): " + _orphan_line(o) for o in orphans] + \
+        ["→ /executor sweep закроет их по рынку"]
+
+
+def sweep_orphans(close: bool = False) -> list[str]:
+    """Сироты: позиции биржи без учёта executor. Наследие детектора филлов до 31.08:
+    журнал закрывал сделку, executor «снимал» невидимый ему филл, позиция оставалась
+    без хозяина (HYPE #327 и ACE #330 висели 20 дней). close=False — только список;
+    True — закрыть по рынку (reduceOnly, hedged); зовётся ТОЛЬКО админ-командой."""
+    if not os.environ.get("BINGX_API_KEY"):
+        return ["нет ключей BingX"]
+    ex = _exchange()
+    orphans = orphan_positions(ex)
+    if not orphans:
+        return ["сирот нет — все позиции биржи под учётом"]
+    out = []
+    for o in orphans:
+        line = _orphan_line(o)
+        if not close:
+            out.append("👻 " + line)
+            continue
+        side = "sell" if o["side"] == "LONG" else "buy"
+        try:
+            ex.create_order(o["symbol"], "market", side, o["qty"], None,
+                            params={"hedged": True, "reduceOnly": True})
+            out.append("📤 закрыта сирота: " + line)
+        except Exception as e:                          # noqa: BLE001 — одна не роняет остальные
+            out.append(f"⚠️ не закрылась: {line} — {str(e)[:100]}")
+    if not close:
+        out.append("→ /executor sweep закроет их по рынку")
+    return out
 
 
 def execution_report(start_iso: str, end_iso: str) -> str | None:

@@ -2728,6 +2728,11 @@ def main() -> None:
             await m.answer("🤖 Executor ВКЛ (демо BingX, VST). Исполняются только новые "
                            "сигналы. Реальные деньги в v1 невозможны технически.")
             return
+        if arg in ("orphans", "sweep"):
+            # сироты — позиции биржи без учёта executor; sweep закрывает по рынку
+            lines = await asyncio.to_thread(bingx_executor.sweep_orphans, arg == "sweep")
+            await m.answer("🤖 Executor · сироты:\n" + "\n".join(lines))
+            return
         if arg == "off":
             await asyncio.to_thread(runtime.set_value, "executor_enabled", "0")
             await m.answer("🤖 Executor ВЫКЛ. Открытые демо-позиции журналом донашиваться "
@@ -2744,7 +2749,7 @@ def main() -> None:
             f"Риск на сделку: {st['risk_pct']:g}%\n"
             f"Ордеров в учёте: {orders}\n"
             f"Включён с: {st['since'] or '—'}\n"
-            "Команды: /executor on | off", parse_mode="HTML")
+            "Команды: /executor on | off | orphans | sweep", parse_mode="HTML")
 
     @dp.message(Command("setups"))
     async def _setups(m):
