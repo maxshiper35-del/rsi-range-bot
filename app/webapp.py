@@ -780,7 +780,8 @@ def api_backtest() -> Response:
             _BT_CACHE["body"], _BT_CACHE["mtime"] = _BT_JSON.read_bytes(), mtime
         body = _BT_CACHE["body"]
     resp = Response(body, mimetype="application/json")
-    resp.headers["Cache-Control"] = "public, max-age=86400"   # меняется только релизом
+    # меняется только релизом; клиент ревалидирует (cache: no-cache в index)
+    resp.headers["Cache-Control"] = "public, max-age=3600"
     return resp
 
 

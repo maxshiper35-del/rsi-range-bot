@@ -879,7 +879,7 @@ document.querySelectorAll(".tab").forEach(el => el.onclick = () => {
 
 // бэктест по месяцам — статический JSON из репо, грузится параллельно со статами;
 // секция дорисуется, когда придёт (сбой = секции просто нет, страница не страдает)
-fetch("api/backtest").then(r => r.ok ? r.json() : null).then(b => {
+fetch("api/backtest", {cache: "no-cache"}).then(r => r.ok ? r.json() : null).then(b => {
   if (b && b.months) { BT = b; if (DATA && NAV === "over") render(true); }
 }).catch(() => {});
 

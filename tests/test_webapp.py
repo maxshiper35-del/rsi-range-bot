@@ -529,4 +529,4 @@ def test_api_backtest_static_json(fresh_db):
     assert d["period"] == ["2021-07", "2026-07"] and d["fee_pct"] == 0.055
     m = d["months"]["2025-04"]
     assert {"n", "r", "w"} <= set(m) and m["n"] > 0
-    assert "max-age=86400" in r.headers.get("Cache-Control", "")
+    assert "max-age=3600" in r.headers.get("Cache-Control", "")
