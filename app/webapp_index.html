@@ -587,7 +587,11 @@ function renderOverview(noAnim) {
         <span>убыточных подряд <b>≤${worstRun}</b></span>
         <span>сделок <b>${T.trades || "—"}</b></span>
         <span>на сделку <b>${T.expectancy_r != null ? fmtR(T.expectancy_r, 2) : "—"}</b></span>
-        <span>просадка <b class="dn">−${T.max_dd_r != null ? T.max_dd_r.toFixed(0) : "—"}R</b></span>
+        <span>просадка <b class="dn">−${T.max_dd_r != null ? T.max_dd_r.toFixed(0) : "—"}R</b>${(() => {
+          const w = BT.max_dd_window; if (!w) return "";
+          const f = s => s ? s.slice(8, 10) + "." + s.slice(5, 7) + "." + s.slice(0, 4) : "?";
+          return ` <span class="dim">(${f(w.peak)} → ${f(w.trough)}, ${w.days} дн., по сделкам — глубже месячных итогов)</span>`;
+        })()}</span>
       </div>
       <div class="mystat" style="margin:6px 0 0;color:var(--ink-3)">Текущая конфигурация стратегии на 5-летней истории ${(BT.symbols || []).length} эталонных монет (${(BT.period || []).join(" → ")}), 1h+4h, тейкерские издержки и фандинг учтены. Прошлое ≠ будущее: выборка монет выбрана из выживших, реальная ликвидность и слип на тонких альтах не смоделированы.</div>
       </section>`);

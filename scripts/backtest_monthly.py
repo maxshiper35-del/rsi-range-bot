@@ -40,6 +40,32 @@ def run(fee: float) -> dict:
     per: dict = defaultdict(list)
     for t in rep.detail:
         per[(t.exit_dt.year, t.exit_dt.month)].append(t.result_r)
+    # окно макс. просадки по ПОСДЕЛОЧНОЙ эквити (пик -> дно -> восстановление):
+    # месячные ячейки прячут ход внутри месяцев, посетители спрашивают «откуда −50R»
+    tr = sorted(rep.detail, key=lambda t: t.exit_dt)
+    eq = peak = 0.0
+    peak_dt = tr[0].exit_dt if tr else None
+    worst = (0.0, None, None, 0.0)
+    for t in tr:
+        eq += t.result_r
+        if eq > peak:
+            peak, peak_dt = eq, t.exit_dt
+        if peak - eq > worst[0]:
+            worst = (peak - eq, peak_dt, t.exit_dt, peak)
+    dd, pdt, tdt, pk = worst
+    rec_dt = None
+    eq = 0.0
+    for t in tr:
+        eq += t.result_r
+        if tdt is not None and t.exit_dt > tdt and eq >= pk:
+            rec_dt = t.exit_dt
+            break
+    dd_window = ({"r": round(dd, 2), "peak": pdt.date().isoformat(),
+                  "trough": tdt.date().isoformat(),
+                  "recovered": rec_dt.date().isoformat() if rec_dt else None,
+                  "days": (tdt - pdt).days,
+                  "trades": sum(1 for t in tr if pdt < t.exit_dt <= tdt)}
+                 if pdt is not None and tdt is not None else None)
     months = {f"{y}-{m:02d}": {"n": len(rs), "r": round(sum(rs), 2),
                                "w": sum(1 for x in rs if x > 0)}
               for (y, m), rs in sorted(per.items())}
@@ -56,6 +82,7 @@ def run(fee: float) -> dict:
                    "profit_factor": round(rep.profit_factor, 3),
                    "max_dd_r": round(rep.max_drawdown_r, 2)},
         "by_setup": setups,
+        "max_dd_window": dd_window,
         "months": months,
     }
 
