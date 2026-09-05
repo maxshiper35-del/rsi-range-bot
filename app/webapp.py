@@ -763,6 +763,27 @@ def api_trade_chart() -> Response:
     return _no_store(payload)
 
 
+_BT_JSON = Path(__file__).with_name("backtest_monthly.json")
+_BT_CACHE: dict = {"mtime": 0.0, "body": None}
+
+
+@app.get("/api/backtest")
+def api_backtest() -> Response:
+    """Помесячный бэктест текущей конфигурации (scripts/backtest_monthly.py) —
+    статический JSON из репо, НЕ живой журнал: секция дашборда подписана как модель."""
+    try:
+        mtime = _BT_JSON.stat().st_mtime
+    except OSError:
+        return _no_store({"ok": False, "err": "бэктест не собран"}, 404)
+    with _STATS_CACHE_LOCK:
+        if _BT_CACHE["body"] is None or _BT_CACHE["mtime"] != mtime:
+            _BT_CACHE["body"], _BT_CACHE["mtime"] = _BT_JSON.read_bytes(), mtime
+        body = _BT_CACHE["body"]
+    resp = Response(body, mimetype="application/json")
+    resp.headers["Cache-Control"] = "public, max-age=86400"   # меняется только релизом
+    return resp
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     """Лёгкий пульс для сторожа туннеля (deploy/tunnel_webapp.sh) и мониторинга:

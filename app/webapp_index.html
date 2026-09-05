@@ -189,6 +189,21 @@ select.inp{width:auto}
 @keyframes sh{to{background-position:-220% 0}}
 @media (prefers-reduced-motion: reduce){.fx,.live i,.skel::after{animation:none;opacity:1;transform:none}}
 
+/* --- бэктест по месяцам (тепловая сетка) --- */
+.bt-wrap{overflow-x:auto;scrollbar-width:none}
+.bt-wrap::-webkit-scrollbar{display:none}
+.bt{display:grid;grid-template-columns:38px repeat(12,minmax(24px,1fr)) 46px;gap:2px;
+  min-width:420px;font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:9.5px}
+.bt .h{color:var(--ink-3);text-align:center;padding:2px 0 3px;font-size:9px}
+.bt .y{color:var(--ink-2);display:flex;align-items:center;font-size:10px}
+.bt .c{height:24px;display:flex;align-items:center;justify-content:center;border-radius:4px;
+  color:var(--ink);background:rgba(139,147,167,.07)}
+.bt .c.e{background:transparent;color:var(--ink-3)}
+.bt .t{height:24px;display:flex;align-items:center;justify-content:flex-end;font-weight:700;
+  padding-right:2px}
+.bt-stats{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 4px;font-size:11px;
+  color:var(--ink-2)}
+.bt-stats b{font-family:"IBM Plex Mono",ui-monospace,monospace;color:var(--ink)}
 /* --- симулятор депозита --- */
 .chip{display:inline-block;padding:2px 10px;margin-left:5px;border:1px solid rgba(139,147,167,.25);
   border-radius:20px;cursor:pointer;font-size:10.5px;color:var(--ink-2);
@@ -259,7 +274,7 @@ if (inTg) { tg.ready(); tg.expand();
   if (tg.setHeaderColor) try { tg.setHeaderColor("#0b0e11"); } catch (e) {}
   if (tg.setBackgroundColor) try { tg.setBackgroundColor("#0b0e11"); } catch (e) {} }
 
-let DATA = null, ME = null, ADM = null, SCOPE = "epoch", NAV = "over";
+let DATA = null, ME = null, ADM = null, SCOPE = "epoch", NAV = "over", BT = null;
 let CLOSED_FILTER = "all";
 let toastT = 0;
 function toast(t) {
@@ -496,6 +511,46 @@ function renderOverview(noAnim) {
          <td class="dim">WR ${v.n ? Math.round(v.w / v.n * 100) : 0}%</td>
          <td class="urc"><b class="${v.r >= 0 ? "up" : "dn"}">${fmtR(v.r)}</b></td></tr>`).join("")}
       </table></section>`);
+  }
+  if (BT && BT.months) {
+    const MN = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+    const M = BT.months, years = [...new Set(Object.keys(M).map(k => k.slice(0, 4)))].sort();
+    const vals = Object.values(M).map(v => v.r);
+    const vmax = Math.max(1, ...vals.map(Math.abs));
+    const cell = (r) => {
+      const a = Math.min(1, Math.abs(r) / vmax) * 0.55 + 0.12;
+      const bg = r >= 0 ? `rgba(31,158,110,${a})` : `rgba(246,70,93,${a})`;
+      return `<div class="c" style="background:${bg}" title="${fmtR(r)}">${r > 0 ? "+" : ""}${Math.round(r)}</div>`;
+    };
+    let g = `<div class="h"></div>${MN.map(m => `<div class="h">${m}</div>`).join("")}<div class="h">год</div>`;
+    for (const y of years) {
+      let tot = 0;
+      g += `<div class="y">${y}</div>`;
+      for (let m = 1; m <= 12; m++) {
+        const k = `${y}-${String(m).padStart(2, "0")}`;
+        if (M[k]) { tot += M[k].r; g += cell(M[k].r); } else g += `<div class="c e">·</div>`;
+      }
+      g += `<div class="t ${tot >= 0 ? "up" : "dn"}">${fmtR(tot, 0)}</div>`;
+    }
+    const pos = vals.filter(v => v > 0).length, n = vals.length;
+    const sorted = [...vals].sort((a, b) => a - b);
+    let run = 0, worstRun = 0;
+    for (const k of Object.keys(M).sort()) { run = M[k].r <= 0 ? run + 1 : 0; worstRun = Math.max(worstRun, run); }
+    const T = BT.totals || {};
+    h += sec(`<section><div class="sec-h"><h2>БЭКТЕСТ 5 ЛЕТ · ПО МЕСЯЦАМ</h2>
+      <span class="note">модель, не живой журнал</span></div>
+      <div class="bt-wrap"><div class="bt">${g}</div></div>
+      <div class="bt-stats">
+        <span>плюсовых месяцев <b>${pos}/${n}</b> (${Math.round(pos / n * 100)}%)</span>
+        <span>медиана <b>${fmtR(sorted[Math.floor(n / 2)])}</b></span>
+        <span>худший <b class="dn">${fmtR(sorted[0])}</b></span>
+        <span>убыточных подряд <b>≤${worstRun}</b></span>
+        <span>сделок <b>${T.trades || "—"}</b></span>
+        <span>на сделку <b>${T.expectancy_r != null ? fmtR(T.expectancy_r, 2) : "—"}</b></span>
+        <span>просадка <b class="dn">−${T.max_dd_r != null ? T.max_dd_r.toFixed(0) : "—"}R</b></span>
+      </div>
+      <div class="mystat" style="margin:6px 0 0;color:var(--ink-3)">Текущая конфигурация стратегии на 5-летней истории ${(BT.symbols || []).length} эталонных монет (${(BT.period || []).join(" → ")}), 1h+4h, тейкерские издержки и фандинг учтены. Прошлое ≠ будущее: выборка монет выбрана из выживших, реальная ликвидность и слип на тонких альтах не смоделированы.</div>
+      </section>`);
   }
   const sy = DATA.symbols;
   if (sy && (sy.best || []).length) {
@@ -777,6 +832,12 @@ document.querySelectorAll(".tab").forEach(el => el.onclick = () => {
   document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
   el.classList.add("on"); SCOPE = el.dataset.s; render();
 });
+
+// бэктест по месяцам — статический JSON из репо, грузится параллельно со статами;
+// секция дорисуется, когда придёт (сбой = секции просто нет, страница не страдает)
+fetch("api/backtest").then(r => r.ok ? r.json() : null).then(b => {
+  if (b && b.months) { BT = b; if (DATA && NAV === "over") render(true); }
+}).catch(() => {});
 
 fetch("api/stats").then(r => r.json()).then(d => {
   DATA = d;

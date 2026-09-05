@@ -513,3 +513,20 @@ def test_trade_chart_open_only_for_private(fresh_db, monkeypatch, webapp_token):
     assert c.get("/api/trade_chart?id=730",
                  headers={"Authorization": "tma " + _init_data(webapp_token, 800201)}
                  ).status_code == 404
+
+
+def test_api_backtest_static_json(fresh_db):
+    """/api/backtest отдаёт помесячный бэктест из репо (scripts/backtest_monthly.py):
+    60 месяцев, паритетные тоталы, все три сетапа; кеш по mtime; таксономия сетапов
+    в by_setup — это ВНУТРЕННИЕ ключи, наружу секция показывает только месяцы/тоталы."""
+    from app.webapp import app as flask_app
+    c = flask_app.test_client()
+    r = c.get("/api/backtest")
+    assert r.status_code == 200
+    d = r.get_json()
+    assert len(d["months"]) == 60 and d["totals"]["trades"] == 5353
+    assert set(d["by_setup"]) == {"6226", "LTF-BB", "LTF-OB"}
+    assert d["period"] == ["2021-07", "2026-07"] and d["fee_pct"] == 0.055
+    m = d["months"]["2025-04"]
+    assert {"n", "r", "w"} <= set(m) and m["n"] > 0
+    assert "max-age=86400" in r.headers.get("Cache-Control", "")
