@@ -204,6 +204,15 @@ select.inp{width:auto}
 .bt-stats{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 4px;font-size:11px;
   color:var(--ink-2)}
 .bt-stats b{font-family:"IBM Plex Mono",ui-monospace,monospace;color:var(--ink)}
+@media (max-width:480px){
+  /* телефон: вся сетка год×месяц целиком, без горизонтального скролла */
+  .bt{grid-template-columns:28px repeat(12,minmax(18px,1fr)) 36px;gap:1.5px;min-width:0;
+    font-size:8.5px}
+  .bt .h{font-size:8px;padding:1px 0 2px}
+  .bt .y{font-size:9px}
+  .bt .c,.bt .t{height:21px;border-radius:3px}
+  .bt .t{font-size:8.5px}
+}
 /* --- симулятор депозита --- */
 .chip{display:inline-block;padding:2px 10px;margin-left:5px;border:1px solid rgba(139,147,167,.25);
   border-radius:20px;cursor:pointer;font-size:10.5px;color:var(--ink-2);
