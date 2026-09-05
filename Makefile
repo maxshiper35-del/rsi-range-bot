@@ -67,6 +67,10 @@ deploy:
 	@echo "   рестарт локально: make restart-local"
 	@exit 1
 
+# квартальная пересборка секции «Бэктест 5 лет» — см. deploy/OPS.md (паритет-чек внутри)
+backtest-monthly:
+	$(PY) -m scripts.backtest_monthly --out app/backtest_monthly.json
+
 restart-local:
 	launchctl kickstart -k gui/$$(id -u)/com.rsirange.bot
 	launchctl kickstart -k gui/$$(id -u)/com.rsirange.webapp

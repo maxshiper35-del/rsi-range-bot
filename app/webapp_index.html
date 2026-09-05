@@ -201,6 +201,13 @@ select.inp{width:auto}
 .bt .c.e{background:transparent;color:var(--ink-3)}
 .bt .t{height:24px;display:flex;align-items:center;justify-content:flex-end;font-weight:700;
   padding-right:2px}
+.bt .c.f{box-shadow:inset 0 0 0 1.5px var(--acc)}
+.bt .c.p{opacity:.55}
+.bt-legend{display:flex;flex-wrap:wrap;gap:4px 12px;margin:6px 0 0;font-size:10.5px;color:var(--ink-3)}
+.bt-legend .lg{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;
+  vertical-align:-1px;background:rgba(31,158,110,.45)}
+.bt-legend .lg.f{box-shadow:inset 0 0 0 1.5px var(--acc)}
+.bt-legend .lg.p{opacity:.55}
 .bt-stats{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 4px;font-size:11px;
   color:var(--ink-2)}
 .bt-stats b{font-family:"IBM Plex Mono",ui-monospace,monospace;color:var(--ink)}
@@ -523,13 +530,28 @@ function renderOverview(noAnim) {
   }
   if (BT && BT.months) {
     const MN = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
-    const M = BT.months, years = [...new Set(Object.keys(M).map(k => k.slice(0, 4)))].sort();
+    const M = BT.months;
+    // ФАКТ: живой журнал текущей стратегии (эквити эпохи) — месяцы ПОСЛЕ последнего
+    // месяца модели дорисовываются автоматически, помечены отдельно. Модель и факт
+    // никогда не смешиваются в одной ячейке: граница — последний месяц бэктеста
+    const lastModel = Object.keys(M).sort().pop();
+    const F = {};
+    (DATA.equity_epoch || []).forEach((p, i, arr) => {
+      const k = (p.t || "").slice(0, 7);
+      if (!k || k <= lastModel) return;
+      const r = p.r - (i ? arr[i - 1].r : 0);
+      const f = F[k] || (F[k] = {n: 0, w: 0, r: 0});
+      f.n++; f.w += r > 0 ? 1 : 0; f.r += r;
+    });
+    const nowKey = new Date().toISOString().slice(0, 7);
+    const years = [...new Set([...Object.keys(M), ...Object.keys(F)].map(k => k.slice(0, 4)))].sort();
     const vals = Object.values(M).map(v => v.r);
-    const vmax = Math.max(1, ...vals.map(Math.abs));
-    const cell = (r) => {
+    const vmax = Math.max(1, ...vals.map(Math.abs), ...Object.values(F).map(v => Math.abs(v.r)));
+    const cell = (r, fact, partial) => {
       const a = Math.min(1, Math.abs(r) / vmax) * 0.55 + 0.12;
       const bg = r >= 0 ? `rgba(31,158,110,${a})` : `rgba(246,70,93,${a})`;
-      return `<div class="c" style="background:${bg}" title="${fmtR(r)}">${r > 0 ? "+" : ""}${Math.round(r)}</div>`;
+      const ttl = `${fmtR(r)}${fact ? " · факт (живой журнал)" : " · модель"}${partial ? " · месяц не закончен" : ""}`;
+      return `<div class="c${fact ? " f" : ""}${partial ? " p" : ""}" style="background:${bg}" title="${ttl}">${r > 0 ? "+" : ""}${Math.round(r)}</div>`;
     };
     let g = `<div class="h"></div>${MN.map(m => `<div class="h">${m}</div>`).join("")}<div class="h">год</div>`;
     for (const y of years) {
@@ -537,10 +559,17 @@ function renderOverview(noAnim) {
       g += `<div class="y">${y}</div>`;
       for (let m = 1; m <= 12; m++) {
         const k = `${y}-${String(m).padStart(2, "0")}`;
-        if (M[k]) { tot += M[k].r; g += cell(M[k].r); } else g += `<div class="c e">·</div>`;
+        if (M[k]) { tot += M[k].r; g += cell(M[k].r, false, false); }
+        else if (F[k]) { tot += F[k].r; g += cell(F[k].r, true, k === nowKey); }
+        else g += `<div class="c e">·</div>`;
       }
       g += `<div class="t ${tot >= 0 ? "up" : "dn"}">${fmtR(tot, 0)}</div>`;
     }
+    const fk = Object.keys(F).sort();
+    const fSum = fk.reduce((a, k) => a + F[k].r, 0), fPos = fk.filter(k => F[k].r > 0).length;
+    const factLine = fk.length
+      ? `<div class="mystat" style="margin-top:6px">факт с ${fk[0]}: <b>${fk.length}</b> мес. · <b class="${fSum >= 0 ? "up" : "dn"}">${fmtR(fSum)}</b> · плюсовых <b>${fPos}/${fk.length}</b> — по живому журналу, обновляется само</div>`
+      : "";
     const pos = vals.filter(v => v > 0).length, n = vals.length;
     const sorted = [...vals].sort((a, b) => a - b);
     let run = 0, worstRun = 0;
@@ -549,6 +578,8 @@ function renderOverview(noAnim) {
     h += sec(`<section><div class="sec-h"><h2>БЭКТЕСТ 5 ЛЕТ · ПО МЕСЯЦАМ</h2>
       <span class="note">модель, не живой журнал</span></div>
       <div class="bt-wrap"><div class="bt">${g}</div></div>
+      <div class="bt-legend"><span><i class="lg m"></i>модель (бэктест до ${lastModel})</span><span><i class="lg f"></i>факт (живой журнал)</span><span><i class="lg p"></i>текущий месяц</span></div>
+      ${factLine}
       <div class="bt-stats">
         <span>плюсовых месяцев <b>${pos}/${n}</b> (${Math.round(pos / n * 100)}%)</span>
         <span>медиана <b>${fmtR(sorted[Math.floor(n / 2)])}</b></span>
