@@ -792,9 +792,31 @@ def admin_revoke(tg_id: int) -> None:
                ("2000-01-01T00:00:00+00:00", clock.utcnow_iso(), tg_id))
 
 
+def subscriber_breakdown() -> dict:
+    """Честная разбивка АКТИВНЫХ подписок (paid_until в будущем):
+    paying — есть хотя бы один оплаченный платёж (реальные деньги);
+    granted — tier='paid' без платежей и без триала (ручной /grant);
+    trial   — выдан триал, платежей нет.
+    Раньше «платных» = tier='paid' — триал ставит тот же tier, и владелец видел
+    7 «платных» при нуле платежей (05-07.09.2026). Доставка сигналов
+    (active_subscriber_ids) НЕ меняется — триальщики сигналы получают."""
+    now = clock.utcnow_iso()
+    r = db.query_one(
+        "SELECT "
+        "SUM(CASE WHEN has_pay THEN 1 ELSE 0 END) AS paying, "
+        "SUM(CASE WHEN NOT has_pay AND trial_granted_at IS NULL AND tier='paid' "
+        "         THEN 1 ELSE 0 END) AS granted, "
+        "SUM(CASE WHEN NOT has_pay AND trial_granted_at IS NOT NULL THEN 1 ELSE 0 END) "
+        "  AS trial "
+        "FROM (SELECT u.tier, u.trial_granted_at, "
+        "      EXISTS(SELECT 1 FROM payments p WHERE p.tg_id=u.tg_id AND p.status='paid') "
+        "        AS has_pay FROM users u WHERE u.paid_until > ?)", (now,))
+    return {k: int((r[k] if r else 0) or 0) for k in ("paying", "granted", "trial")}
+
+
 def user_counts() -> dict:
     total = db.query_one("SELECT COUNT(*) AS c FROM users")["c"]  # type: ignore[index]
-    return {"total": total, "paid": len(active_subscriber_ids())}
+    return {"total": total, "paid": len(active_subscriber_ids()), **subscriber_breakdown()}
 
 
 def _fmt_days(days: float) -> str:

@@ -488,11 +488,10 @@ def api_admin() -> Response:
         "SELECT tg_id, method, amount, currency, days, paid_at FROM payments "
         "WHERE status='paid' ORDER BY paid_at DESC LIMIT 10")]
     now_iso = clock.utcnow_iso()
-    # tier='paid' обязателен: триальщики тоже имеют paid_until в будущем — без
-    # фильтра владелец видел ложную метрику монетизации (аудит 02.09)
-    paid_now = db.query_one(
-        "SELECT COUNT(*) AS n FROM users WHERE tier='paid' AND paid_until > ?",
-        (now_iso,)) or {"n": 0}
+    # «платящих» = есть оплаченный платёж: триал ставит тот же tier='paid', и
+    # фильтр по tier всё равно показывал 7 «платных» при нуле платежей (07.09)
+    bd = payments.subscriber_breakdown()
+    paid_now = {"n": bd["paying"]}
     lapsed = db.query_one(
         "SELECT COUNT(*) AS n FROM users WHERE tier='paid' AND paid_until <= ?",
         (now_iso,)) or {"n": 0}
@@ -512,6 +511,7 @@ def api_admin() -> Response:
             "paused": runtime.paused(),
         },
         "users": {"counts": payments.user_counts(), "paid_now": paid_now["n"],
+                  "trial_now": bd["trial"], "granted_now": bd["granted"],
                   "lapsed": lapsed["n"], "acquisition": payments.acquisition_breakdown(),
                   "recent": recent_users},
         "money": {"payments_n": pays["n"], "payments_sum": round(float(pays["s"]), 2),

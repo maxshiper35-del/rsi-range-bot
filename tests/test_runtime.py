@@ -128,7 +128,8 @@ def test_admin_grant_and_revoke(fresh_db):
     from app.delivery import payments
     assert payments.admin_grant(4242, 14) is True
     assert payments.is_paid(4242) is True
-    assert payments.user_counts() == {"total": 1, "paid": 1}
+    uc = payments.user_counts()
+    assert uc["total"] == 1 and uc["paid"] == 1      # + paying/trial/granted (разбивка 07.09)
     payments.admin_revoke(4242)
     assert payments.is_paid(4242) is False
     assert payments.user_counts()["paid"] == 0
@@ -141,8 +142,9 @@ def test_format_admin_status():
            "channel_mode": "full", "min_confidence": 0.5, "min_impulse_atr": 1.0,
            "min_rr_open_model": 0.5, "max_open_per_side": 6, "enabled_setups": ("6226", "LTF"),
            "price_stars": 1000, "price_usdt": 20, "sub_days": 30, "free_per_week": 3}
-    txt = bot.format_admin_status(eff, {"total": 5, "paid": 2})
-    assert "НА ПАУЗЕ" in txt and "BTC/USDT:USDT" in txt and "платных 2" in txt
+    txt = bot.format_admin_status(
+        eff, {"total": 5, "paid": 2, "paying": 2, "trial": 0, "granted": 0})
+    assert "НА ПАУЗЕ" in txt and "BTC/USDT:USDT" in txt and "платящих 2" in txt
     assert "1000⭐" in txt
 
 

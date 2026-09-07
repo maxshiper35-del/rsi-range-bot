@@ -683,6 +683,8 @@ function renderUsers() {
   <div class="strip">
     <div class="cell"><b>${u.counts.total ?? 0}</b><span>юзеров</span></div>
     <div class="cell"><b class="up">${u.paid_now}</b><span>платят</span></div>
+    <div class="cell"><b>${u.trial_now ?? "—"}</b><span>триал</span></div>
+    <div class="cell"><b>${u.granted_now ?? "—"}</b><span>гранты</span></div>
     <div class="cell"><b class="${u.lapsed ? "dn" : ""}">${u.lapsed}</b><span>истекли</span></div>
     <div class="cell"><b>${m.payments_n}</b><span>платежей</span></div>
   </div>

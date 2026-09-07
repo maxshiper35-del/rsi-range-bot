@@ -896,3 +896,27 @@ def test_taken_stats_and_discipline_render(fresh_db):
     assert templates.render_discipline_block(
         {"closed_n": 0, "closed_r": 0, "taken_n": 0, "taken_r": 0,
          "skipped_n": 0, "skipped_r": 0, "skipped_short": 0, "skipped_long": 0}) == ""
+
+
+def test_subscriber_breakdown_separates_trial_grant_paying(fresh_db):
+    """«Платных» = есть оплаченный платёж. Триал ставит тот же tier='paid' и раньше
+    считался платным (07.09: 7 «платных» при нуле платежей). Грант — tier=paid без
+    платежей и без триала. Истёкшие — не считаются нигде."""
+    from app import db
+    from app.delivery import payments
+    for uid in (1, 2, 3, 4):
+        payments.register_user(uid)
+    # 1 — реальный платёж
+    payments.grant_subscription(1, "stars", 1500, "XTR", 30, "inv-1")
+    # 2 — триал (tier=paid, платежей нет)
+    assert payments.grant_trial(2, 5.0) is True
+    # 3 — ручной грант админом
+    payments.admin_grant(3, 30)
+    # 4 — истёкший триал
+    assert payments.grant_trial(4, 5.0) is True
+    db.execute("UPDATE users SET paid_until='2020-01-01T00:00:00+00:00' WHERE tg_id=4")
+    bd = payments.subscriber_breakdown()
+    assert bd == {"paying": 1, "granted": 1, "trial": 1}
+    uc = payments.user_counts()
+    assert uc["paying"] == 1 and uc["trial"] == 1 and uc["granted"] == 1
+    assert uc["paid"] == 3                       # доставка сигналов: все активные

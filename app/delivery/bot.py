@@ -1204,7 +1204,8 @@ def format_admin_status(eff: dict, users: dict, exposure: dict | None = None,
         f"({'вкл' if eff['channel_enabled'] else 'выкл'} · {eff['channel_mode']})\n"
         f"Цена: {eff['price_stars']}⭐ / {eff['price_usdt']:g} USDT / {eff['sub_days']} дн\n"
         f"Free-лимит: {eff['free_per_week']}/нед\n"
-        f"Юзеров: {users['total']} (платных {users['paid']})"
+        f"Юзеров: {users['total']} (платящих {users.get('paying', 0)}, "
+        f"триал {users.get('trial', 0)}, грантов {users.get('granted', 0)})"
     )
 
 
@@ -2944,7 +2945,9 @@ def main() -> None:
         if not _is_admin(m):
             return
         u = await asyncio.to_thread(payments.user_counts)
-        await m.answer(f"Юзеров: {u['total']}, платных: {u['paid']}")
+        await m.answer(f"Юзеров: {u['total']} · платящих: {u['paying']} · "
+                       f"грантов: {u['granted']} · на триале: {u['trial']}\n"
+                       f"(получают сигналы как платные: {u['paid']})")
 
     @dp.message(Command("announce"))
     async def _announce(m):
