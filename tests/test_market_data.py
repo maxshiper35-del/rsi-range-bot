@@ -202,3 +202,41 @@ def test_top_liquid_symbols_filters_and_sorts():
     top = top_liquid_symbols(10, blacklist=("DOGE/USDT:USDT",), exchange=_StubEx())
     assert top == ["BTC/USDT:USDT", "ETH/USDT:USDT"]         # фильтры + сортировка по объёму
     assert top_liquid_symbols(1, exchange=_StubEx()) == ["BTC/USDT:USDT"]
+
+
+def test_poll_once_paused_scores_open_but_finds_no_new(fresh_db):
+    """Пауза (scan_new=False): новых сигналов нет, но открытая сделка доскоривается.
+    Регрессия 04.10.2026: пауза без скоринга оставляла сигналы open неделями, дашборд
+    показывал плавающие −86R по давно закрытым сделкам (реально +0.66R)."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.brain import journal
+    from app.core.signal_engine import Side, Signal
+
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    held = Signal(symbol="ETH/USDT:USDT", side=Side.LONG, timeframe="1h",
+                  entry=100.0, stop=95.0, take_profits=[110.0], risk_reward=2.0,
+                  confidence=0.7, reasons=["ctx"], created_at=t0.isoformat(),
+                  indicators_snapshot={"setup": "1:1"})
+    sid = journal.record_signal(held)
+
+    def loader(symbol, timeframes):
+        bars = [
+            (t0 + timedelta(hours=1), 102, 105, 99, 101),    # fill
+            (t0 + timedelta(hours=2), 105, 112, 104, 111),   # tp
+        ]
+        dt, o, h, low, c = zip(*bars)
+        df = pd.DataFrame({"dt": dt, "open": o, "high": h, "low": low, "close": c,
+                           "volume": [1000.0] * len(bars)})
+        return {tf: df for tf in timeframes}
+
+    eng = SMCEngine(SMCConfig(use_time_filter=False, min_confidence=0.0))
+    found, closed = poll_once(["ETH/USDT:USDT"], ["1h"], engine=eng, frames_loader=loader,
+                              mode="auto", scan_new=False)
+
+    assert found == []                                  # новых сигналов пауза не плодит
+    assert fresh_db.query_one("SELECT COUNT(*) AS n FROM signals")["n"] == 1
+    row = fresh_db.query_one("SELECT status, result_r FROM signals WHERE id=?", (sid,))
+    assert row["status"] == "tp1" and row["result_r"] == 2.0
+    done = [c for c in closed if c["id"] == sid and c["status"] == "tp1"]
+    assert done and done[0]["closed_at"]                # время бара выхода — для гейта свежести

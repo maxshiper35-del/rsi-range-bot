@@ -54,12 +54,16 @@ def _scoring_limit(symbol: str, tf: str) -> int:
 
 def poll_once(symbols: list, timeframes: list, engine=None,
               frames_loader: Callable | None = None, pause_sec: float = 0.0,
-              mode: str | None = None) -> tuple[list, list]:
+              mode: str | None = None, scan_new: bool = True) -> tuple[list, list]:
     """Один цикл сканирования: по каждому символу загрузить кадры и записать сигналы.
 
     mode: 'auto' — сигнал сразу активен (журнал+статистика); 'semiauto' — кандидат
     на подтверждение оператором. None -> из Settings.signal_mode.
     Возвращает список (Signal, signal_id). Ошибка по одному символу — лог + skip.
+    scan_new=False — режим паузы: новые сигналы не ищем, но открытые сделки ДОСКАРИВАЕМ
+    (филлы/стопы/трейл). Пауза без скоринга оставляла открытые сигналы нескорёнными:
+    дашборд считал «плавающий» R по давно закрытым сделкам (13.09–04.10.2026: −86R на
+    панели при реальных +0.66R тех же 12 сделок).
     """
     from app.brain.smc_setups import SMCEngine
     from app.delivery.bot import scan_auto, scan_semiauto
@@ -89,7 +93,8 @@ def poll_once(symbols: list, timeframes: list, engine=None,
             # бары входного ТФ (самого младшего) — для скоринга исходов
             entry_tf = min(frames, key=lambda t: SMCEngine.TF_MINUTES.get(t, 10 ** 9))
             bars_by_symbol[symbol] = frames[entry_tf]
-            found.extend(scan(symbol, frames, engine))  # (Signal, sid) на каждый входной ТФ
+            if scan_new:
+                found.extend(scan(symbol, frames, engine))  # (Signal, sid) на каждый входной ТФ
         except Exception as e:                          # noqa: BLE001 — один символ не роняет цикл
             log.warning("poll %s: %s", symbol, e)
     # осиротевшие позиции: символы с открытыми сигналами, ВЫПАВШИЕ из вотчлиста
@@ -146,21 +151,19 @@ async def run_poller(on_candidate, engine=None, on_tick=None, on_close=None) -> 
             # успеха дальнейшей работы (скан/on_tick могут упасть, поток жив в любом случае)
             await asyncio.to_thread(runtime.set_last_poller_tick_at, clock.utcnow_iso())
 
-            if runtime.paused():          # пауза: сигналы не ищем, но обслуживаем подписки
-                log.info("poller на паузе — пропускаю скан")
-                found: list = []
-                closed: list = []
-            else:
-                eng = engine or SMCEngine(SMCConfig(
-                    min_confidence=runtime.min_confidence(),
-                    min_impulse_atr=runtime.min_impulse_atr(),
-                    min_rr_open_model=runtime.min_rr_open_model(),
-                    enabled_setups=runtime.enabled_setups(),
-                    htf_block_countertrend=runtime.htf_block_countertrend(),
-                    min_stop_pct=runtime.min_stop_pct(),
-                    use_time_filter=runtime.time_filter_enabled()))
-                found, closed = await asyncio.to_thread(
-                    poll_once, runtime.symbols(), tfs, eng, None, 1.5)
+            paused = runtime.paused()
+            if paused:        # пауза: новые сигналы не ищем, открытые сделки ведём до конца
+                log.info("poller на паузе — новые сигналы не ищу, открытые сопровождаю")
+            eng = engine or SMCEngine(SMCConfig(
+                min_confidence=runtime.min_confidence(),
+                min_impulse_atr=runtime.min_impulse_atr(),
+                min_rr_open_model=runtime.min_rr_open_model(),
+                enabled_setups=runtime.enabled_setups(),
+                htf_block_countertrend=runtime.htf_block_countertrend(),
+                min_stop_pct=runtime.min_stop_pct(),
+                use_time_filter=runtime.time_filter_enabled()))
+            found, closed = await asyncio.to_thread(
+                poll_once, runtime.symbols(), tfs, eng, None, 1.5, scan_new=not paused)
             for sig, sid in found:
                 try:
                     res = on_candidate(sig, sid)

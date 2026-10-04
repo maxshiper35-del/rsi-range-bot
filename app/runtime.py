@@ -59,6 +59,22 @@ def paused() -> bool:
     return (_raw("paused") or "0").lower() in _TRUE
 
 
+def paused_since() -> str | None:
+    """С какого момента стоит пауза (updated_at строки settings) или None, если не на паузе."""
+    if not paused():
+        return None
+    row = db.query_one("SELECT updated_at FROM settings WHERE key='paused'")
+    return row["updated_at"] if row else None
+
+
+def last_pause_reminder_at() -> str | None:
+    return _raw("last_pause_reminder_at")
+
+
+def set_last_pause_reminder_at(iso: str) -> None:
+    set_value("last_pause_reminder_at", iso)
+
+
 def signals_channel() -> str:
     v = _raw("signals_channel")
     return v if v is not None else get_settings().signals_channel

@@ -614,6 +614,7 @@ def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
                  exit_price, r_val, now),                # цена выхода — полный аудит-след
             )
         closed.append({**base, "status": status, "result_r": r_val, "exit_price": exit_price,
+                       "closed_at": exit_dt or now,
                        "price_move_pct": _price_move_pct(row["side"], row["entry"], exit_price)})
     return closed
 

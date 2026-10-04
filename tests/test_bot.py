@@ -1081,3 +1081,32 @@ def test_scrub_reasons_hides_construction():
                  created_at="2026-01-01T00:00:00+00:00", indicators_snapshot={})
     assert "0.62" not in t.render_signal_channel(sig, 1)
     assert "0.62" not in t.render_signal_dm(sig, 1)
+
+
+def test_result_is_fresh():
+    """Посты результатов в канал — только по свежим исходам: запоздалое закрытие
+    (пауза/простой/рестарт) учитывается в журнале, но пачкой в канал не уходит."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
+    def fresh(closed_at):
+        return bot.result_is_fresh({"closed_at": closed_at}, now)
+
+    assert fresh("2026-10-04T11:00:00+00:00") is True
+    assert fresh("2026-10-04T00:30:00+00:00") is True      # 11.5ч
+    assert fresh("2026-10-03T23:00:00+00:00") is False     # 13ч
+    assert fresh("2026-09-13T08:00:00+00:00") is False     # 3 недели
+    assert fresh("2026-10-04T11:00:00") is True            # naive = UTC
+    assert bot.result_is_fresh({}, now) is True            # нет метки — как раньше
+    assert fresh("мусор") is True                          # битая метка не молчит
+
+
+def test_should_remind_pause():
+    now = "2026-10-04T12:00:00+00:00"
+    assert bot.should_remind_pause(None, None, now) is False                       # не на паузе
+    assert bot.should_remind_pause("2026-10-04T08:00:00+00:00", None, now) is False  # 4ч — рано
+    assert bot.should_remind_pause("2026-09-13T18:18:31+00:00", None, now) is True   # 3 недели
+    # напоминали 2ч назад — не спамим; 25ч назад — пора снова
+    assert bot.should_remind_pause("2026-09-13T18:18:31+00:00",
+                                   "2026-10-04T10:00:00+00:00", now) is False
+    assert bot.should_remind_pause("2026-09-13T18:18:31+00:00",
+                                   "2026-10-03T11:00:00+00:00", now) is True

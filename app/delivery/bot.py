@@ -600,6 +600,44 @@ def fill_is_fresh(c: dict, now: datetime, factor: float = 2.0, slack: float = 90
     return (now - filled).total_seconds() <= factor * tf_sec + slack
 
 
+def result_is_fresh(c: dict, now: datetime, max_age_hours: float = 12.0) -> bool:
+    """Свежий ли исход (результат/expired) для поста в канал: бар выхода не старше
+    max_age_hours. Запоздалые закрытия (простой бота, пауза, рестарт) в канал не уходят —
+    пачка трёхнедельных «результатов» с графиками только запутает подписчиков; журнал и
+    дашборд свой учёт получают в любом случае. Нет closed_at -> считаем свежим (поведение
+    как раньше)."""
+    raw = c.get("closed_at")
+    if not raw:
+        return True
+    try:
+        closed = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return True
+    if closed.tzinfo is None:
+        closed = closed.replace(tzinfo=timezone.utc)
+    return (now - closed).total_seconds() <= max_age_hours * 3600
+
+
+def should_remind_pause(paused_since: str | None, last_reminder_at: str | None,
+                        now_iso: str, min_age_hours: float = 12.0,
+                        rethrottle_hours: float = 24.0) -> bool:
+    """Пора ли напомнить админу, что сигналы на паузе: пауза висит >= min_age_hours И
+    (напоминаний ещё не было ИЛИ прошлое >= rethrottle_hours назад). Пауза 13.09–04.10.2026
+    простояла три недели незамеченной — молчащий бот выглядит как сломанный."""
+    if not paused_since:
+        return False
+    now = datetime.fromisoformat(now_iso)
+    since = datetime.fromisoformat(paused_since)
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    if (now - since).total_seconds() < min_age_hours * 3600:
+        return False
+    if not last_reminder_at:
+        return True
+    last = datetime.fromisoformat(last_reminder_at)
+    return (now - last).total_seconds() >= rethrottle_hours * 3600
+
+
 def caption_fits(html_text: str, limit: int = 1024) -> bool:
     """Лимит Telegram на подпись к фото — 1024 символа ВИДИМОГО текста (теги не считаются)."""
     return len(re.sub(r"<[^>]+>", "", html_text)) <= limit
@@ -3433,6 +3471,22 @@ def main() -> None:
                 except Exception as e:                     # noqa: BLE001
                     log.warning("poller stale алерт админу %s: %s", admin_id, e)
             await asyncio.to_thread(runtime.set_last_poller_alert_at, now_)
+        # пауза висит давно — напомнить админу (раз в сутки), чтобы молчание бота не
+        # выглядело поломкой и не стоило недель без сигналов
+        try:
+            since_ = await asyncio.to_thread(runtime.paused_since)
+            if should_remind_pause(since_, runtime.last_pause_reminder_at(), now_):
+                days = (datetime.now(timezone.utc) - datetime.fromisoformat(since_)).days
+                text = (f"⏸ Сигналы на паузе уже {days} дн. — новых сделок нет, канал молчит. "
+                        "Открытые позиции ведутся как обычно. Возобновить: /resume.")
+                for admin_id in cfg.admin_ids:
+                    try:
+                        await bot.send_message(admin_id, text)
+                    except Exception as e:                 # noqa: BLE001
+                        log.warning("pause reminder админу %s: %s", admin_id, e)
+                await asyncio.to_thread(runtime.set_last_pause_reminder_at, now_)
+        except Exception as e:                             # noqa: BLE001
+            log.warning("pause reminder: %s", e)
         # анти-кластерный тормоз: алерт админу ОДИН раз на вход стороны в кулдаун
         # (транзишен-детект через settings; при выходе из окна метка снимается)
         try:
@@ -3827,8 +3881,12 @@ def main() -> None:
         now_dt = datetime.now(timezone.utc)
         resolved_ids = {c["id"] for c in closed if c["status"] != "filled"}
         show_price = runtime.channel_mode() == "full"   # в teaser-режиме цену входа не раскрываем
+        stale_ids: list = []
         for c in closed:
             if c.get("shadow"):
+                continue
+            if c["status"] != "filled" and not result_is_fresh(c, now_dt):
+                stale_ids.append(c["id"])               # учёт в журнале есть, поста не будет
                 continue
             try:
                 if c["status"] == "filled":
@@ -3861,6 +3919,17 @@ def main() -> None:
                              c["id"], c["status"], msg.message_id)
             except Exception as e:                     # noqa: BLE001
                 log.warning("пост цикла сделки в канал #%s: %s", c["id"], e)
+
+        if stale_ids:
+            log.warning("запоздалые закрытия без поста в канал: %s", stale_ids)
+            note = (f"ℹ️ Доскорено задним числом {len(stale_ids)} сделок "
+                    f"({', '.join('#' + str(i) for i in stale_ids[:15])}) — "
+                    "посты в канал не отправлялись (исход устарел), журнал и дашборд обновлены.")
+            for admin_id in cfg.admin_ids:
+                try:
+                    await bot.send_message(admin_id, note)
+                except Exception as e:                  # noqa: BLE001
+                    log.warning("stale-closed заметка админу %s: %s", admin_id, e)
 
         # «вехи как контент» (мега-план MAX): рубеж закрытых сделок -> органический пост
         if any(not c.get("shadow") and c["status"] in ("tp1", "tp2", "tp3", "stopped")
