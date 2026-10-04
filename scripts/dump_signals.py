@@ -8,7 +8,7 @@
   python3 -m scripts.dump_signals --symbols "BTC/USDT:USDT,..." --tfs 1h,4h \
       --setups "6226,1:1,LTF" --htf-map "1h=4h,4h=1d" --window 200 --time-filter
 
-Формат записи: {symbol, tf, bar_index, dt, side, setup, entry, stop, tp, rr, confidence}.
+Формат записи: {symbol, tf, bar_index, dt, side, setup, entry, stop, tp, rr, confidence, scores}.
 Индекс бара — позиция В ЭТОМ CSV (портфельный слой читает тот же кэш баров).
 """
 from __future__ import annotations
@@ -68,6 +68,9 @@ def scan_signals(df: pd.DataFrame, symbol: str, tf: str, cfg: SMCConfig,
             "entry": float(sig.entry), "stop": float(sig.stop),
             "tp": float(sig.take_profits[0]), "rr": float(sig.risk_reward),
             "confidence": float(sig.confidence),
+            # суб-скоры (bias/trigger/sweep/confl) — для замеров гейтов по компонентам;
+            # портфельный слой лишние ключи игнорирует
+            "scores": (sig.indicators_snapshot or {}).get("scores"),
         })
     return out
 
