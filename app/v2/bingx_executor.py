@@ -83,6 +83,39 @@ def _active_notional(symbol: str, side: str) -> float:
     return float(r["s"]) if r and r["s"] else 0.0
 
 
+def daily_guard(day: str, equity: float, anchor_raw: str | None, halt_day: str | None,
+                limit_pct: float) -> tuple[str, bool, bool, float]:
+    """Стоп-кран по дневной просадке эквити (чистая функция).
+
+    -> (якорь для записи, halted, сработал_сейчас, просадка_%). Якорь — 'YYYY-MM-DD|эквити'
+    на первом такте суток; другой день или битый якорь -> новый якорь от текущего эквити.
+    Сработавший кран действует до конца UTC-суток (halt_day == day)."""
+    a_day, a_eq = "", 0.0
+    try:
+        a_day, raw_eq = (anchor_raw or "").split("|", 1)
+        a_eq = float(raw_eq)
+    except ValueError:
+        a_day = ""
+    halted = halt_day == day
+    if a_day != day or a_eq <= 0:
+        return f"{day}|{equity:.4f}", halted, False, 0.0
+    dd = (a_eq - equity) / a_eq * 100.0
+    if not halted and limit_pct > 0 and dd >= limit_pct:
+        return anchor_raw or "", True, True, dd
+    return anchor_raw or "", halted, False, dd
+
+
+def _equity_of(bal: dict) -> float:
+    """Эквити VST (баланс + нереализованный PnL) из ответа BingX; фолбэк — total VST."""
+    data = (bal.get("info") or {}).get("data")
+    rows = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+    for row in rows:
+        if isinstance(row, dict) and row.get("asset", "VST") == "VST" \
+                and row.get("equity") is not None:
+            return float(row["equity"])
+    return float((bal.get("total") or {}).get("VST", 0.0))
+
+
 @dataclass
 class Action:
     kind: str          # 'place' | 'cancel' | 'close' | 'skip'
@@ -194,11 +227,31 @@ def reconcile() -> list[str]:
     tracked = _tracked()
     todo = plan(open_rows, tracked, set(ex.markets), since)
     rows_by_id = {r["id"]: r for r in open_rows}
-    # баланс нужен только постановке; без действий такт всё равно идёт дальше —
-    # раньше ранний return пропускал _sync_fill_states и филлы распознавались только
-    # на тактах с другими действиями (задержка в часы, найдено 03.09)
-    balance = (float(ex.fetch_balance().get("total", {}).get("VST", 0.0))
-               if any(a.kind == "place" for a in todo) else 0.0)
+    # баланс читаем КАЖДЫЙ такт (стоп-кран смотрит эквити), но его сбой не роняет такт:
+    # закрытия важнее постановок — без баланса откладываем только постановку. Раньше
+    # ранний return/исключение пропускали _sync_fill_states и закрытия (найдено 03.09)
+    balance = 0.0
+    try:
+        bal = ex.fetch_balance()
+        balance = float((bal.get("total") or {}).get("VST", 0.0))
+        halted = _apply_daily_guard(_equity_of(bal), report)
+    except Exception as e:                              # noqa: BLE001 — сеть/биржа
+        halted = runtime.executor_halt_day() == clock.utcnow_iso()[:10]
+        if any(a.kind == "place" for a in todo):
+            todo = [a for a in todo if a.kind != "place"]
+            import time as _t
+            if _t.monotonic() - _BALANCE_ALERT["at"] > 3600:
+                _BALANCE_ALERT["at"] = _t.monotonic()
+                report.append(f"⚠️ баланс не читается — постановка входов отложена: "
+                              f"{str(e)[:80]}")
+    if halted:
+        # стоп-кран: новых входов нет, ждущие триггеры снимаем (иначе сработают и добавят
+        # риска), открытые позиции ведём до выхода по журналу — выключение executor целиком
+        # оставило бы их без трейлинг-выхода
+        open_ids = set(rows_by_id)
+        todo = [a for a in todo if a.kind != "place"]
+        todo += [Action("cancel", sid, "стоп-кран") for sid, st in tracked.items()
+                 if st in ("placing", "placed") and sid in open_ids]
 
     for a in todo:
         try:
@@ -311,8 +364,9 @@ def reconcile() -> list[str]:
                     report.append(f"📤 #{a.signal_id} {t['symbol']}: вход снят, "
                                   f"исполненная часть {closed:g} закрыта по рынку")
                 else:
-                    _set_state(a.signal_id, "cancelled")
-                    report.append(f"🚫 #{a.signal_id}: вход снят (журнал закрыл/истёк)")
+                    _set_state(a.signal_id, "cancelled", a.detail or None)
+                    why = "стоп-кран" if a.detail == "стоп-кран" else "журнал закрыл/истёк"
+                    report.append(f"🚫 #{a.signal_id}: вход снят ({why})")
             elif a.kind == "close":
                 t = db.query_one("SELECT * FROM executor_orders WHERE signal_id=?",
                                  (a.signal_id,))
@@ -369,6 +423,26 @@ def reconcile() -> list[str]:
             _ORPHAN_ALERT["at"] = _time.monotonic()
             report.extend(orph)
     return report
+
+
+_BALANCE_ALERT: dict = {"at": 0.0}
+
+
+def _apply_daily_guard(equity: float, report: list[str]) -> bool:
+    """Обновить якорь суток, проверить стоп-кран; при срабатывании — метка и алерт."""
+    day = clock.utcnow_iso()[:10]
+    prev = runtime.executor_day_anchor()
+    anchor, halted, tripped, dd = daily_guard(day, equity, prev, runtime.executor_halt_day(),
+                                              runtime.executor_daily_loss_pct())
+    if anchor != prev:
+        runtime.set_value("executor_day_anchor", anchor)
+    if tripped:
+        runtime.set_value("executor_halt_day", day)
+        report.append(f"⛔ Стоп-кран executor: эквити {equity:,.0f} VST, −{dd:.1f}% за сутки "
+                      f"(порог {runtime.executor_daily_loss_pct():g}%). До 00:00 UTC новые "
+                      "входы не ставлю, ждущие триггеры снимаю, открытые позиции веду до "
+                      "выхода. Порог: /executor limit N".replace(",", " "))
+    return halted
 
 
 _RETRY_RE = _re.compile(r"^retry#(\d+)")
@@ -777,6 +851,31 @@ def sweep_orphans(close: bool = False) -> list[str]:
     return out
 
 
+# начало эпохи входа TRIGGER_MARKET (коммит 6eac140, первый ордер #434 02.09 11:10 UTC);
+# до этого вход шёл лимиткой и филл совпадал с уровнем — в замер слипа не смешиваем
+ENTRY_MODEL_SINCE = "2026-09-02T11:05:00+00:00"
+# правило зарегистрировано 04.10.2026 ДО накопления выборки
+# (docs/measurements/2026-10-04-entry-slip-rule.md)
+SLIP_RULE_MIN_N = 50
+SLIP_RULE_MEAN_R = -0.10
+
+
+def entry_slip_r(r) -> float | None:
+    """Слип входа в R от дистанции стопа (+ = вошли лучше журнального entry)."""
+    risk = abs(r["entry_px"] - r["stop_px"]) if r["entry_px"] and r["stop_px"] else 0.0
+    if not r["fill_px"] or not risk:
+        return None
+    sign = 1.0 if r["side"] == "LONG" else -1.0
+    return sign * (r["entry_px"] - r["fill_px"]) / risk
+
+
+def slip_rule_verdict(slips: list[float]) -> tuple[int, float, bool]:
+    """-> (n, средний слип R, правило сработало). Срабатывает только на полной выборке."""
+    n = len(slips)
+    mean = round(sum(slips) / n, 6) if n else 0.0     # округление: порог включительно
+    return n, mean, n >= SLIP_RULE_MIN_N and mean <= SLIP_RULE_MEAN_R
+
+
 def execution_report(start_iso: str, end_iso: str) -> str | None:
     """Еженедельная сводка «исполнение vs журнал» (только БД, без сети) | None = пусто.
 
@@ -838,6 +937,18 @@ def execution_report(start_iso: str, end_iso: str) -> str | None:
     fees = [f for r in rows for f in (r["fill_fee"], r["close_fee"]) if f]
     if fees:
         lines.append(f"Комиссии (видимые): {sum(fees):.2f} VST")
+    # накопительно с перехода на триггер-маркет — решающее правило по модели входа
+    cum = [x for r in db.query("SELECT * FROM executor_orders WHERE fill_px IS NOT NULL "
+                               "AND created_at >= ?", (ENTRY_MODEL_SINCE,))
+           if (x := entry_slip_r(r)) is not None]
+    if cum:
+        n, mean, hit = slip_rule_verdict(cum)
+        lines.append(f"Слип входа накопительно (триггер-маркет с 02.09): {mean:+.3f}R, "
+                     f"n={n}/{SLIP_RULE_MIN_N}")
+        if hit:
+            lines.append(f"⚠️ ПРАВИЛО СРАБОТАЛО: средний слип ≤ {SLIP_RULE_MEAN_R:+.2f}R на "
+                         f"{n} входах — модель входа съедает эдж, пересмотреть (замер по "
+                         "docs/measurements/2026-10-04-entry-slip-rule.md)")
     for r in errors[:3]:
         lines.append(f"⚠️ #{r['signal_id']}: {(r['note'] or '')[:80]}")
     lines.append("<i>Демо BingX (VST) — проверка исполнения перед гейтом 28.08.</i>")
@@ -850,7 +961,9 @@ def status() -> dict:
     for r in db.query("SELECT state, COUNT(*) AS n FROM executor_orders GROUP BY state"):
         counts[r["state"]] = r["n"]
     out = {"enabled": runtime.executor_enabled(), "since": runtime.executor_since(),
-           "risk_pct": runtime.executor_risk_pct(), "orders": counts, "vst": None}
+           "risk_pct": runtime.executor_risk_pct(), "orders": counts, "vst": None,
+           "loss_limit_pct": runtime.executor_daily_loss_pct(),
+           "halted_today": runtime.executor_halt_day() == clock.utcnow_iso()[:10]}
     if out["enabled"]:
         try:
             ex = _exchange()

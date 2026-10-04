@@ -67,6 +67,11 @@ def paused_since() -> str | None:
     return row["updated_at"] if row else None
 
 
+def last_overdue_alert_at() -> str | None:
+    """Когда последний раз алертили «судья не разрешает сигналы» — троттлинг."""
+    return _raw("last_overdue_alert_at")
+
+
 def last_pause_reminder_at() -> str | None:
     return _raw("last_pause_reminder_at")
 
@@ -441,6 +446,25 @@ def executor_enabled() -> bool:
 def executor_risk_pct() -> float:
     """Риск на сделку executor'а в % от баланса VST (демо). Дефолт 1.0."""
     return _num("executor_risk_pct", float, 1.0)
+
+
+def executor_daily_loss_pct() -> float:
+    """Стоп-кран executor: эквити упало за UTC-сутки (от якоря первого такта суток) на этот
+    процент и больше -> до 00:00 UTC новые входы не ставятся, ждущие триггеры снимаются,
+    открытые позиции ведутся до выхода по журналу. 0 = выключен. Дефолт 5.0: на демо с капом
+    номинала 1500 USDT это защита от СБОЯ (зацикленные ордера, аномалия биржи), а не торговое
+    правило — обычный плохой день до порога не доходит."""
+    return _num("executor_daily_loss_pct", float, 5.0)
+
+
+def executor_day_anchor() -> str | None:
+    """'YYYY-MM-DD|эквити' — эквити на первом такте UTC-суток (база стоп-крана)."""
+    return _raw("executor_day_anchor")
+
+
+def executor_halt_day() -> str | None:
+    """UTC-дата, на которую сработал стоп-кран (в другие сутки — не действует)."""
+    return _raw("executor_halt_day")
 
 
 def executor_since() -> str | None:

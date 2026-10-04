@@ -251,3 +251,139 @@ def test_match_orphans_pure():
     assert "uPnL +2163" in ex._orphan_line(orph[0])
     # без учёта вообще — все ненулевые позиции сироты
     assert len(ex._match_orphans(positions, [])) == 3
+
+
+def test_daily_guard_pure():
+    """Стоп-кран: якорь на первом такте суток; срабатывание на пороге; держится до конца
+    суток; новый день — новый якорь и снятие; 0 = выключен; битый якорь пересоздаётся."""
+    from app.v2.bingx_executor import daily_guard
+    day = "2026-10-04"
+    # нет якоря -> ставим от текущего эквити
+    assert daily_guard(day, 100_000, None, None, 5.0) == \
+        (f"{day}|100000.0000", False, False, 0.0)
+    a = f"{day}|100000.0000"
+    _, halted, tripped, dd = daily_guard(day, 96_000, a, None, 5.0)
+    assert (halted, tripped) == (False, False) and round(dd, 1) == 4.0
+    _, halted, tripped, dd = daily_guard(day, 95_000, a, None, 5.0)
+    assert (halted, tripped) == (True, True) and round(dd, 1) == 5.0
+    # уже сработал сегодня — держится и после отскока, повторно не «срабатывает»
+    assert daily_guard(day, 99_000, a, day, 5.0)[1:3] == (True, False)
+    # новые сутки: якорь заново, вчерашний кран не действует
+    anchor, halted, tripped, _ = daily_guard("2026-10-05", 95_000, a, day, 5.0)
+    assert anchor == "2026-10-05|95000.0000" and (halted, tripped) == (False, False)
+    # выключен
+    assert daily_guard(day, 50_000, a, None, 0.0)[1:3] == (False, False)
+    # битый якорь
+    assert daily_guard(day, 1000, "мусор", None, 5.0)[0] == f"{day}|1000.0000"
+
+
+def test_equity_of_bingx_shape():
+    from app.v2.bingx_executor import _equity_of
+    bal = {"info": {"data": [{"asset": "VST", "balance": "100", "equity": "93.5"}]},
+           "total": {"VST": 100.0}}
+    assert _equity_of(bal) == 93.5
+    assert _equity_of({"info": {}, "total": {"VST": 77.0}}) == 77.0     # фолбэк
+
+
+def _seed_halt_case():
+    from app import db
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at) VALUES "
+        "(911,'EEE/USDT:USDT','LONG','1h',10,9,2.0,0.7,'{}','open',"
+        "'2026-10-04T01:00:00+00:00'),"
+        "(912,'FFF/USDT:USDT','LONG','1h',10,9,2.0,0.7,'{}','open',"
+        "'2026-10-04T01:00:00+00:00')")
+    # 911 — уже стоящий триггер; 912 — новый, ещё не поставлен
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, created_at) VALUES (911,'EEE/USDT:USDT','LONG',5,10,9,"
+        "'rsiE911','placed','2026-10-04T01:00:00+00:00')")
+
+
+def _fake_exchange(monkeypatch, ex_mod, balance):
+    created = []
+
+    class _Ex:
+        markets = {"EEE/USDT:USDT": {}, "FFF/USDT:USDT": {}}
+
+        def fetch_balance(self):
+            if isinstance(balance, Exception):
+                raise balance
+            return {"info": {"data": [{"asset": "VST", "equity": str(balance)}]},
+                    "total": {"VST": float(balance)}}
+
+        def create_order(self, *a, **k):              # pragma: no cover — не должен вызываться
+            created.append(a)
+            raise AssertionError("стоп-кран пропустил постановку")
+
+    monkeypatch.setenv("BINGX_API_KEY", "test")
+    monkeypatch.setattr(ex_mod, "_exchange", lambda: _Ex())
+    monkeypatch.setattr(ex_mod, "_cancel_entry", lambda ex, t: None)
+    monkeypatch.setattr(ex_mod, "_entry_order",
+                        lambda ex, t: {"status": "canceled", "filled": 0})
+    monkeypatch.setattr(ex_mod, "_cancel_deferred_stop", lambda ex, t: None)
+    monkeypatch.setattr(ex_mod, "_sync_fill_states", lambda ex, report: None)
+    monkeypatch.setattr(ex_mod, "_orphan_lines", lambda ex: [])
+    return created
+
+
+def test_reconcile_daily_kill_switch(fresh_db, monkeypatch):
+    """Эквити −6% от якоря суток при пороге 5%: новые входы не ставятся, стоящий триггер
+    снимается с пометкой «стоп-кран», алерт один раз; второй такт молчит."""
+    from app import clock, runtime
+    from app.v2 import bingx_executor as ex
+    _seed_halt_case()
+    runtime.set_executor_since("2026-10-04T00:00:00+00:00")
+    day = clock.utcnow_iso()[:10]
+    runtime.set_value("executor_day_anchor", f"{day}|100000.0000")
+    _fake_exchange(monkeypatch, ex, 94_000)
+
+    out = ex.reconcile()
+    assert any(line.startswith("⛔ Стоп-кран") for line in out), out
+    assert any("#911" in line and "стоп-кран" in line for line in out)
+    assert runtime.executor_halt_day() == day
+    from app import db
+    row = db.query_one("SELECT state, note FROM executor_orders WHERE signal_id=911")
+    assert (row["state"], row["note"]) == ("cancelled", "стоп-кран")
+    assert db.query_one("SELECT 1 FROM executor_orders WHERE signal_id=912") is None
+
+    out2 = ex.reconcile()                                  # кран держится, алерт не повторяется
+    assert not any(line.startswith("⛔") for line in out2)
+    assert db.query_one("SELECT 1 FROM executor_orders WHERE signal_id=912") is None
+
+
+def test_reconcile_balance_outage_defers_only_placement(fresh_db, monkeypatch):
+    """Баланс не читается: такт не падает, постановка откладывается (алерт раз в час),
+    а снятие/закрытие по журналу продолжаются."""
+    from app import db, runtime
+    from app.v2 import bingx_executor as ex
+    _seed_halt_case()
+    db.execute("UPDATE signals SET status='expired' WHERE id=911")   # журнал снял 911
+    runtime.set_executor_since("2026-10-04T00:00:00+00:00")
+    ex._BALANCE_ALERT["at"] = 0.0
+    _fake_exchange(monkeypatch, ex, RuntimeError("network down"))
+
+    out = ex.reconcile()
+    assert any("баланс не читается" in line for line in out)
+    row = db.query_one("SELECT state FROM executor_orders WHERE signal_id=911")
+    assert row["state"] == "cancelled"                      # отмена прошла без баланса
+    assert db.query_one("SELECT 1 FROM executor_orders WHERE signal_id=912") is None
+    out2 = ex.reconcile()
+    assert not any("баланс не читается" in line for line in out2)   # троттлинг
+
+
+def test_entry_slip_rule():
+    """Слип входа в R и решающее правило: срабатывает только при n>=50 и среднем <= −0.10R."""
+    from app.v2.bingx_executor import entry_slip_r, slip_rule_verdict
+    # LONG: вошли выше entry на 0.1 при риске 1.0 -> −0.1R; SHORT зеркально
+    assert round(entry_slip_r({"entry_px": 100, "stop_px": 99, "fill_px": 100.1,
+                               "side": "LONG"}), 4) == -0.1
+    assert round(entry_slip_r({"entry_px": 100, "stop_px": 101, "fill_px": 100.2,
+                               "side": "SHORT"}), 4) == 0.2
+    assert entry_slip_r({"entry_px": 100, "stop_px": 99, "fill_px": None,
+                         "side": "LONG"}) is None
+    assert slip_rule_verdict([-0.2] * 49)[2] is False          # мало данных — не судим
+    assert slip_rule_verdict([-0.1] * 50) == (50, -0.1, True)
+    assert slip_rule_verdict([-0.05] * 80)[2] is False
+    assert slip_rule_verdict([]) == (0, 0.0, False)

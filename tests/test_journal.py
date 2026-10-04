@@ -899,3 +899,35 @@ def test_best_worst_closed_period(fresh_db):
                                               "2026-08-14T00:00:00+00:00")
     assert best2["id"] == 852 and worst2 is None
     assert journal.best_worst_closed("2025-01-01", "2025-01-02") == (None, None)
+
+
+def test_overdue_open_signals(fresh_db):
+    """Сторож судьи: open-сигнал старше решающий бар + 50ч ожидания + потолок удержания
+    + 12ч запаса — переросток (судья его не видит). Молодой и закрытый — нет; без правила
+    удержания — потолок 30 суток."""
+    import json as _json
+
+    from app import db
+    from app.brain import journal
+    trail = _json.dumps({"trail": {"activate_r": 1.5, "distance_r": 0.2,
+                                   "tp_exit": False, "max_hold_hours": 168.0}})
+    rows = [
+        (931, "open", "2026-09-13T17:00:00+00:00", trail),      # 3 недели — переросток
+        (932, "open", "2026-10-01T00:00:00+00:00", trail),      # 3.5 суток — в пределах
+        (933, "stopped", "2026-09-01T00:00:00+00:00", trail),   # закрыт — не в счёт
+        (934, "open", "2026-09-20T00:00:00+00:00", "{}"),       # без правила: 30 суток
+    ]
+    for sid, st, created, snap in rows:
+        db.execute(
+            "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+            "confidence, snapshot_json, status, created_at) VALUES "
+            "(?, 'NEAR/USDT:USDT', 'SHORT', '1h', 2.35, 2.38, 2.0, 0.7, ?, ?, ?)",
+            (sid, snap, st, created))
+    db.execute("UPDATE signals SET result_r=-1.0 WHERE id=933")
+    over = journal.overdue_open_signals("2026-10-04T12:00:00+00:00")
+    assert [o["id"] for o in over] == [931]
+    # 931: возраст 499ч − (1 + 50 + 168) − 12 = 268ч сверх
+    assert over[0]["over_h"] == 268.0
+    # через 30 суток и 12ч без правила удержания — 934 тоже переросток
+    ids = [o["id"] for o in journal.overdue_open_signals("2026-10-21T00:00:00+00:00")]
+    assert 934 in ids and 932 in ids

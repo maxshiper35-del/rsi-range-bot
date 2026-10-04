@@ -2772,6 +2772,18 @@ def main() -> None:
             lines = await asyncio.to_thread(bingx_executor.sweep_orphans, arg == "sweep")
             await m.answer("🤖 Executor · сироты:\n" + "\n".join(lines))
             return
+        if arg.startswith("limit"):
+            try:
+                v = float(arg.split()[1].replace(",", "."))
+                assert 0.0 <= v <= 50.0
+            except Exception:                          # noqa: BLE001
+                await m.answer("Формат: /executor limit 5 (стоп-кран, % эквити за сутки; "
+                               "0 = выкл)")
+                return
+            await asyncio.to_thread(runtime.set_value, "executor_daily_loss_pct", v)
+            await m.answer(f"⛔ Стоп-кран executor: {v:g}% эквити за UTC-сутки"
+                           + (" (выключен)" if v == 0 else ""))
+            return
         if arg == "off":
             await asyncio.to_thread(runtime.set_value, "executor_enabled", "0")
             await m.answer("🤖 Executor ВЫКЛ. Открытые демо-позиции журналом донашиваться "
@@ -2786,9 +2798,11 @@ def main() -> None:
             f"Состояние: {'ВКЛ' if st['enabled'] else 'выкл'}\n"
             f"VST-баланс: {st['vst'] if st['vst'] is not None else '—'}\n"
             f"Риск на сделку: {st['risk_pct']:g}%\n"
+            f"Стоп-кран: {st['loss_limit_pct']:g}% эквити за сутки"
+            f"{' — СРАБОТАЛ сегодня' if st['halted_today'] else ''}\n"
             f"Ордеров в учёте: {orders}\n"
             f"Включён с: {st['since'] or '—'}\n"
-            "Команды: /executor on | off | orphans | sweep", parse_mode="HTML")
+            "Команды: /executor on | off | orphans | sweep | limit N", parse_mode="HTML")
 
     @dp.message(Command("setups"))
     async def _setups(m):
@@ -3487,6 +3501,27 @@ def main() -> None:
                 await asyncio.to_thread(runtime.set_last_pause_reminder_at, now_)
         except Exception as e:                             # noqa: BLE001
             log.warning("pause reminder: %s", e)
+        # сторож судьи: открытые сигналы, переросшие контрактный потолок жизни, значат, что
+        # исход не скорится (дашборд копит фальшивый плавающий R) — алерт раз в 6ч
+        try:
+            overdue = await asyncio.to_thread(journal.overdue_open_signals, now_)
+            last_od = runtime.last_overdue_alert_at()
+            due = last_od is None or (datetime.fromisoformat(now_) - datetime.fromisoformat(
+                last_od)).total_seconds() >= 6 * 3600
+            if overdue and due:
+                items = ", ".join(f"#{o['id']} {o['symbol'].split('/')[0]} "
+                                  f"(+{o['over_h']:.0f}ч)" for o in overdue[:10])
+                text = (f"⚠️ Судья не разрешает {len(overdue)} сигн.: {items} — открыты "
+                        "дольше потолка жизни сделки. Проверьте logs/bot.log (фетч баров, "
+                        "символ на бирже данных); дашборд по ним показывает неверный R.")
+                for admin_id in cfg.admin_ids:
+                    try:
+                        await bot.send_message(admin_id, text)
+                    except Exception as e:                 # noqa: BLE001
+                        log.warning("overdue алерт админу %s: %s", admin_id, e)
+                await asyncio.to_thread(runtime.set_value, "last_overdue_alert_at", now_)
+        except Exception as e:                             # noqa: BLE001
+            log.warning("overdue check: %s", e)
         # анти-кластерный тормоз: алерт админу ОДИН раз на вход стороны в кулдаун
         # (транзишен-детект через settings; при выходе из окна метка снимается)
         try:

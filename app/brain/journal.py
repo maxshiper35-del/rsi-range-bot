@@ -39,6 +39,42 @@ def symbols_with_open_positions() -> list:
     return [r["symbol"] for r in rows]
 
 
+# запас сверх контрактного потолка жизни сигнала, прежде чем считать судью застрявшим
+OVERDUE_SLACK_HOURS = 12.0
+# потолок для сигналов без правила удержания (старые снапшоты / max_hold=0)
+OVERDUE_NO_CAP_HOURS = 30 * 24.0
+
+
+def overdue_open_signals(now_iso: str) -> list[dict]:
+    """Открытые сигналы, которые по контракту ОБЯЗАНЫ были разрешиться: старше
+    закрытия решающего бара + окна ожидания филла + потолка удержания + запаса.
+
+    Такой сигнал значит, что судья его не видит (пауза без скоринга 13.09–04.10, символ
+    пропал с биржи данных, сбой фетча): дашборд копит «плавающий» R по давно закрытой
+    сделке, executor держит учёт. -> [{id, symbol, side, timeframe, over_h}]"""
+    from datetime import datetime
+
+    from app.brain.smc_setups import SMCEngine
+
+    now = datetime.fromisoformat(now_iso)
+    out = []
+    for row in db.query("SELECT * FROM signals WHERE status='open' AND result_r IS NULL"):
+        try:
+            created = datetime.fromisoformat(row["created_at"])
+        except (TypeError, ValueError):
+            continue
+        trail = _trail_of(row)
+        hold_h = float(trail["max_hold_hours"]) if trail else 0.0
+        tf_h = SMCEngine.TF_MINUTES.get(row["timeframe"], 60) / 60.0
+        life_h = (tf_h + MAX_WAIT_HOURS + hold_h if hold_h > 0 else OVERDUE_NO_CAP_HOURS)
+        age_h = (now - created).total_seconds() / 3600.0
+        over = age_h - life_h - OVERDUE_SLACK_HOURS
+        if over > 0:
+            out.append({"id": row["id"], "symbol": row["symbol"], "side": row["side"],
+                        "timeframe": row["timeframe"], "over_h": round(over, 1)})
+    return out
+
+
 def try_mark_filled(signal_id: int, iso_ts: str) -> bool:
     """Атомарно зафиксировать филл (guard filled_at IS NULL) — гонку стрим vs
     bar-скоринг выигрывает ровно один, второй молчит. -> True если выиграли."""
