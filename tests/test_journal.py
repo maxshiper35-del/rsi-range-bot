@@ -931,3 +931,20 @@ def test_overdue_open_signals(fresh_db):
     # через 30 суток и 12ч без правила удержания — 934 тоже переросток
     ids = [o["id"] for o in journal.overdue_open_signals("2026-10-21T00:00:00+00:00")]
     assert 934 in ids and 932 in ids
+
+
+def test_fill_window_open_matches_bar_judge():
+    """Аудит 05.10: реалтайм-стрим засчитывал касание после окна 50ч. Граница та же, что у
+    бар-судьи: открытие бара касания <= закрытие решающего бара + 50ч."""
+    from datetime import datetime, timezone
+
+    from app.brain import journal
+    row = {"created_at": "2026-09-12T01:00:00+00:00", "timeframe": "1h"}   # решающий -> 02:00
+    at = lambda s: datetime.fromisoformat(s).replace(tzinfo=timezone.utc)  # noqa: E731
+    assert journal.fill_window_open(row, at("2026-09-14T03:59:00")) is True    # бар 03:00 = +49ч
+    assert journal.fill_window_open(row, at("2026-09-14T04:30:00")) is True    # бар 04:00 = +50ч
+    assert journal.fill_window_open(row, at("2026-09-14T05:00:01")) is False   # бар 05:00 = +51ч
+    # прод-случай #491: касание через 52ч после решающего бара
+    assert journal.fill_window_open(row, at("2026-09-14T06:07:00")) is False
+    assert journal.fill_window_open({"created_at": None, "timeframe": "1h"},
+                                    at("2026-09-14T03:00:00")) is False

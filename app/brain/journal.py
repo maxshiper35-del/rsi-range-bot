@@ -21,6 +21,29 @@ _TP_COLS = ("tp1", "tp2", "tp3")
 MAX_WAIT_HOURS = 50.0
 
 
+def fill_window_open(row, now, scoring_tf_minutes: int = 60) -> bool:
+    """Открыто ли ещё окно ожидания филла для касания в момент now (datetime, UTC).
+
+    Та же граница, что у бар-судьи (_outcome_from_bars): касание засчитывается, если
+    ОТКРЫТИЕ бара скоринга, на котором оно случилось, не позже decision + MAX_WAIT_HOURS
+    (decision = закрытие решающего бара). Без проверки реалтайм-стрим «исполнял» лимитки
+    после окна — #490/#491/#493 (52–67ч, пауза 13.09) ушли в публичный журнал сделками
+    вместо «не исполнилась» (аудит 05.10)."""
+    from datetime import datetime, timezone
+
+    from app.brain.smc_setups import SMCEngine
+    try:
+        created = datetime.fromisoformat(row["created_at"])
+    except (TypeError, ValueError):
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    decision = created + timedelta(minutes=SMCEngine.TF_MINUTES.get(row["timeframe"], 60))
+    step = max(1, int(scoring_tf_minutes)) * 60
+    bar_open = datetime.fromtimestamp(int(now.timestamp()) // step * step, tz=timezone.utc)
+    return (bar_open - decision).total_seconds() <= MAX_WAIT_HOURS * 3600
+
+
 def unfilled_open_signals(symbol: str) -> list:
     """Открытые сигналы символа без зафиксированного филла (для реалтайм-стрима)."""
     return db.query("SELECT * FROM signals WHERE symbol=? AND status='open' "

@@ -1127,3 +1127,10 @@ def test_precheckout_ok():
     assert bot.precheckout_ok("sub:30.0", 1500, "USD", tiers) is False
     assert bot.precheckout_ok("unlock:5:50", 50, "XTR", tiers) is True     # paid media
     assert bot.precheckout_ok(None, 0, "XTR", tiers) is False
+
+
+def test_pause_age_text():
+    from datetime import datetime, timezone
+    now = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
+    assert bot.pause_age_text("2026-10-04T23:00:00+00:00", now) == "13 ч"   # не «0 дн.»
+    assert bot.pause_age_text("2026-09-13T18:18:31+00:00", now) == "22 дн."

@@ -655,6 +655,16 @@ def should_remind_pause(paused_since: str | None, last_reminder_at: str | None,
     return (now - last).total_seconds() >= rethrottle_hours * 3600
 
 
+def pause_age_text(since_iso: str, now: datetime | None = None) -> str:
+    """Возраст паузы для напоминания: часы до 2 суток, дальше дни (.days давал «0 дн.»)."""
+    now = now or datetime.now(timezone.utc)
+    since = datetime.fromisoformat(since_iso)
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    hours = (now - since).total_seconds() / 3600
+    return f"{hours:.0f} ч" if hours < 48 else f"{hours / 24:.0f} дн."
+
+
 def caption_fits(html_text: str, limit: int = 1024) -> bool:
     """Лимит Telegram на подпись к фото — 1024 символа ВИДИМОГО текста (теги не считаются)."""
     return len(re.sub(r"<[^>]+>", "", html_text)) <= limit
@@ -1418,6 +1428,7 @@ def main() -> None:
     from datetime import datetime
 
     from aiogram import Bot, Dispatcher, F  # ленивый импорт тяжёлой зависимости
+    from aiogram.exceptions import TelegramBadRequest
     from aiogram.filters import Command
     from aiogram.fsm.context import FSMContext
     from aiogram.fsm.state import State, StatesGroup
@@ -2544,8 +2555,10 @@ def main() -> None:
 
     def _symbols_kb(eff: dict) -> InlineKeyboardMarkup:
         b = InlineKeyboardButton
-        sym_rows = [[b(text=f"❌ {s}", callback_data=f"adm_delsym_{i}")]
-                   for i, s in enumerate(eff["symbols"])]
+        # символ — в callback по ЗНАЧЕНИЮ: позиция в списке меняется авто-ротацией, и
+        # старая кнопка удаляла соседа (аудит 05.10); лимит callback_data 64 байта
+        sym_rows = [[b(text=f"❌ {s}", callback_data=f"adm_delsym_{s}")]
+                   for s in eff["symbols"] if len(f"adm_delsym_{s}".encode()) <= 64]
         return InlineKeyboardMarkup(inline_keyboard=[
             *sym_rows,
             [b(text="➕ Добавить символ", callback_data="adm_prompt_symbol")],
@@ -2600,11 +2613,17 @@ def main() -> None:
     @dp.message(Command("pause"))
     async def _pause(m):
         if _is_admin(m):
-            await _set(m, "paused", "1", "⏸ Сигналы на паузе.")
+            if await asyncio.to_thread(runtime.paused):
+                # повторный /pause не сдвигает начало паузы (иначе обнулял отсчёт напоминания)
+                await m.answer("⏸ Сигналы уже на паузе. Возобновить: /resume")
+                return
+            await _set(m, "paused", "1", "⏸ Сигналы на паузе. Открытые сделки ведутся "
+                                         "до выхода. Возобновить: /resume")
 
     @dp.message(Command("resume"))
     async def _resume(m):
         if _is_admin(m):
+            await asyncio.to_thread(runtime.set_value, "last_pause_reminder_at", "")
             await _set(m, "paused", "0", "▶️ Сигналы возобновлены.")
 
     @dp.message(Command("symbols"))
@@ -3092,6 +3111,8 @@ def main() -> None:
         screen = "main"
 
         if data == "adm_pausetoggle":
+            if runtime.paused():
+                await asyncio.to_thread(runtime.set_value, "last_pause_reminder_at", "")
             await asyncio.to_thread(runtime.set_value, "paused",
                                     "0" if runtime.paused() else "1")
         elif data == "adm_chmode":
@@ -3153,10 +3174,11 @@ def main() -> None:
             await asyncio.to_thread(runtime.set_value, "enabled_setups", ",".join(sorted(cur)))
             screen = "strategy"
         elif data.startswith("adm_delsym_"):
-            idx_s = data[len("adm_delsym_"):]
+            target = data[len("adm_delsym_"):]
             syms = await asyncio.to_thread(runtime.symbols)
-            if idx_s.isdecimal() and int(idx_s) < len(syms):
-                del syms[int(idx_s)]
+            # старые кнопки с индексом (до 05.10) игнорируются — экран обновится свежими
+            if not target.isdecimal() and target in syms:
+                syms.remove(target)
                 await asyncio.to_thread(runtime.set_value, "symbols", ",".join(syms))
             screen = "symbols"
         elif data.startswith("adm_prompt_"):
@@ -3504,9 +3526,11 @@ def main() -> None:
             try:
                 import os as _os
                 import subprocess as _sp
-                _sp.run(["launchctl", "kickstart", "-k",
-                         f"gui/{_os.getuid()}/com.rsirange.tunnel"],
-                        timeout=15, check=False, capture_output=True)
+                # в потоке: синхронный run до 15с замораживал event loop (поллинг, стрим)
+                await asyncio.to_thread(
+                    _sp.run, ["launchctl", "kickstart", "-k",
+                              f"gui/{_os.getuid()}/com.rsirange.tunnel"],
+                    timeout=15, check=False, capture_output=True)
             except Exception as e:                     # noqa: BLE001 — не-launchd окружение
                 log.warning("kickstart туннеля: %s", e)
 
@@ -3548,8 +3572,8 @@ def main() -> None:
         try:
             since_ = await asyncio.to_thread(runtime.paused_since)
             if should_remind_pause(since_, runtime.last_pause_reminder_at(), now_):
-                days = (datetime.now(timezone.utc) - datetime.fromisoformat(since_)).days
-                text = (f"⏸ Сигналы на паузе уже {days} дн. — новых сделок нет, канал молчит. "
+                text = (f"⏸ Сигналы на паузе уже {pause_age_text(since_)} — новых сделок нет, "
+                        "канал молчит. "
                         "Открытые позиции ведутся как обычно. Возобновить: /resume.")
                 for admin_id in cfg.admin_ids:
                     try:
@@ -3771,8 +3795,18 @@ def main() -> None:
                             await bot.edit_message_text(text, chat_id=channel,
                                                         message_id=msg_id, parse_mode="HTML")
                         except Exception as e:          # noqa: BLE001
-                            if "message is not modified" in str(e).lower():
+                            err = str(e).lower()
+                            gone = isinstance(e, TelegramBadRequest) and (
+                                "not found" in err or "can't be edited" in err
+                                or "message_id_invalid" in err)
+                            if "message is not modified" in err:
                                 pass                     # текст не изменился — не сбой, id валиден
+                            elif not gone:
+                                # сеть/сервер/лимит: табло живо, повторим следующим тактом.
+                                # Раньше любой сбой сбрасывал id — 13 дублей табло в канале
+                                # с уведомлением на каждый (27.08–30.09, аудит 05.10)
+                                log.warning("edit live board (повторю): %s", e)
+                                board_ok = False
                             else:
                                 # протухло/удалено/нет прав — пересоздать. Метку времени НЕ
                                 # ставим (ревью 14.08): иначе «след. цикл» превращался в
@@ -4105,9 +4139,14 @@ def main() -> None:
             except Exception as e:                     # noqa: BLE001
                 log.warning("alerts %s: %s", symbol, e)
             rows = await asyncio.to_thread(journal.unfilled_open_signals, symbol)
+            scoring_tf = min((SMCEngine.TF_MINUTES.get(tf, 60) for tf in runtime.timeframes()),
+                             default=60)
+            now_dt = datetime.now(timezone.utc)
             for row in rows:
                 if not entry_touched(row["entry"], high, low):
                     continue
+                if not journal.fill_window_open(row, now_dt, scoring_tf):
+                    continue                            # окно ожидания вышло — не сделка
                 now_iso = clock.utcnow_iso()
                 if not await asyncio.to_thread(journal.try_mark_filled, row["id"], now_iso):
                     continue                            # бар-скоринг успел первым
@@ -4263,6 +4302,16 @@ def main() -> None:
             await register_bot_profile(bot)
         except Exception as e:                         # noqa: BLE001 — меню не критично для работы
             log.warning("register_bot_commands: %s", e)
+        # bot.me() кешируется aiogram; start_polling зовёт его без защиты — при старте без
+        # сети (Mac проснулся без DNS) процесс падал целиком (4 краша 01.10, аудит 05.10)
+        for attempt in range(8):
+            try:
+                await bot.me()
+                break
+            except Exception as e:                     # noqa: BLE001
+                delay = min(60, 5 * 2 ** attempt)
+                log.warning("bot.me() при старте: %s — повтор через %dс", e, delay)
+                await asyncio.sleep(delay)
         try:
             bot_info["username"] = (await bot.get_me()).username   # для CTA-кнопок канала
             # username в settings — Mini App строит deep-link «поделиться карточкой»
