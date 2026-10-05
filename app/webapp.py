@@ -765,6 +765,10 @@ def api_trade_chart() -> Response:
 
 _BT_JSON = Path(__file__).with_name("backtest_monthly.json")
 _BT_CACHE: dict = {"mtime": 0.0, "body": None}
+# публичные поля секции; всё прочее (в т.ч. разбивка по сетапам — закрытая таксономия)
+# наружу не уходит, даже если окажется в файле (утечка by_setup 05.09–05.10.2026)
+_BT_PUBLIC_KEYS = ("generated_at", "fee_pct", "symbols", "tfs", "period", "totals",
+                   "months", "max_dd_window")
 
 
 @app.get("/api/backtest")
@@ -777,7 +781,10 @@ def api_backtest() -> Response:
         return _no_store({"ok": False, "err": "бэктест не собран"}, 404)
     with _STATS_CACHE_LOCK:
         if _BT_CACHE["body"] is None or _BT_CACHE["mtime"] != mtime:
-            _BT_CACHE["body"], _BT_CACHE["mtime"] = _BT_JSON.read_bytes(), mtime
+            raw = json.loads(_BT_JSON.read_text(encoding="utf-8"))
+            public = {k: raw[k] for k in _BT_PUBLIC_KEYS if k in raw}
+            _BT_CACHE["body"] = json.dumps(public, ensure_ascii=False).encode("utf-8")
+            _BT_CACHE["mtime"] = mtime
         body = _BT_CACHE["body"]
     resp = Response(body, mimetype="application/json")
     # меняется только релизом; клиент ревалидирует (cache: no-cache в index)

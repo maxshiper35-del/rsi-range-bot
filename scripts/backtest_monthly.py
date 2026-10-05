@@ -72,6 +72,7 @@ def run(fee: float) -> dict:
     setups = {k: v["trades"] for k, v in rep.by_setup.items()}
     if not {"6226", "LTF-BB", "LTF-OB"} <= set(setups):      # паритет-чек (чек-лист 09.08)
         raise SystemExit(f"паритет сломан: by_setup={setups}")
+    print(f"паритет-чек: by_setup={setups}")
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "fee_pct": fee, "symbols": SYMS.split(","), "tfs": ["1h", "4h"],
@@ -81,7 +82,8 @@ def run(fee: float) -> dict:
                    "total_r": round(rep.total_r, 2),
                    "profit_factor": round(rep.profit_factor, 3),
                    "max_dd_r": round(rep.max_drawdown_r, 2)},
-        "by_setup": setups,
+        # by_setup НЕ пишем: файл отдаётся публично (/api/backtest), а имена сетапов —
+        # закрытая таксономия (утечка 05.09–05.10.2026). Паритет-чек — выше, в консоль.
         "max_dd_window": dd_window,
         "months": months,
     }
@@ -98,7 +100,7 @@ def main() -> None:
                            encoding="utf-8")
     t = data["totals"]
     print(f"{a.out}: n={t['trades']} ΣR={t['total_r']:+.1f} exp={t['expectancy_r']:+.3f} "
-          f"месяцев={len(data['months'])} by_setup={data['by_setup']}")
+          f"месяцев={len(data['months'])}")
 
 
 if __name__ == "__main__":

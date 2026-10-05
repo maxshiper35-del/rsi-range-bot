@@ -517,15 +517,19 @@ def test_trade_chart_open_only_for_private(fresh_db, monkeypatch, webapp_token):
 
 def test_api_backtest_static_json(fresh_db):
     """/api/backtest отдаёт помесячный бэктест из репо (scripts/backtest_monthly.py):
-    60 месяцев, паритетные тоталы, все три сетапа; кеш по mtime; таксономия сетапов
-    в by_setup — это ВНУТРЕННИЕ ключи, наружу секция показывает только месяцы/тоталы."""
+    60 месяцев, паритетные тоталы; кеш по mtime. Эндпоинт ПУБЛИЧНЫЙ: имена сетапов
+    (закрытая таксономия) не должны встречаться в ответе нигде — регрессия утечки
+    by_setup 05.09–05.10.2026, когда этот же тест закреплял их наличие."""
     from app.webapp import app as flask_app
     c = flask_app.test_client()
     r = c.get("/api/backtest")
     assert r.status_code == 200
     d = r.get_json()
     assert len(d["months"]) == 60 and d["totals"]["trades"] == 5353
-    assert set(d["by_setup"]) == {"6226", "LTF-BB", "LTF-OB"}
+    assert "by_setup" not in d
+    body = r.get_data(as_text=True)
+    for token in ("6226", "LTF", "1:1", "open-SMC", "bias", "sweep", "confl"):
+        assert token not in body, f"таксономия в публичном /api/backtest: {token}"
     assert d["period"] == ["2021-07", "2026-07"] and d["fee_pct"] == 0.055
     m = d["months"]["2025-04"]
     assert {"n", "r", "w"} <= set(m) and m["n"] > 0
