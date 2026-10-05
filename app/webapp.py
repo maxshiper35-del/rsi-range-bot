@@ -78,7 +78,10 @@ def _validate_init_data(raw: str, bot_token: str,
     return user if isinstance(user, dict) and "id" in user else None
 
 
-_TICKERS: dict = {"at": 0.0, "ok_at": 0.0, "prices": {}, "pcts": {}}
+# свежесть — ПО СИМВОЛУ (аудит 05.10): общий штамп отдавал цену символа вне вотчлиста
+# сколь угодно старой, пока вотчлист обновлялся. tried — время последней попытки символа,
+# ok — время последней успешной цены символа.
+_TICKERS: dict = {"prices": {}, "pcts": {}, "tried": {}, "ok": {}}
 _TICKERS_LOCK = threading.Lock()
 _TICKERS_TTL_S = 45.0                  # unrealized R не тик-в-тик — биржу щадим
 _PRICES_MAX_STALE_S = 600.0            # кеш старше 10 мин «живым» R не прикидывается
@@ -119,29 +122,31 @@ def _fetch_tickers(symbols: list[str]) -> dict[str, dict] | None:
 
 
 def _last_prices(symbols: list[str]) -> dict[str, float]:
-    """last-цены bybit (тот же источник, что у скоринга) с кешем 45с.
+    """last-цены bybit (тот же источник, что у скоринга) с кешем 45с ПО СИМВОЛУ.
 
-    Свежесть — ТОЛЬКО по времени попытки: пропавший из ответа символ не выключает
-    кеш (ревью 13.08: иначе один делистнутый тикер превращал каждый /api/me в сетевой
-    цикл). Попытку столбим ДО фетча — конкуренты не дублируют её; сам фетч вне лока —
-    /api/stats и публичная страница не ждут биржу. Успех мержится в кеш (частичный
-    ответ не стирает прежние цены); кеш старше 10 мин не отдаём — протухший
-    unrealized R хуже честного прочерка."""
+    Символ перезапрашивается, если его последняя попытка старше 45с: пропавший из ответа
+    символ не делает каждый вызов сетевым (ревью 13.08), а символ вне вотчлиста больше не
+    живёт на чужой свежести (аудит 05.10 — общий штамп морозил unrealized R платных).
+    Попытку столбим ДО фетча — конкуренты не дублируют её; сам фетч вне лока. Отдаются
+    ТОЛЬКО запрошенные символы с ценой не старше 10 мин — протухший R хуже прочерка."""
     with _TICKERS_LOCK:
         mono = time.monotonic()
-        if mono - _TICKERS["at"] < _TICKERS_TTL_S:
-            stale = mono - _TICKERS["ok_at"] > _PRICES_MAX_STALE_S
-            return {} if stale else dict(_TICKERS["prices"])
-        _TICKERS["at"] = mono
-    got = _fetch_tickers(symbols)                         # сеть — вне лока
+        need = [s for s in symbols
+                if mono - _TICKERS["tried"].get(s, -1e18) >= _TICKERS_TTL_S]
+        for s in need:
+            _TICKERS["tried"][s] = mono
+    got = _fetch_tickers(need) if need else {}            # сеть — вне лока
     with _TICKERS_LOCK:
-        if got is not None:
-            _TICKERS["prices"].update({s: v["px"] for s, v in got.items()})
-            _TICKERS["pcts"].update({s: v["pct"] for s, v in got.items()
-                                     if v["pct"] is not None})
-            _TICKERS["ok_at"] = time.monotonic()
-        stale = time.monotonic() - _TICKERS["ok_at"] > _PRICES_MAX_STALE_S
-        return {} if stale else dict(_TICKERS["prices"])
+        now = time.monotonic()
+        if got:
+            for s, v in got.items():
+                _TICKERS["prices"][s] = v["px"]
+                _TICKERS["ok"][s] = now
+                if v["pct"] is not None:
+                    _TICKERS["pcts"][s] = v["pct"]
+        return {s: _TICKERS["prices"][s] for s in symbols
+                if s in _TICKERS["prices"]
+                and now - _TICKERS["ok"].get(s, -1e18) <= _PRICES_MAX_STALE_S}
 
 
 def _equity(since_created: str | None = None) -> list:
@@ -186,10 +191,11 @@ def _open_signals_public() -> list:
 
 
 def _avg_hold_hours(since_created: str | None = None) -> float | None:
-    """Среднее удержание закрытых сделок (филл -> закрытие), часов."""
+    """Среднее удержание закрытых сделок (филл -> закрытие), часов. Только публичные
+    исходы: теневые (rejected) сюда не входят, как и во всей прочей стате (аудит 05.10)."""
     q = ("SELECT AVG((julianday(closed_at) - julianday(filled_at)) * 24.0) AS h "
          "FROM signals WHERE filled_at IS NOT NULL AND closed_at IS NOT NULL "
-         "AND result_r IS NOT NULL ")
+         "AND result_r IS NOT NULL AND status IN ('tp1','tp2','tp3','stopped') ")
     args: tuple = ()
     if since_created:
         q += "AND created_at >= ?"
@@ -302,7 +308,7 @@ def _market_overview() -> list:
     if not prices:
         return []
     with _TICKERS_LOCK:
-        pcts = dict(_TICKERS["pcts"])
+        pcts = {k: v for k, v in _TICKERS["pcts"].items() if k in prices}
     out = []
     for sym in syms:
         px = prices.get(sym)
@@ -568,6 +574,10 @@ def api_admin_user() -> Response:
     from app.delivery import payments
     if action == "grant":
         payments.admin_grant(tg_id, int(days))
+        # те же последствия, что у /grant в боте: подтверждённая оплата награждает
+        # реферера (идемпотентно, порог квалифицирующих дней внутри; аудит 05.10)
+        from app import runtime as _rt
+        payments.reward_referrer_on_payment(tg_id, _rt.referral_reward_days(), int(days))
     else:
         payments.admin_revoke(tg_id)
     _wlog.info("admin %s: %s подписки юзеру %s (%s дн)",
@@ -703,7 +713,7 @@ def api_trade_chart() -> Response:
     платным контентом, та же граница публикации, что везде. Кеш 10 мин на сделку:
     эндпоинт публичный, а за ним сетевой fetch_ohlcv."""
     sid_s = request.args.get("id", "")
-    if not sid_s.isdigit() or len(sid_s) > 12:
+    if not re.fullmatch(r"[0-9]{1,12}", sid_s):      # isdigit() пускал '²' -> 500
         return _no_store({"ok": False}, 400)
     sid = int(sid_s)
     # приватный слой: валидный подписчик/админ видит и ОТКРЫТЫЕ (уровни он и так

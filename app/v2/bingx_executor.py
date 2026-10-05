@@ -47,11 +47,14 @@ _ENTRY_PREFIX = "rsiE"
 # ---------------------------------------------------------------------------
 # Чистые функции (тестируются без сети)
 # ---------------------------------------------------------------------------
-MAX_NOTIONAL_USDT = 1500.0   # BingX: лимит «5000 USDT на позицию символа» (101209) —
-#                              общий бюджет символа/стороны. 1500 = влезают ТРИ
+MAX_NOTIONAL_USDT = 1500.0   # кап номинала ОДНОГО ордера. 1500 = влезают ТРИ
 #                              одновременных сигнала одного символа (мульти-ТФ дубли —
 #                              норма журнала): для демо-зеркала ПОКРЫТИЕ замера паритета
 #                              важнее размера позиции (20.08: кап 4500 пропускал дубли).
+SYMBOL_BUDGET_USDT = 4500.0  # общий бюджет символа/стороны под лимитом BingX 5000 (101209).
+#                              До 05.10 кап 1500 работал как ОБЩИЙ бюджет: первый сигнал
+#                              занимал всё, дубли пропускались (24 скипа) — замысел 20.08
+#                              не исполнялся (аудит 05.10).
 
 
 def calc_qty(balance: float, risk_pct: float, entry: float, stop: float,
@@ -240,14 +243,18 @@ def reconcile() -> list[str]:
         if any(a.kind == "place" for a in todo):
             todo = [a for a in todo if a.kind != "place"]
             import time as _t
-            if _t.monotonic() - _BALANCE_ALERT["at"] > 3600:
+            if _alert_due(_BALANCE_ALERT, _t.monotonic()):
                 _BALANCE_ALERT["at"] = _t.monotonic()
                 report.append(f"⚠️ баланс не читается — постановка входов отложена: "
                               f"{str(e)[:80]}")
     if halted:
         # стоп-кран: новых входов нет, ждущие триггеры снимаем (иначе сработают и добавят
         # риска), открытые позиции ведём до выхода по журналу — выключение executor целиком
-        # оставило бы их без трейлинг-выхода
+        # оставило бы их без трейлинг-выхода. Сначала сверка филлов: триггер, сработавший
+        # между тактами, ещё 'placed' — без сверки «отмена» закрыла бы СВЕЖУЮ позицию по
+        # рынку вопреки обещанию «веду до выхода» (аудит 05.10)
+        _sync_fill_states(ex, report)
+        tracked = _tracked()
         open_ids = set(rows_by_id)
         todo = [a for a in todo if a.kind != "place"]
         todo += [Action("cancel", sid, "стоп-кран") for sid, st in tracked.items()
@@ -265,15 +272,16 @@ def reconcile() -> list[str]:
                 r = rows_by_id[a.signal_id]
                 m = ex.market(r["symbol"])
                 lim = m.get("limits", {}) or {}
-                budget = MAX_NOTIONAL_USDT - _active_notional(r["symbol"], r["side"])
+                budget = min(MAX_NOTIONAL_USDT,
+                             SYMBOL_BUDGET_USDT - _active_notional(r["symbol"], r["side"]))
                 qty = calc_qty(balance, runtime.executor_risk_pct(), r["entry"], r["stop"],
                                float((lim.get("amount") or {}).get("min") or 0),
                                float(m.get("precision", {}).get("amount") or 0),
                                max_notional=budget)
                 if qty <= 0:
+                    used = _active_notional(r["symbol"], r["side"])
                     why = ("бюджет номинала символа/стороны исчерпан "
-                           f"(кап {MAX_NOTIONAL_USDT:g} USDT, занято "
-                           f"{MAX_NOTIONAL_USDT - budget:g})"
+                           f"(кап {SYMBOL_BUDGET_USDT:g} USDT, занято {used:g})"
                            if budget < MAX_NOTIONAL_USDT else "объём ниже минимума биржи")
                     _track(a.signal_id, r, 0.0, "")
                     _set_state(a.signal_id, "error", why)
@@ -295,6 +303,8 @@ def reconcile() -> list[str]:
                 # с журнальной семантикой «филл касанием entry с любой стороны»:
                 # trigger сработает ровно тогда, когда журнал засчитает касание.
                 from ccxt import ExchangeError as _ExErr
+                from ccxt import NetworkError as _NetErr
+                deferred_sl = False
                 try:
                     try:
                         created = ex.create_order(
@@ -311,9 +321,10 @@ def reconcile() -> list[str]:
                                 params={"positionSide": r["side"],
                                         "clientOrderID": client_id,
                                         "triggerPrice": entry_px})
-                            db.execute("UPDATE executor_orders SET note=? "
-                                       "WHERE signal_id=?",
-                                       ("стоп отложен до филла", a.signal_id))
+                            # метка ставится ВМЕСТЕ с 'placed' ниже: отдельный UPDATE
+                            # затирался _set_state(…, 'placed') — стоп после филла не
+                            # довешивался, позиция жила без биржевого стопа (аудит 05.10)
+                            deferred_sl = True
                         else:
                             # триггер отвергнут (цена у уровня?). Немедленный маркет
                             # честен ТОЛЬКО если журнал УЖЕ засчитал касание (гонка
@@ -327,17 +338,29 @@ def reconcile() -> list[str]:
                                 r["symbol"], "market", side, qty, None,
                                 params=dict(base))
                     _store_order_id(a.signal_id, (created or {}).get("id"))
-                except Exception:                       # noqa: BLE001
+                except Exception as e_create:           # noqa: BLE001
                     # неоднозначный сбой (таймаут после отправки?): сверить по clientOrderID —
                     # ордер реально стоит -> успех; нет -> настоящая ошибка наверх
                     trow = db.query_one("SELECT * FROM executor_orders WHERE signal_id=?",
                                         (a.signal_id,))
                     if _entry_order(ex, trow) is None:
+                        if isinstance(e_create, _NetErr):
+                            # ответ потерян в сети: ордер мог встать, но ещё не виден в
+                            # листинге. 'error' навсегда выбрасывал его из сверки — живой
+                            # триггер никто не снимал (аудит 05.10). Остаёмся в 'placing':
+                            # _sync_fill_states подхватит ордер или через 10 мин честно
+                            # закроет строку
+                            report.append(f"⚠️ #{a.signal_id} {r['symbol']}: ответ биржи "
+                                          f"потерян ({type(e_create).__name__}) — сверю "
+                                          "следующими тактами")
+                            continue
                         raise
-                _set_state(a.signal_id, "placed")
+                _set_state(a.signal_id, "placed",
+                           "стоп отложен до филла" if deferred_sl else None)
                 report.append(f"📥 #{a.signal_id} {r['symbol']} {r['side']}: "
                               f"триггер-маркет {qty:g} @ {r['entry']:g}, "
-                              f"стоп {r['stop']:g} (VST)")
+                              + (f"стоп {r['stop']:g} довешу при филле (VST)" if deferred_sl
+                                 else f"стоп {r['stop']:g} (VST)"))
             elif a.kind == "cancel":
                 t = db.query_one("SELECT * FROM executor_orders WHERE signal_id=?",
                                  (a.signal_id,))
@@ -359,6 +382,10 @@ def reconcile() -> list[str]:
                     else:
                         _record_entry_from_trades(ex, t)
                     closed = _close_position(ex, t, max_qty=filled_qty)
+                    if closed <= 0:
+                        # вход и аварийный стоп отработали внутри одного такта — цена
+                        # стопа, иначе быстрейшие −1R выпадали из отчёта (аудит 05.10)
+                        _record_stop_close(ex, t)
                     _set_state(a.signal_id, "closed",
                                f"филл {filled_qty:g} закрыт при отмене")
                     report.append(f"📤 #{a.signal_id} {t['symbol']}: вход снят, "
@@ -414,7 +441,7 @@ def reconcile() -> list[str]:
     # сироты: позиции биржи без учёта (наследие сломанного детектора филлов) —
     # алерт не чаще раза в час, закрытие только по /executor sweep
     import time as _time
-    if _time.monotonic() - _ORPHAN_ALERT["at"] > 3600:
+    if _alert_due(_ORPHAN_ALERT, _time.monotonic()):
         try:
             orph = _orphan_lines(ex)
         except Exception as e:                          # noqa: BLE001 — сироты не роняют такт
@@ -425,7 +452,14 @@ def reconcile() -> list[str]:
     return report
 
 
-_BALANCE_ALERT: dict = {"at": 0.0}
+_BALANCE_ALERT: dict = {"at": None}
+
+
+def _alert_due(stamp: dict, now_mono: float, every_s: float = 3600.0) -> bool:
+    """Троттлинг алертов «раз в час». None = ещё не алертили. Старт с 0.0 глушил ПЕРВЫЙ
+    алерт целый час после загрузки Mac: monotonic() считает секунды с загрузки (аудит 05.10,
+    реальная перезагрузка 05.10 06:59)."""
+    return stamp["at"] is None or now_mono - stamp["at"] > every_s
 
 
 def _apply_daily_guard(equity: float, report: list[str]) -> bool:
@@ -472,11 +506,25 @@ def _retry_budget_skips(open_ids: set) -> None:
 def _bump_retry(sid: int, e: Exception) -> int:
     """Счётчик повторов cancel/close в note ('retry#N: …'). -> номер текущей попытки."""
     t = db.query_one("SELECT note FROM executor_orders WHERE signal_id=?", (sid,))
-    m = _RETRY_RE.match((t["note"] or "") if t else "")
+    note = (t["note"] or "") if t else ""
+    m = _RETRY_RE.match(note)
     n = (int(m.group(1)) if m else 0) + 1
+    # id довешенного стопа переживает ретраи: иначе после сбоя закрытия стоп-ордер
+    # оставался на бирже без учёта (аудит 05.10)
+    sl = _sl_id(note)
+    tail = f" | sl:{sl}" if sl else ""
     db.execute("UPDATE executor_orders SET note=?, updated_at=? WHERE signal_id=?",
-               (f"retry#{n}: {str(e)[:170]}", clock.utcnow_iso(), sid))
+               (f"retry#{n}: {str(e)[:150]}{tail}", clock.utcnow_iso(), sid))
     return n
+
+
+_SL_RE = _re.compile(r"(?:^|\| )sl:(\S+)")
+
+
+def _sl_id(note: str | None) -> str:
+    """id довешенного стопа из note: 'sl:<id>' в начале или хвост ' | sl:<id>'."""
+    m = _SL_RE.search(note or "")
+    return m.group(1) if m else ""
 
 
 def _store_order_id(sid: int, oid) -> None:
@@ -560,10 +608,7 @@ def _place_deferred_stop(ex, t, report: list[str]) -> None:
 def _cancel_deferred_stop(ex, t) -> None:
     """Снять довешенный аварийный стоп (note 'sl:<id>'), если он был. Уже исполнен/
     снят — не ошибка."""
-    note = t["note"] or ""
-    if not note.startswith("sl:"):
-        return
-    oid = note[3:].strip()
+    oid = _sl_id(t["note"])
     if not oid:
         return
     try:
@@ -679,7 +724,14 @@ def _close_position(ex, t, max_qty: float) -> float:
     позиции» невозможен штатно, остальное должно быть видно как error.
     Побочно (best-effort) пишет фактическую цену/комиссию закрытия — сырьё
     еженедельного отчёта «исполнение vs журнал»."""
-    closable = min(max_qty, _position_qty(ex, t["symbol"], t["side"]))
+    # своя доля = позиция минус доли ДРУГИХ ведущихся филлов того же символа/стороны:
+    # если аварийный стоп уже закрыл нашу часть, остаток — соседский, его не трогаем
+    # (раньше кламп по всей позиции продавал долю соседа, аудит 05.10)
+    others = db.query_one(
+        "SELECT COALESCE(SUM(qty), 0) AS q FROM executor_orders WHERE symbol=? AND side=? "
+        "AND state='filled' AND signal_id != ?", (t["symbol"], t["side"], t["signal_id"]))
+    own = _position_qty(ex, t["symbol"], t["side"]) - float(others["q"] if others else 0.0)
+    closable = min(max_qty, max(0.0, own))
     if closable <= 0:
         return 0.0
     side = "sell" if t["side"] == "LONG" else "buy"
@@ -775,7 +827,7 @@ def _sync_fill_states(ex, report: list[str]) -> None:
                 report.append(f"🚫 #{t['signal_id']} {t['symbol']}: вход снят вне executor")
 
 
-_ORPHAN_ALERT: dict = {"at": 0.0}
+_ORPHAN_ALERT: dict = {"at": None}
 
 
 def _match_orphans(positions: list, tracked: list, tol: float = 0.02) -> list:

@@ -10,6 +10,9 @@
         <string>-m</string>
         <string>waitress</string>
         <string>--listen=127.0.0.1:8091</string>
+        <!-- тело запроса режет транспорт, а не только Flask: иначе waitress буферизует
+             до 1 ГБ на запрос (в tmp на том же диске, что БД) ДО проверки авторизации -->
+        <string>--max-request-body-size=65536</string>
         <string>app.webapp:app</string>
     </array>
     <key>WorkingDirectory</key><string>/Users/mac/bot ctypto</string>

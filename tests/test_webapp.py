@@ -534,3 +534,73 @@ def test_api_backtest_static_json(fresh_db):
     m = d["months"]["2025-04"]
     assert {"n", "r", "w"} <= set(m) and m["n"] > 0
     assert "max-age=3600" in r.headers.get("Cache-Control", "")
+
+
+def test_last_prices_per_symbol_freshness(fresh_db, monkeypatch):
+    """Аудит 05.10: общий штамп свежести морозил цену символа вне вотчлиста — платный
+    unrealized R показывал часовую цену как живую. Теперь свежесть по символу."""
+    import app.webapp as W
+    clock_ = {"t": 1000.0}
+    monkeypatch.setattr(W.time, "monotonic", lambda: clock_["t"])
+    market = {"BTC/USDT:USDT": 100.0, "XRP/USDT:USDT": 1.15}
+    calls = []
+
+    def fake_fetch(symbols):
+        calls.append(list(symbols))
+        return {s: {"px": market[s], "pct": 0.0} for s in symbols if s in market}
+
+    monkeypatch.setattr(W, "_fetch_tickers", fake_fetch)
+    assert W._last_prices(["XRP/USDT:USDT"]) == {"XRP/USDT:USDT": 1.15}
+    market["XRP/USDT:USDT"] = 0.91
+    for _ in range(5):                       # цикл клиента: stats (вотчлист) -> me (позиция)
+        clock_["t"] += 60
+        W._last_prices(["BTC/USDT:USDT"])
+        got = W._last_prices(["XRP/USDT:USDT"])
+    assert got == {"XRP/USDT:USDT": 0.91}    # позиция перезапрошена, не заморожена
+    # в окне 45с повторный запрос того же символа сеть не трогает
+    n = len(calls)
+    W._last_prices(["XRP/USDT:USDT"])
+    assert len(calls) == n
+    # отдаются только запрошенные символы
+    assert set(W._last_prices(["BTC/USDT:USDT"])) == {"BTC/USDT:USDT"}
+    # символ пропал из ответа биржи: через 10 мин его цена больше не отдаётся
+    del market["XRP/USDT:USDT"]
+    clock_["t"] += 700
+    assert W._last_prices(["XRP/USDT:USDT"]) == {}
+
+
+def test_trade_chart_rejects_unicode_digits(fresh_db):
+    """Аудит 05.10: '²'.isdigit() == True, int('²') -> ValueError -> 500 без авторизации."""
+    from app.webapp import app as flask_app
+    c = flask_app.test_client()
+    assert c.get("/api/trade_chart?id=%C2%B2").status_code == 400
+    assert c.get("/api/trade_chart?id=1234567890123").status_code == 400
+
+
+def test_avg_hold_excludes_shadow_trades(fresh_db):
+    """Аудит 05.10: «в сделке» усреднял и теневые (rejected) исходы."""
+    from app import db
+    from app.webapp import _avg_hold_hours
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, result_r, created_at, filled_at, closed_at) "
+        "VALUES (970,'AAA/USDT:USDT','LONG','1h',1,0.9,2,0.7,'{}','stopped',-1.0,"
+        "'2026-10-01T00:00:00+00:00','2026-10-01T01:00:00+00:00','2026-10-01T03:00:00+00:00'),"
+        "(971,'BBB/USDT:USDT','LONG','1h',1,0.9,2,0.7,'{}','rejected',1.0,"
+        "'2026-10-01T00:00:00+00:00','2026-10-01T01:00:00+00:00','2026-10-04T00:00:00+00:00')")
+    assert _avg_hold_hours() == 2.0
+
+
+def test_admin_panel_grant_rewards_referrer(fresh_db, admin_env):
+    """Аудит 05.10: выдача из панели не награждала реферера, в отличие от /grant."""
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(800300, "ref")
+    payments.register_user(800301, "invitee")
+    payments.set_referrer(800301, 800300)
+    hdr = {"Authorization": "tma " + _init_data("123:TEST", 900500)}
+    with flask_app.test_client() as c:
+        assert c.post("/api/admin/user", json={"tg_id": 800301, "action": "grant",
+                                               "days": 30}, headers=hdr).status_code == 200
+    assert payments.get_user(800301)["referral_rewarded_at"] is not None
+    assert payments.is_paid(800300) is True

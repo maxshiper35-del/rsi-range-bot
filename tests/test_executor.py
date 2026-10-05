@@ -361,7 +361,7 @@ def test_reconcile_balance_outage_defers_only_placement(fresh_db, monkeypatch):
     _seed_halt_case()
     db.execute("UPDATE signals SET status='expired' WHERE id=911")   # журнал снял 911
     runtime.set_executor_since("2026-10-04T00:00:00+00:00")
-    ex._BALANCE_ALERT["at"] = 0.0
+    ex._BALANCE_ALERT["at"] = None
     _fake_exchange(monkeypatch, ex, RuntimeError("network down"))
 
     out = ex.reconcile()
@@ -387,3 +387,195 @@ def test_entry_slip_rule():
     assert slip_rule_verdict([-0.1] * 50) == (50, -0.1, True)
     assert slip_rule_verdict([-0.05] * 80)[2] is False
     assert slip_rule_verdict([]) == (0, 0.0, False)
+
+
+class _PlaceEx:
+    """Фейковая биржа для пути постановки: markets/market/price_to_precision + сценарий
+    create_order. created — журнал вызовов."""
+    def __init__(self, behaviour):
+        self.behaviour = behaviour
+        self.created = []
+        self.markets = {"GGG/USDT:USDT": {}}
+
+    def fetch_balance(self):
+        return {"info": {"data": [{"asset": "VST", "equity": "100000"}]},
+                "total": {"VST": 100000.0}}
+
+    def market(self, symbol):
+        return {"limits": {"amount": {"min": 0}}, "precision": {"amount": 0.001}}
+
+    def price_to_precision(self, symbol, px):
+        return str(px)
+
+    def create_order(self, symbol, typ, side, qty, price, params=None):
+        self.created.append(dict(params or {}))
+        return self.behaviour(self, params or {})
+
+    def fetch_open_orders(self, symbol):
+        return []
+
+
+def _seed_place(sid=941):
+    from app import db, runtime
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at) VALUES "
+        f"({sid},'GGG/USDT:USDT','LONG','1h',100,98,2.0,0.7,'{{}}','open',"
+        "'2026-10-05T01:00:00+00:00')")
+    runtime.set_executor_since("2026-10-05T00:00:00+00:00")
+
+
+def _patch_net(monkeypatch, ex_mod, fake):
+    monkeypatch.setenv("BINGX_API_KEY", "test")
+    monkeypatch.setattr(ex_mod, "_exchange", lambda: fake)
+    monkeypatch.setattr(ex_mod, "_sync_fill_states", lambda ex, report: None)
+    monkeypatch.setattr(ex_mod, "_orphan_lines", lambda ex: [])
+
+
+def test_place_101400_keeps_deferred_stop_marker(fresh_db, monkeypatch):
+    """Аудит 05.10: метку «стоп отложен до филла» затирал _set_state(…,'placed') —
+    после филла стоп не довешивался, позиция жила без биржевого стопа."""
+    from ccxt import ExchangeError
+
+    from app import db
+    from app.v2 import bingx_executor as ex
+
+    def behaviour(fake, params):
+        if "stopLoss" in params:
+            raise ExchangeError('bingx {"code":101400,"msg":"SL Price must be lower"}')
+        return {"id": "T1"}
+
+    fake = _PlaceEx(behaviour)
+    _seed_place()
+    _patch_net(monkeypatch, ex, fake)
+    out = ex.reconcile()
+    row = db.query_one("SELECT state, note, order_id FROM executor_orders WHERE signal_id=941")
+    assert (row["state"], row["note"], row["order_id"]) == ("placed", "стоп отложен до филла",
+                                                             "T1")
+    assert any("довешу при филле" in line for line in out)
+
+
+def test_place_normal_path_stores_order_id(fresh_db, monkeypatch):
+    from app import db
+    from app.v2 import bingx_executor as ex
+    fake = _PlaceEx(lambda f, p: {"id": "T2"})
+    _seed_place(942)
+    _patch_net(monkeypatch, ex, fake)
+    ex.reconcile()
+    row = db.query_one("SELECT state, note, order_id FROM executor_orders WHERE signal_id=942")
+    assert (row["state"], row["note"], row["order_id"]) == ("placed", None, "T2")
+    assert "stopLoss" in fake.created[0]                     # стоп прикреплён к входу
+
+
+def test_place_lost_response_stays_placing(fresh_db, monkeypatch):
+    """Аудит 05.10: таймаут после отправки -> раньше 'error' навсегда (живой триггер
+    никто не снимал). Теперь строка остаётся 'placing' до сверки."""
+    from ccxt import RequestTimeout
+
+    from app import db
+    from app.v2 import bingx_executor as ex
+
+    def behaviour(fake, params):
+        raise RequestTimeout("timed out")
+
+    _seed_place(943)
+    _patch_net(monkeypatch, ex, _PlaceEx(behaviour))
+    out = ex.reconcile()
+    assert db.query_one("SELECT state FROM executor_orders WHERE signal_id=943")["state"] \
+        == "placing"
+    assert any("ответ биржи потерян" in line for line in out)
+
+
+def test_close_position_clamps_to_own_share(fresh_db):
+    """Аудит 05.10: две позиции одного символа/стороны сливаются; стоп закрыл долю A —
+    закрытие A не должно продать долю B."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    for sid, qty in ((951, 10.0), (952, 5.0)):
+        db.execute(
+            "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+            "confidence, snapshot_json, status, created_at) VALUES "
+            f"({sid},'HHH/USDT:USDT','LONG','1h',100,98,2.0,0.7,'{{}}','open',"
+            f"'2026-10-05T0{sid - 950}:00:00+00:00')")
+        db.execute(
+            "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+            "client_id, state, created_at) VALUES (?, 'HHH/USDT:USDT','LONG',?,100,98,"
+            "?, 'filled','2026-10-05T01:00:00+00:00')", (sid, qty, f"rsiE{sid}"))
+    sold = []
+
+    class _Ex:
+        def __init__(self, pos):
+            self.pos = pos
+
+        def fetch_positions(self, symbols):
+            return [{"symbol": "HHH/USDT:USDT", "side": "long", "contracts": self.pos}]
+
+        def create_order(self, symbol, typ, side, qty, price, params=None):
+            sold.append(qty)
+            return {"id": "C", "average": 97.0}
+
+        def fetch_my_trades(self, symbol, limit=20):
+            return []
+
+    t = db.query_one("SELECT * FROM executor_orders WHERE signal_id=951")
+    assert ex._close_position(_Ex(5.0), t, max_qty=10.0) == 0.0     # остаток — доля B
+    assert sold == []
+    assert ex._close_position(_Ex(15.0), t, max_qty=10.0) == 10.0    # обе доли живы
+    assert sold == [10.0]
+
+
+def test_symbol_budget_allows_concurrent_duplicates(fresh_db):
+    """Аудит 05.10: кап 1500 работал как ОБЩИЙ бюджет символа/стороны — дубли мульти-ТФ
+    не исполнялись. Теперь 1500 на ордер, 4500 на символ/сторону."""
+    from app.v2 import bingx_executor as ex
+    assert ex.SYMBOL_BUDGET_USDT >= 3 * ex.MAX_NOTIONAL_USDT
+    assert ex.SYMBOL_BUDGET_USDT < 5000                      # лимит BingX 101209
+
+
+def test_retry_keeps_deferred_stop_id(fresh_db):
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_place(961)
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, created_at, note) VALUES (961,'GGG/USDT:USDT','LONG',1,100,98,"
+        "'rsiE961','filled','2026-10-05T01:00:00+00:00','sl:777')")
+    assert ex._bump_retry(961, RuntimeError("сеть")) == 1
+    note = db.query_one("SELECT note FROM executor_orders WHERE signal_id=961")["note"]
+    assert note.startswith("retry#1") and ex._sl_id(note) == "777"
+    assert ex._bump_retry(961, RuntimeError("сеть")) == 2
+    note = db.query_one("SELECT note FROM executor_orders WHERE signal_id=961")["note"]
+    assert ex._sl_id(note) == "777"
+    assert ex._sl_id("sl:12") == "12" and ex._sl_id("стоп НЕ встал: sl:x") == ""
+
+
+def test_alert_due_first_alert_right_after_boot():
+    """Аудит 05.10: старт с 0.0 глушил первый алерт час после загрузки Mac."""
+    from app.v2.bingx_executor import _alert_due
+    assert _alert_due({"at": None}, now_mono=120.0) is True
+    assert _alert_due({"at": 100.0}, now_mono=200.0) is False
+    assert _alert_due({"at": 100.0}, now_mono=3800.0) is True
+
+
+def test_kill_switch_keeps_fresh_fill(fresh_db, monkeypatch):
+    """Аудит 05.10: триггер сработал между тактами, строка ещё 'placed' — стоп-кран не
+    должен «отменой» закрыть свежую позицию: сначала сверка филлов."""
+    from app import clock, db, runtime
+    from app.v2 import bingx_executor as ex
+    _seed_halt_case()
+    runtime.set_executor_since("2026-10-04T00:00:00+00:00")
+    day = clock.utcnow_iso()[:10]
+    runtime.set_value("executor_day_anchor", f"{day}|100000.0000")
+    _fake_exchange(monkeypatch, ex, 94_000)
+    closed = []
+    monkeypatch.setattr(ex, "_close_position",
+                        lambda e, t, max_qty: closed.append(t["signal_id"]) or max_qty)
+
+    def sync(e, report):                                     # биржа: 911 уже исполнен
+        db.execute("UPDATE executor_orders SET state='filled' WHERE signal_id=911 "
+                   "AND state='placed'")
+    monkeypatch.setattr(ex, "_sync_fill_states", sync)
+    ex.reconcile()
+    assert db.query_one("SELECT state FROM executor_orders WHERE signal_id=911")["state"] \
+        == "filled"
+    assert closed == []

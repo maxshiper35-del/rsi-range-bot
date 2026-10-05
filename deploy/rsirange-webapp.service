@@ -11,7 +11,7 @@ Wants=network-online.target
 Type=simple
 User=bot
 WorkingDirectory=/home/bot/rsirange
-ExecStart=/home/bot/rsirange/.venv/bin/waitress-serve --listen=127.0.0.1:8091 app.webapp:app
+ExecStart=/home/bot/rsirange/.venv/bin/waitress-serve --listen=127.0.0.1:8091 --max-request-body-size=65536 app.webapp:app
 Restart=always
 RestartSec=5
 

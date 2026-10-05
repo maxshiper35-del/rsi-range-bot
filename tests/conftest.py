@@ -44,6 +44,7 @@ def fresh_db(tmp_path, monkeypatch):
     import app.webapp as _webapp
 
     _webapp._STATS_CACHE["body"], _webapp._STATS_CACHE["at"] = None, 0.0
+    _webapp._TICKERS.update({"prices": {}, "pcts": {}, "tried": {}, "ok": {}})
     yield db
     _reset_conn(db)
     get_settings.cache_clear()
