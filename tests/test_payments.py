@@ -920,3 +920,103 @@ def test_subscriber_breakdown_separates_trial_grant_paying(fresh_db):
     uc = payments.user_counts()
     assert uc["paying"] == 1 and uc["trial"] == 1 and uc["granted"] == 1
     assert uc["paid"] == 3                       # доставка сигналов: все активные
+
+
+def test_unlock_delivery_allowed_by_schema(fresh_db):
+    """Аудит 05.10: CHECK из 002 не пускал kind='unlock' — купивший сигнал не получал
+    текст. Миграция 023: тизер -> unlock проходит, кнопки открываются, «упущенное» чистое."""
+    from app.delivery import payments
+    payments.register_user(1001, "u")
+    assert payments.record_delivery(1001, 5, "teaser") is True
+    assert payments.mark_delivery_unlocked(1001, 5) is True
+    assert payments.delivered_full(1001, 5) is True
+    # купивший из канала (тизерной записи нет) — запись 'unlock' сразу
+    assert payments.mark_delivery_unlocked(1001, 6) is False
+    assert payments.record_delivery(1001, 6, "unlock") is True
+    assert payments.delivered_full(1001, 6) is True
+
+
+def test_failed_write_does_not_hold_transaction(fresh_db):
+    """Аудит 05.10: упавший execute (IntegrityError) оставлял неявную транзакцию открытой —
+    соединение держало write-lock. Теперь откат."""
+    import sqlite3
+
+    import pytest
+
+    from app import db
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("INSERT INTO deliveries(tg_id, signal_id, kind, created_at) "
+                   "VALUES (1, 1, 'bogus', 'x')")
+    assert db.get_conn().in_transaction is False
+
+
+def test_admin_grant_keeps_other_tier_invoice(fresh_db, monkeypatch):
+    """Аудит 05.10: /grant 30 гасил ВСЕ pending-инвойсы — оплаченный, но не опрошенный
+    lifetime терялся. Теперь гасится только инвойс того же тира, прочие поллер зачтёт."""
+    from app import runtime
+    from app.delivery import payments
+    runtime.set_value("cryptobot_token", "tok")
+
+    def fake_call(method, params, post=True):
+        if method == "createInvoice":
+            return {"invoice_id": 980, "bot_invoice_url": "https://t.me/x"}
+        return {"items": [{"invoice_id": 980, "status": "paid"}]}
+
+    monkeypatch.setattr(payments, "_cryptobot_call", fake_call)
+    payments.create_cryptobot_invoice(961, 36500, amount=300)
+    payments.admin_grant(961, 30)                       # подарок/жест — другой тир
+    activated = payments.poll_cryptobot()
+    assert [a[0] for a in activated] == [961]           # lifetime зачтён поллером
+    from datetime import datetime, timezone
+    until = datetime.fromisoformat(payments.get_user(961)["paid_until"])
+    assert (until - datetime.now(timezone.utc)).days > 36000
+
+
+def test_intro_payment_does_not_open_winback(fresh_db):
+    """Аудит 05.10: intro 10⭐/5ч перевзводил win-back (+7 дн) — бесконечный цикл почти
+    бесплатного доступа. Win-back — только после квалифицирующей оплаты (>= 7 дн)."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import db
+    from app.delivery import payments
+    payments.grant_subscription(902, "stars", 10, "XTR", 5 / 24, "chg_intro")
+    three_days = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    db.execute("UPDATE users SET paid_until=?, tier='free' WHERE tg_id=?", (three_days, 902))
+    assert payments.due_for_winback(2) == []
+    # ранее платил месяц и получил win-back; новый intro НЕ перевзводит напоминание
+    payments.grant_subscription(903, "stars", 1000, "XTR", 30, "chg_m")
+    db.execute("UPDATE users SET winback_reminded_at='2026-01-01T00:00:00+00:00' "
+               "WHERE tg_id=903")
+    payments.grant_subscription(903, "stars", 10, "XTR", 5 / 24, "chg_i2")
+    assert payments.get_user(903)["winback_reminded_at"] is not None
+
+
+def test_mark_refunded_idempotent_and_reverses_referral(fresh_db):
+    """Аудит 05.10: повторный /refund вычитал дни дважды; возврат не откатывал награду
+    реферера (ферма «оплатил -> money-back»)."""
+    from datetime import datetime
+
+    from app.delivery import payments
+    payments.register_user(830, "ref")
+    payments.register_user(831, "invitee")
+    payments.set_referrer(831, 830)
+    payments.grant_subscription(831, "stars", 2500, "XTR", 90, "chg_q")
+    payments.grant_subscription(831, "stars", 1000, "XTR", 30, "chg_m")
+    assert payments.reward_referrer_on_payment(831, 7, paid_days=30) == (830, 7)
+    ref_until = datetime.fromisoformat(payments.get_user(830)["paid_until"])
+    pay = payments.find_refundable_stars_payment(831)       # последний — 30 дн
+    until0 = datetime.fromisoformat(payments.get_user(831)["paid_until"])
+    assert payments.mark_refunded(pay["id"], 831, pay["days"], 7) is True
+    until1 = datetime.fromisoformat(payments.get_user(831)["paid_until"])
+    assert round((until0 - until1).total_seconds() / 86400) == 30
+    # повтор — no-op, дни второй раз не снимаются
+    assert payments.mark_refunded(pay["id"], 831, pay["days"], 7) is False
+    assert datetime.fromisoformat(payments.get_user(831)["paid_until"]) == until1
+    # остался квалифицирующий 90-дн платёж -> награда реферера сохраняется
+    assert datetime.fromisoformat(payments.get_user(830)["paid_until"]) == ref_until
+    # вернули и его -> награда откатывается
+    pay2 = payments.find_refundable_stars_payment(831)
+    assert payments.mark_refunded(pay2["id"], 831, pay2["days"], 7) is True
+    ref_after = datetime.fromisoformat(payments.get_user(830)["paid_until"])
+    assert ref_after < ref_until
+    assert payments.get_user(831)["referral_rewarded_at"] is None

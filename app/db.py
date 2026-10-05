@@ -46,8 +46,14 @@ def execute(sql: str, params: Sequence[Any] = ()) -> int:
     UPDATE после register_user возвращал tg_id вместо rowcount)."""
     with _write_lock:
         conn = get_conn()
-        cur = conn.execute(sql, params)
-        conn.commit()
+        try:
+            cur = conn.execute(sql, params)
+            conn.commit()
+        except Exception:
+            # упавший DML (IntegrityError/CHECK) оставлял неявную транзакцию открытой:
+            # соединение потока держало write-lock до следующего commit (аудит 05.10)
+            conn.rollback()
+            raise
         if sql.lstrip()[:6].upper() == "INSERT":
             return cur.lastrowid or cur.rowcount
         return cur.rowcount
@@ -56,8 +62,12 @@ def execute(sql: str, params: Sequence[Any] = ()) -> int:
 def executemany(sql: str, rows: Iterable[Sequence[Any]]) -> int:
     with _write_lock:
         conn = get_conn()
-        cur = conn.executemany(sql, rows)
-        conn.commit()
+        try:
+            cur = conn.executemany(sql, rows)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         return cur.rowcount
 
 

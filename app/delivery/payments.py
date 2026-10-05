@@ -184,21 +184,45 @@ def find_refundable_stars_payment(tg_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def mark_refunded(payment_id: int, tg_id: int, days: float) -> None:
+def _cut_paid_until(conn, tg_id: int, days: float) -> None:
+    """Вычесть days из paid_until юзера, не ниже текущего момента (внутри транзакции)."""
+    u = conn.execute("SELECT paid_until FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    if u and u["paid_until"]:
+        cur = datetime.fromisoformat(u["paid_until"])
+        new_until = max(_now_dt(), cur - timedelta(days=days)).isoformat()
+        conn.execute("UPDATE users SET paid_until=?, updated_at=? WHERE tg_id=?",
+                     (new_until, clock.utcnow_iso(), tg_id))
+
+
+def mark_refunded(payment_id: int, tg_id: int, days: float,
+                  referral_days: float = 0.0) -> bool:
     """После успешного refundStarPayment: пометить платёж refunded и вычесть купленные
     дни из paid_until (не ниже текущего момента — промо/триал-хвосты не сгорают в минус,
-    а сама подписка от возвращённого платежа гаснет).
+    а сама подписка от возвращённого платежа гаснет). -> True, если применено сейчас.
 
+    Идемпотентно: вычитание только при переходе paid -> refunded (rowcount), иначе двойной
+    /refund (или ветка «CHARGE_ALREADY_REFUNDED — починить БД») снимал дни дважды.
+    Реф-награда откатывается, если у приглашённого не осталось квалифицирующего платежа:
+    иначе «оплатил -> money-back» фармил рефереру бесплатные дни (аудит 05.10).
     Чтение paid_until — ВНУТРИ транзакции (под _write_lock): снаружи покупка, закоммиченная
     между чтением и записью, была бы затёрта устаревшим new_until (аудит-2 [9])."""
     with db.transaction() as conn:
-        conn.execute("UPDATE payments SET status='refunded' WHERE id=?", (payment_id,))
-        u = conn.execute("SELECT paid_until FROM users WHERE tg_id=?", (tg_id,)).fetchone()
-        if u and u["paid_until"]:
-            cur = datetime.fromisoformat(u["paid_until"])
-            new_until = max(_now_dt(), cur - timedelta(days=days)).isoformat()
-            conn.execute("UPDATE users SET paid_until=?, updated_at=? WHERE tg_id=?",
-                         (new_until, clock.utcnow_iso(), tg_id))
+        cur = conn.execute("UPDATE payments SET status='refunded' "
+                           "WHERE id=? AND status='paid'", (payment_id,))
+        if cur.rowcount != 1:
+            return False
+        _cut_paid_until(conn, tg_id, days)
+        u = conn.execute("SELECT invited_by, referral_rewarded_at FROM users WHERE tg_id=?",
+                         (tg_id,)).fetchone()
+        if referral_days > 0 and u and u["invited_by"] and u["referral_rewarded_at"]:
+            still = conn.execute(
+                "SELECT 1 FROM payments WHERE tg_id=? AND status='paid' AND days >= ?",
+                (tg_id, REFERRAL_MIN_PAID_DAYS)).fetchone()
+            if still is None:
+                _cut_paid_until(conn, u["invited_by"], referral_days)
+                conn.execute("UPDATE users SET referral_rewarded_at=NULL, updated_at=? "
+                             "WHERE tg_id=?", (clock.utcnow_iso(), tg_id))
+    return True
 
 
 def grant_trial(tg_id: int, days: float) -> bool:
@@ -291,7 +315,10 @@ def _extend_and_activate(conn, tg_id: int, days: float, real_payment: bool = Fal
     u = get_user(tg_id)
     base = u["paid_until"] if (u and u["paid_until"] and u["paid_until"] > now) else now
     new_until = (datetime.fromisoformat(base) + timedelta(days=days)).isoformat()
-    wb_reset = ", winback_reminded_at=NULL" if real_payment else ""
+    # короткие оплаты (intro 10⭐/5ч) win-back не перевзводят: иначе цикл «intro ->
+    # win-back +7 дн -> снова intro» давал неделю доступа за 10⭐ бесконечно (аудит 05.10)
+    wb_reset = (", winback_reminded_at=NULL"
+                if real_payment and days >= REFERRAL_MIN_PAID_DAYS else "")
     conn.execute(f"UPDATE users SET tier='paid', paid_until=?, renew_reminded_at=NULL"
                  f"{wb_reset}, updated_at=? WHERE tg_id=?",
                  (new_until, now, tg_id))
@@ -514,11 +541,15 @@ def admin_grant(tg_id: int, days: int) -> bool:
         # атомарно с выдачей: при падении между операциями не получим
         # «заявки закрыты, подписка не выдана» (замолкшая SLA-эскалация)
         _extend_and_activate(conn, tg_id, days, real_payment=True)
-        # погасить pending USDT-инвойсы юзера: /grant = ручное подтверждение оплаты,
-        # авто-поллер не должен вторично начислить те же деньги (аудит-2 [3]);
+        # погасить pending USDT-инвойс ТОГО ЖЕ тира: /grant = ручное подтверждение оплаты,
+        # авто-поллер не должен вторично начислить те же деньги (аудит-2 [3]). Инвойсы
+        # ДРУГИХ тиров не трогаем: оплаченный, но ещё не опрошенный lifetime-инвойс,
+        # погашенный /grant 30, терялся вместе с деньгами (аудит 05.10).
         # 'expired' — из существующего CHECK-набора статусов
-        conn.execute("UPDATE payments SET status='expired' "
-                     "WHERE tg_id=? AND method='cryptobot' AND status='pending'", (tg_id,))
+        conn.execute("UPDATE payments SET status='expired' WHERE id = ("
+                     "SELECT id FROM payments WHERE tg_id=? AND method='cryptobot' "
+                     "AND status='pending' AND ABS(days - ?) < 1e-6 "
+                     "ORDER BY created_at DESC LIMIT 1)", (tg_id, float(days)))
         conn.execute("UPDATE usdt_claims SET resolved_at=? WHERE tg_id=? AND resolved_at IS NULL",
                      (clock.utcnow_iso(), tg_id))
     return True
@@ -573,15 +604,16 @@ def due_for_winback(days_after: int = 2, window_days: int = 3) -> list:
 
     ТОЛЬКО реально плативших (EXISTS в payments): триал/промо тоже ставят paid_until,
     и без этого гейта каждый триальщик получал бы вечный цикл бесплатных win-back-промо
-    (аудит-2 [1] — «вечная бесплатная подписка»)."""
+    (аудит-2 [1] — «вечная бесплатная подписка»). Платёж — квалифицирующий (>= 7 дн):
+    intro за 10⭐ не открывает win-back (аудит 05.10)."""
     ceil = (_now_dt() - timedelta(days=days_after)).isoformat()
     floor = (_now_dt() - timedelta(days=days_after + window_days)).isoformat()
     return db.query(
         "SELECT tg_id, paid_until FROM users WHERE tier='free' AND paid_until IS NOT NULL "
         "AND paid_until <= ? AND paid_until >= ? AND winback_reminded_at IS NULL "
         "AND EXISTS (SELECT 1 FROM payments p WHERE p.tg_id = users.tg_id "
-        "AND p.status='paid')",
-        (ceil, floor))
+        "AND p.status='paid' AND p.days >= ?)",
+        (ceil, floor, REFERRAL_MIN_PAID_DAYS))
 
 
 def mark_winback_reminded(tg_id: int) -> None:

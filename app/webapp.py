@@ -484,6 +484,10 @@ def api_admin() -> Response:
 
     pays = db.query_one("SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS s "
                         "FROM payments WHERE status='paid'") or {"n": 0, "s": 0.0}
+    # Stars и USDT — разные деньги: сумма «всего» без валюты врала (аудит 05.10)
+    by_cur = {r["currency"]: round(float(r["s"]), 2) for r in db.query(
+        "SELECT currency, SUM(amount) AS s FROM payments WHERE status='paid' "
+        "GROUP BY currency")}
     last_pays = [dict(r) for r in db.query(
         "SELECT tg_id, method, amount, currency, days, paid_at FROM payments "
         "WHERE status='paid' ORDER BY paid_at DESC LIMIT 10")]
@@ -515,6 +519,7 @@ def api_admin() -> Response:
                   "lapsed": lapsed["n"], "acquisition": payments.acquisition_breakdown(),
                   "recent": recent_users},
         "money": {"payments_n": pays["n"], "payments_sum": round(float(pays["s"]), 2),
+                  "payments_by_cur": by_cur,
                   "last": last_pays},
         "settings": _admin_settings_payload(),
         "open_signals": open_full,

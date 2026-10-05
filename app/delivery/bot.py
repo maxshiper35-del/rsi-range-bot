@@ -600,6 +600,23 @@ def fill_is_fresh(c: dict, now: datetime, factor: float = 2.0, slack: float = 90
     return (now - filled).total_seconds() <= factor * tf_sec + slack
 
 
+def precheckout_ok(payload: str | None, total: int, currency: str,
+                   tiers: list[tuple[float, int]]) -> bool:
+    """Пропустить ли оплату: 'sub:<дни>' должен совпасть с ВКЛЮЧЁННЫМ тарифом по дням и
+    ТЕКУЩЕЙ цене в XTR. 'unlock:' (paid media) — платформенный поток, пропускаем как раньше."""
+    p = payload or ""
+    if p.startswith("unlock:"):
+        return True
+    if currency != "XTR" or not p.startswith("sub:"):
+        return False
+    try:
+        days = float(p.split(":", 1)[1])
+    except ValueError:
+        return False
+    return any(price > 0 and abs(d - days) < 1e-6 and int(total) == int(price)
+               for d, price in tiers)
+
+
 def result_is_fresh(c: dict, now: datetime, max_age_hours: float = 12.0) -> bool:
     """Свежий ли исход (результат/expired) для поста в канал: бар выхода не старше
     max_age_hours. Запоздалые закрытия (простой бота, пауза, рестарт) в канал не уходят —
@@ -1942,23 +1959,39 @@ def main() -> None:
         # перепометка доставки: купленный сигнал не должен попадать в «что ты упустил»
         log.info("unlock куплен: юзер %s, payload=%s",
                  p.from_user.id, p.paid_media_payload)
+        parts = (p.paid_media_payload or "").split(":")
+        if not (len(parts) >= 2 and parts[0] == "unlock" and parts[1].isdigit()):
+            return
+        uid, sid = p.from_user.id, int(parts[1])
+        # 1) ДОСТАВКА — первой и отдельно: купивший обязан получить уровни. Раньше учёт шёл
+        # первым в общем try, падал на CHECK (kind='unlock') и текст не уходил (аудит 05.10).
+        # Полный текст — ПОСЛЕ оплаты: в caption paid media его класть нельзя (виден до
+        # покупки), а купивший должен получить уровни, даже если caption не влез в лимит
         try:
-            parts = (p.paid_media_payload or "").split(":")
-            if len(parts) >= 2 and parts[0] == "unlock" and parts[1].isdigit():
-                sid = int(parts[1])
-                await asyncio.to_thread(payments.mark_delivery_unlocked,
-                                        p.from_user.id, sid)
-                # полный текст — ПОСЛЕ оплаты: в caption paid media его класть нельзя
-                # (виден до покупки), а купивший должен получить уровни, даже если
-                # caption не влез в лимит (старый баг «голый PNG»)
-                row = await asyncio.to_thread(journal.signal_row, sid)
-                if row is not None:
+            row = await asyncio.to_thread(journal.signal_row, sid)
+            if row is None:
+                raise LookupError(f"сигнал #{sid} не найден")
+            await bot.send_message(
+                uid, templates.render_signal_dm(journal.row_to_signal(row), sid),
+                parse_mode="HTML", reply_markup=_signal_actions_kb(sid))
+        except Exception as e:                          # noqa: BLE001
+            log.error("unlock #%s оплачен юзером %s, но текст не доставлен: %s", sid, uid, e)
+            for admin_id in cfg.admin_ids:
+                try:
                     await bot.send_message(
-                        p.from_user.id,
-                        templates.render_signal_dm(journal.row_to_signal(row), sid),
-                        parse_mode="HTML")
+                        admin_id, f"⚠️ Юзер {uid} купил сигнал #{sid} (paid media), но полный "
+                                  f"текст не доставлен: {str(e)[:120]}. Отправьте вручную "
+                                  "или верните Stars.")
+                except Exception:                      # noqa: BLE001
+                    log.exception("unlock alert админу %s", admin_id)
+        # 2) УЧЁТ: купленный сигнал не должен попадать в «что ты упустил», а кнопки
+        # «График/Риск» должны открываться (delivered_full). Купивший из канала тизерной
+        # записи не имеет — пишем 'unlock' сразу.
+        try:
+            if not await asyncio.to_thread(payments.mark_delivery_unlocked, uid, sid):
+                await asyncio.to_thread(payments.record_delivery, uid, sid, "unlock")
         except Exception as e:                          # noqa: BLE001 — учёт не критичен
-            log.warning("mark_delivery_unlocked: %s", e)
+            log.warning("mark_delivery_unlocked #%s %s: %s", sid, uid, e)
 
     def _signal_actions_kb(sid: int) -> InlineKeyboardMarkup:
         """Инлайн-панель под полным DM-сигналом: быстрый график и расчёт риска без набора команд."""
@@ -2232,9 +2265,29 @@ def main() -> None:
                 except Exception as e:                 # noqa: BLE001
                     log.warning("notify admin channel-id %s: %s", admin_id, e)
 
+    def _current_stars_tiers() -> list[tuple[float, int]]:
+        """(дни, цена⭐) включённых сейчас тарифов — те же, что строит _subscribe_kb."""
+        tiers = [(float(runtime.sub_days()), runtime.price_stars()),
+                 (90.0, runtime.quarter_price_stars()), (365.0, runtime.year_price_stars()),
+                 (36500.0, runtime.lifetime_price_stars())]
+        if runtime.intro_hours() > 0:
+            tiers.append((round(runtime.intro_hours() / 24, 6), runtime.intro_price_stars()))
+        return tiers
+
     @dp.pre_checkout_query()
     async def _pre_checkout(q):
-        await q.answer(ok=True)
+        # старые инвойсы (выключенный тариф, прежняя цена, пересланные копии) иначе
+        # оплачивались бы вечно, а нечитаемый payload — сначала списание, потом фолбэк
+        # на 30 дн (аудит 05.10). Отказ — до списания, Stars не уходят.
+        ok = precheckout_ok(q.invoice_payload, q.total_amount, q.currency,
+                            _current_stars_tiers())
+        if ok:
+            await q.answer(ok=True)
+        else:
+            log.warning("pre_checkout отклонён: payload=%r amount=%s %s от %s",
+                        q.invoice_payload, q.total_amount, q.currency, q.from_user.id)
+            await q.answer(ok=False, error_message="Тариф изменился — откройте /subscribe "
+                                                   "и оплатите актуальный.")
 
     @dp.message(F.successful_payment)
     async def _paid(m):
@@ -2962,7 +3015,12 @@ def main() -> None:
             # дочиниваем БД, иначе строка вечно paid и /refund зациклен (аудит-2 [9])
             log.warning("refund %s: уже возвращён у Telegram, дочиниваю запись #%s",
                         uid, pay["id"])
-        await asyncio.to_thread(payments.mark_refunded, pay["id"], uid, pay["days"])
+        applied = await asyncio.to_thread(payments.mark_refunded, pay["id"], uid,
+                                          pay["days"], runtime.referral_reward_days())
+        if not applied:                                 # параллельный /refund уже провёл
+            await m.answer(f"Платёж #{pay['id']} уже помечен возвращённым — дни не "
+                           "вычитаются повторно.")
+            return
         await m.answer(f"↩️ Возвращено {pay['amount']:g}⭐ юзеру {uid}; "
                        f"подписка скорректирована (−{_fmt_days(pay['days'])}).")
         try:

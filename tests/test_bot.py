@@ -1110,3 +1110,20 @@ def test_should_remind_pause():
                                    "2026-10-04T10:00:00+00:00", now) is False
     assert bot.should_remind_pause("2026-09-13T18:18:31+00:00",
                                    "2026-10-03T11:00:00+00:00", now) is True
+
+
+def test_precheckout_ok():
+    """Аудит 05.10: pre_checkout пропускал всё — старые инвойсы выключенных/подорожавших
+    тарифов оплачивались вечно. Теперь сверка дней и текущей цены в XTR."""
+    tiers = [(30.0, 1500), (90.0, 15000), (365.0, 40000), (36500.0, 0), (0.208333, 10)]
+    assert bot.precheckout_ok("sub:30.0", 1500, "XTR", tiers) is True
+    assert bot.precheckout_ok("sub:30", 1500, "XTR", tiers) is True
+    assert bot.precheckout_ok("sub:0.208333", 10, "XTR", tiers) is True
+    assert bot.precheckout_ok("sub:30.0", 1000, "XTR", tiers) is False     # старая цена
+    assert bot.precheckout_ok("sub:36500", 15000, "XTR", tiers) is False   # тариф выключен
+    assert bot.precheckout_ok("sub:7", 1500, "XTR", tiers) is False        # нет такого тира
+    assert bot.precheckout_ok("мусор", 1500, "XTR", tiers) is False
+    assert bot.precheckout_ok("sub:x", 1500, "XTR", tiers) is False
+    assert bot.precheckout_ok("sub:30.0", 1500, "USD", tiers) is False
+    assert bot.precheckout_ok("unlock:5:50", 50, "XTR", tiers) is True     # paid media
+    assert bot.precheckout_ok(None, 0, "XTR", tiers) is False

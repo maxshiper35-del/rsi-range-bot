@@ -696,7 +696,7 @@ function renderUsers() {
   <section><div class="sec-h"><h2>ИСТОЧНИКИ</h2></div><table class="pos-t">${acq || ""}</table></section>
   <section><div class="sec-h"><h2>ПОСЛЕДНИЕ ЮЗЕРЫ</h2></div><table class="pos-t">${recent}</table></section>
   <section><div class="sec-h"><h2>ПОСЛЕДНИЕ ПЛАТЕЖИ</h2>
-    <span class="note">всего ${m.payments_sum}</span></div><table class="pos-t">${pays || ""}</table></section>`;
+    <span class="note">всего ${Object.entries(m.payments_by_cur || {}).map(([c, v]) => `${v} ${c === "XTR" ? "⭐" : esc(c)}`).join(" · ") || "0"}</span></div><table class="pos-t">${pays || ""}</table></section>`;
 }
 
 function renderSettings() {

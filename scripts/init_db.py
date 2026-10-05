@@ -1,4 +1,5 @@
-"""Прогон миграций: создаёт/обновляет схему БД. Запуск: make init-db (или python -m scripts.init_db).
+"""Прогон миграций: создаёт/обновляет схему БД.
+Запуск: make init-db (или python -m scripts.init_db).
 
 Требует заданного окружения (см. .env.example) — config.get_settings() валидирует секреты fail-fast.
 """
