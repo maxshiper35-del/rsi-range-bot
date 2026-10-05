@@ -1153,3 +1153,43 @@ def test_decision_is_fresh():
     assert bot.decision_is_fresh(sig1h, datetime(2026, 8, 22, 7, 50,
                                                  tzinfo=timezone.utc)) is False
     assert bot.decision_is_fresh(NS(created_at="мусор", timeframe="1h"), now) is False
+
+
+def test_shadow_setup_recorded_not_published(fresh_db, monkeypatch):
+    """Теневой режим (05.10): LTF-BB@4h проходит гейты, пишется в тень (rejected +
+    snapshot.shadow), в выдачу scan_auto не попадает; прочие сетапы — как обычно."""
+    from datetime import datetime, timezone
+
+    from app import db
+    from app.brain import journal
+    from app.core.signal_engine import Side, Signal
+
+    now = datetime.now(timezone.utc)
+
+    def mk(setup, tf, entry):
+        from datetime import timedelta
+        mins = {"1h": 60, "4h": 240}[tf]
+        # решающий бар закрылся минуту назад (не от начала часа: иначе после :45 тест
+        # падал на гейте свежести — зависимость от часов)
+        created = (now - timedelta(minutes=mins + 1)).isoformat()
+        return Signal(symbol="BTC/USDT:USDT", side=Side.LONG, timeframe=tf, entry=entry,
+                      stop=entry * 0.97, take_profits=[entry * 1.06], risk_reward=2.0,
+                      confidence=0.7, reasons=["r"], created_at=created,
+                      indicators_snapshot={"setup": setup})
+
+    class _Eng:
+        def analyze_multi(self, frames, symbol):
+            return [mk("LTF-BB", "4h", 100.0), mk("LTF-BB", "1h", 101.0)]
+
+    out = bot.scan_auto("BTC/USDT:USDT", {}, _Eng())
+    assert [s.timeframe for s, _ in out] == ["1h"]                # 4h ушёл в тень
+    row = db.query_one("SELECT id, status FROM signals WHERE timeframe='4h'")
+    assert row["status"] == "rejected"
+    ev = db.query_one("SELECT event FROM signal_events WHERE signal_id=?", (row["id"],))
+    assert ev["event"] == "shadow"
+    # теневой исход считается и виден в shadow_stats, но не в публичной стате
+    db.execute("UPDATE signals SET result_r=-1.0, closed_at=? WHERE id=?",
+               (now.isoformat(), row["id"]))
+    st = journal.shadow_stats()
+    assert st[("LTF-BB", "4h")]["n"] == 1 and st[("LTF-BB", "4h")]["sum"] == -1.0
+    assert journal.stats()["trades"] == 0

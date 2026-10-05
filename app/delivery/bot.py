@@ -147,6 +147,11 @@ def scan_auto(symbol: str, frames: dict[str, pd.DataFrame],
             continue
         if not _side_cooldown_ok(sig.side.value, symbol):
             continue
+        if is_shadow_setup(sig):
+            # теневой режим: прошёл ВСЕ гейты как живой (честный контрфакт), но не
+            # публикуется/не исполняется — исход судится в тень
+            journal.record_shadow(sig)
+            continue
         sid = journal.record_signal(sig)
         out.append((sig, sid))
     return out
@@ -170,6 +175,9 @@ def scan_semiauto(symbol: str, frames: dict[str, pd.DataFrame],
         if not _side_capacity_ok(sig.side.value, symbol):
             continue
         if not _side_cooldown_ok(sig.side.value, symbol):
+            continue
+        if is_shadow_setup(sig):
+            journal.record_shadow(sig)
             continue
         sid = journal.record_candidate(sig)
         out.append((sig, sid))
@@ -604,6 +612,13 @@ def fill_is_fresh(c: dict, now: datetime, factor: float = 2.0, slack: float = 90
         filled = filled.replace(tzinfo=timezone.utc)
     tf_sec = _TF_SECONDS_VIEW.get(str(c.get("timeframe")), 3600)
     return (now - filled).total_seconds() <= factor * tf_sec + slack
+
+
+def is_shadow_setup(sig) -> bool:
+    """Сетап сигнала в теневом режиме (runtime.shadow_setups: {(тег, ТФ)})."""
+    from app import runtime
+    snap = sig.indicators_snapshot if isinstance(sig.indicators_snapshot, dict) else {}
+    return (str(snap.get("setup", "")), str(sig.timeframe)) in runtime.shadow_setups()
 
 
 DECISION_MAX_LAG_MIN = 45.0
@@ -1165,6 +1180,7 @@ ADMIN_COMMANDS = USER_COMMANDS + [
     ("setups", "включённые сетапы стратегии"),
     ("executor", "демо-исполнение на BingX (VST): status | on | off"),
     ("bysetup", "статистика по тегу сетапа (6226/1:1/open-SMC/LTF-BB/LTF-OB)"),
+    ("shadow", "теневые сетапы: итог проверки вперёд (не публикуются)"),
     ("growth", "атрибуция: источник -> приглашено -> оплатили -> %"),
     ("minconf", "порог уверенности сетапа (0..1)"),
     ("minimpulse", "мин. размер импульса в ATR"),
@@ -2922,6 +2938,26 @@ def main() -> None:
             return
         value = "6226,1:1,open-SMC,LTF" if parts[1].strip().lower() == "all" else parts[1].strip()
         await _set(m, "enabled_setups", value, f"Включённые сетапы: {value}")
+
+    @dp.message(Command("shadow"))
+    async def _shadow_cmd(m):
+        # теневой режим сетапов: итог контрфакта (не публикуется) — к решению по
+        # docs/measurements/2026-10-05-shadow-ltfbb-4h.md
+        if not _is_admin(m):
+            return
+        cur = await asyncio.to_thread(runtime.shadow_setups)
+        st = await asyncio.to_thread(journal.shadow_stats)
+        lines = ["🌑 <b>Теневые сетапы</b> (пишутся и судятся, не публикуются)",
+                 "В тени сейчас: " + (", ".join(f"{t}@{tf}" for t, tf in sorted(cur)) or "—")]
+        for (tag, tf), d in sorted(st.items()):
+            lines.append(f"{templates.esc(tag)}@{templates.esc(tf)}: n={d['n']} · "
+                         f"ΣR {d['sum']:+.2f} · "
+                         f"exp {d['exp']:+.3f}R · побед {d['wins']}")
+        if not st:
+            lines.append("Закрытых теневых исходов пока нет.")
+        lines.append("Правило решения: ≥60 закрытых и ≥3 мес — exp ≤ 0 → выключить насовсем; "
+                     "exp ≥ +0.05R → вернуть в публикацию; между — продолжать.")
+        await m.answer("\n".join(lines), parse_mode="HTML")
 
     @dp.message(Command("bysetup"))
     @dp.message(F.text == "🎯 По сетапам")

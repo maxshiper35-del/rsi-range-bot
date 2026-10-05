@@ -180,6 +180,41 @@ def _insert(signal: Signal, status: str, event: str) -> int:
     return sid
 
 
+def record_shadow(signal: Signal) -> int:
+    """Теневой сигнал (сетап на проверке вперёд): status='rejected' — механизм теневого
+    исхода уже есть (update_outcomes_from_bars пишет result_r, событие 'shadow'), а
+    публичная стата, гейты, executor и посты rejected не видят. Когорту отделяет флаг
+    snapshot.shadow='setup_off' (у ручных отклонений semiauto его нет; cohort_stats
+    смотрит событие 'rejected', которого у тени нет)."""
+    from dataclasses import replace
+    snap = dict(signal.indicators_snapshot) if isinstance(signal.indicators_snapshot,
+                                                          dict) else {}
+    snap["shadow"] = "setup_off"
+    return _insert(replace(signal, indicators_snapshot=snap), "rejected", "shadow")
+
+
+def shadow_stats(since_iso: str | None = None) -> dict:
+    """Итоги теневой когорты: закрытые исходы по тегу/ТФ. -> {(tag, tf): {n, sum, exp, wins}}"""
+    q = ("SELECT s.timeframe, s.snapshot_json, s.result_r FROM signals s "
+         "WHERE s.status='rejected' AND s.result_r IS NOT NULL "
+         "AND s.snapshot_json LIKE '%\"shadow\": \"setup_off\"%'")
+    args: tuple = ()
+    if since_iso:
+        q += " AND s.created_at >= ?"
+        args = (since_iso,)
+    out: dict = {}
+    for r in db.query(q, args):
+        key = (_setup_of(r), r["timeframe"])
+        d = out.setdefault(key, {"n": 0, "sum": 0.0, "wins": 0})
+        d["n"] += 1
+        d["sum"] += float(r["result_r"])
+        d["wins"] += 1 if r["result_r"] > 0 else 0
+    for d in out.values():
+        d["sum"] = round(d["sum"], 2)
+        d["exp"] = round(d["sum"] / d["n"], 3) if d["n"] else 0.0
+    return out
+
+
 def record_signal(signal: Signal) -> int:
     """Авто-режим: записать сигнал сразу активным (status=open) + событие 'opened'."""
     return _insert(signal, "open", "opened")

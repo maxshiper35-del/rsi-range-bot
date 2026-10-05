@@ -67,6 +67,22 @@ def paused_since() -> str | None:
     return row["updated_at"] if row else None
 
 
+def shadow_setups() -> set[tuple[str, str]]:
+    """Сетапы в ТЕНЕВОМ режиме: {(тег, ТФ)} — сигнал пишется и судится, но не публикуется,
+    не исполняется и не входит в публичную стату/гейты. Формат настройки 'LTF-BB@4h,…';
+    пустая строка = теней нет. Дефолт LTF-BB@4h (решение владельца 05.10: на паритете минус
+    на обеих половинах — −0.052R train / −0.021R OOS; проверка вперёд по
+    docs/measurements/2026-10-05-shadow-ltfbb-4h.md)."""
+    raw = _raw("shadow_setups")
+    raw = "LTF-BB@4h" if raw is None else raw
+    out = set()
+    for item in _csv(raw):
+        tag, _, tf = item.partition("@")
+        if tag and tf:
+            out.add((tag.strip(), tf.strip()))
+    return out
+
+
 def backtest_public() -> bool:
     """Показывать ли секцию «Бэктест 5 лет» в публичном дашборде. Дефолт ВЫКЛ (05.10):
     прежний расчёт пропускал стоп на баре входа и мерил выходы по тейку — +622R против
