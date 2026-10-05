@@ -137,7 +137,10 @@ def scan_auto(symbol: str, frames: dict[str, pd.DataFrame],
     есть сетап. Пустой список — сетапов нет, все дубли, или сторона упёрлась в
     портфельный лимит (max_open_per_side)."""
     out = []
+    now = datetime.now(timezone.utc)
     for sig in engine.analyze_multi(frames, symbol):
+        if not decision_is_fresh(sig, now):
+            continue                                    # решающий бар давно закрыт
         if journal.find_duplicate_setup(sig) is not None:
             continue
         if not _side_capacity_ok(sig.side.value, symbol):
@@ -158,7 +161,10 @@ def scan_semiauto(symbol: str, frames: dict[str, pd.DataFrame],
     же импульсом на каждом баре), либо лимит направления.
     """
     out = []
+    now = datetime.now(timezone.utc)
     for sig in engine.analyze_multi(frames, symbol):
+        if not decision_is_fresh(sig, now):
+            continue                                    # решающий бар давно закрыт
         if journal.find_duplicate_setup(sig) is not None:
             continue
         if not _side_capacity_ok(sig.side.value, symbol):
@@ -598,6 +604,29 @@ def fill_is_fresh(c: dict, now: datetime, factor: float = 2.0, slack: float = 90
         filled = filled.replace(tzinfo=timezone.utc)
     tf_sec = _TF_SECONDS_VIEW.get(str(c.get("timeframe")), 3600)
     return (now - filled).total_seconds() <= factor * tf_sec + slack
+
+
+DECISION_MAX_LAG_MIN = 45.0
+
+
+def decision_is_fresh(sig, now: datetime, max_lag_min: float = DECISION_MAX_LAG_MIN) -> bool:
+    """Записывать сигнал только на первом такте после закрытия его решающего бара.
+
+    Поллер каждый час пересканирует и последний закрытый 4h-бар: сигнал, заблокированный
+    на 04:00 капом/тормозом/дедупом, проходил гейты в 05:00–07:00 со СТАРЫМ created_at и
+    судился с решающего бара — в публичный журнал попадали ходы ДО публикации (#360 HYPE:
+    опубликован 07:00, вход засчитан на баре 05:00, +3.91R; 83 из 472 сигналов записаны
+    позже 30 мин — аудит 05.10). Симулятор действует только на своём баре — паритет.
+    45 мин: обычный такт идёт через секунды после закрытия, а после сна Mac — с опозданием,
+    но часовой бар ещё свеж."""
+    try:
+        created = datetime.fromisoformat(str(sig.created_at))
+    except (TypeError, ValueError):
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    decision = created + timedelta(minutes=SMCEngine.TF_MINUTES.get(sig.timeframe, 60))
+    return (now - decision).total_seconds() <= max_lag_min * 60
 
 
 def precheckout_ok(payload: str | None, total: int, currency: str,

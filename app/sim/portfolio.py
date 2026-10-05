@@ -27,7 +27,51 @@ import pandas as pd
 from app.brain.journal import MAX_WAIT_HOURS
 from app.brain.smc_setups import SMCEngine
 from app.core.signal_engine import Side
-from app.sim.backtest import _simulate_open
+from app.sim.backtest import _cost_r, _simulate_open
+
+
+def _live_outcome(sig: dict, df1h: pd.DataFrame, idx1h: pd.DatetimeIndex, *,
+                  fee_pct: float, slippage_pct: float, funding_bps_per_bar: float,
+                  trail_activate_r: float | None, trail_distance_r: float,
+                  tp_exit: bool, max_hold_hours: float):
+    """Исход сигнала САМИМ живым судьёй (journal._outcome_from_bars) на 1h-барах — паритет
+    с публичным журналом по построению: стоп на баре филла = −1R, на баре филла нет тейка
+    и трейлинга, окно ожидания 50ч, потолок удержания, 4h-сигналы судятся 1h-барами.
+
+    Аудит 05.10: _simulate_open пропускал бар филла и судил 4h-сигналы 4h-барами — итог
+    5 лет +622R против +73R по правилам живого судьи. -> (kind, r_net|None, fill_dt,
+    closed_dt) | None (не разрешился в данных). kind: 'expired' | '<событие>-stop' | 'tpN'
+    (суффикс 'stop' — для тормоза стороны: живой тормоз считает все status='stopped')."""
+    import json as _json
+
+    from app.brain.journal import _outcome_from_bars
+    created = pd.Timestamp(sig["dt"])
+    created = created.tz_localize("UTC") if created.tzinfo is None else created.tz_convert("UTC")
+    decision = created + pd.Timedelta(minutes=SMCEngine.TF_MINUTES.get(sig["tf"], 60))
+    start = int(idx1h.searchsorted(decision - pd.Timedelta(hours=1)))
+    span = int(MAX_WAIT_HOURS + (max_hold_hours if max_hold_hours > 0 else 24 * 40)) + 8
+    win = df1h.iloc[start:start + span]
+    trail = ({"activate_r": trail_activate_r, "distance_r": trail_distance_r,
+              "tp_exit": tp_exit, "max_hold_hours": max_hold_hours}
+             if trail_activate_r else None)
+    row = {"entry": sig["entry"], "stop": sig["stop"], "side": sig["side"],
+           "timeframe": sig["tf"], "created_at": created.isoformat(), "filled_at": None,
+           "status": "open", "tp1": sig["tp"], "tp2": None, "tp3": None,
+           "snapshot_json": _json.dumps({"setup": sig.get("setup"), "trail": trail})}
+    res = _outcome_from_bars(row, win)
+    if res is None or res[0] == "open":
+        return None
+    status, event, r, _exit_px, fill_dt, exit_dt = res
+    closed_dt = pd.Timestamp(exit_dt)
+    if status == "expired":
+        return "expired", None, None, closed_dt
+    fill = pd.Timestamp(fill_dt)
+    risk = abs(sig["entry"] - sig["stop"])
+    held_h = max(0.0, (closed_dt - fill).total_seconds() / 3600.0)
+    cost = (_cost_r(sig["entry"], sig["stop"], fee_pct, slippage_pct)
+            + funding_bps_per_bar / 10000.0 * sig["entry"] / risk * int(held_h))
+    kind = f"{event}-stop" if status == "stopped" else status
+    return kind, float(r) - cost, fill, closed_dt
 
 
 @dataclass
@@ -103,7 +147,10 @@ def simulate_portfolio(bars: dict, signals: list, *,
                        trail_distance_r: float = 1.0,
                        max_hold_bars: int | None = None,
                        entry_fill: str = "touch",
-                       through_frac: float = 0.05) -> PortfolioReport:
+                       through_frac: float = 0.05,
+                       live_judge_bars: dict | None = None,
+                       tp_exit: bool = False,
+                       max_hold_hours: float = 168.0) -> PortfolioReport:
     """bars: {(symbol, tf): df} — те же кэш-бары, по которым считались сигналы.
     signals: список словарей из scripts.dump_signals (symbol, tf, bar_index, side, ...).
 
@@ -116,6 +163,10 @@ def simulate_portfolio(bars: dict, signals: list, *,
         if not isinstance(df.get("dt").iloc[0], pd.Timestamp):
             raise ValueError(f"{key}: колонка dt должна быть datetime")
 
+    # live_judge_bars={symbol: 1h-бары}: исход каждой сделки считает ЖИВОЙ судья (паритет
+    # с журналом); без него — прежняя модель _simulate_open (оптимистична, см. _live_outcome)
+    live_idx = ({sym: pd.DatetimeIndex(pd.to_datetime(df["dt"], utc=True))
+                 for sym, df in live_judge_bars.items()} if live_judge_bars else {})
     events = sorted(signals, key=lambda s: (str(s["dt"]), s["symbol"], s["tf"]))
     active: list[dict] = []          # активные (ждущие филла или в позиции)
     closed: list[dict] = []          # завершённые: {side, closed_dt, result_r, ...}
@@ -169,6 +220,32 @@ def simulate_portfolio(bars: dict, signals: list, *,
             continue
 
         # --- сигнал принят: считаем исход по барам своего символа ---
+        if live_judge_bars is not None:
+            lres = _live_outcome(
+                sig, live_judge_bars[sig["symbol"]], live_idx[sig["symbol"]],
+                fee_pct=fee_pct, slippage_pct=slippage_pct,
+                funding_bps_per_bar=funding_bps_per_bar, trail_activate_r=trail_activate_r,
+                trail_distance_r=trail_distance_r, tp_exit=tp_exit,
+                max_hold_hours=max_hold_hours)
+            if lres is None:
+                continue
+            kind, r_net, fill_dt, closed_dt = lres
+            if kind == "expired":
+                active.append({**sig, "signal_dt": now, "outcome": "expired",
+                               "closed_dt": closed_dt})
+                continue
+            rec = {**sig, "signal_dt": now, "closed_dt": closed_dt, "outcome": kind,
+                   "result_r": r_net}
+            active.append(rec)
+            closed.append(rec)
+            trades.append(PortfolioTrade(
+                symbol=sig["symbol"], tf=sig["tf"], setup=sig["setup"], side=sig["side"],
+                signal_dt=now, fill_dt=fill_dt, exit_dt=closed_dt, outcome=kind,
+                result_r=round(r_net, 4), confidence=sig["confidence"]))
+            c = side_counts(now)
+            max_concurrent = max(max_concurrent, c["LONG"] + c["SHORT"])
+            max_concurrent_side = max(max_concurrent_side, c["LONG"], c["SHORT"])
+            continue
         i = sig["bar_index"]
         high = df["high"].to_numpy()
         low = df["low"].to_numpy()

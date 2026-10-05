@@ -193,7 +193,7 @@ def _open_signals_public() -> list:
 def _avg_hold_hours(since_created: str | None = None) -> float | None:
     """Среднее удержание закрытых сделок (филл -> закрытие), часов. Только публичные
     исходы: теневые (rejected) сюда не входят, как и во всей прочей стате (аудит 05.10)."""
-    q = ("SELECT AVG((julianday(closed_at) - julianday(filled_at)) * 24.0) AS h "
+    q = ("SELECT AVG(MAX(0.0, (julianday(closed_at) - julianday(filled_at)) * 24.0)) AS h "
          "FROM signals WHERE filled_at IS NOT NULL AND closed_at IS NOT NULL "
          "AND result_r IS NOT NULL AND status IN ('tp1','tp2','tp3','stopped') ")
     args: tuple = ()

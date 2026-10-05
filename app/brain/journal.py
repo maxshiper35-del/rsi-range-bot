@@ -41,7 +41,7 @@ def fill_window_open(row, now, scoring_tf_minutes: int = 60) -> bool:
     decision = created + timedelta(minutes=SMCEngine.TF_MINUTES.get(row["timeframe"], 60))
     step = max(1, int(scoring_tf_minutes)) * 60
     bar_open = datetime.fromtimestamp(int(now.timestamp()) // step * step, tz=timezone.utc)
-    return (bar_open - decision).total_seconds() <= MAX_WAIT_HOURS * 3600
+    return (bar_open - decision).total_seconds() < MAX_WAIT_HOURS * 3600
 
 
 def unfilled_open_signals(symbol: str) -> list:
@@ -102,8 +102,11 @@ def try_mark_filled(signal_id: int, iso_ts: str) -> bool:
     """Атомарно зафиксировать филл (guard filled_at IS NULL) — гонку стрим vs
     bar-скоринг выигрывает ровно один, второй молчит. -> True если выиграли."""
     with db.transaction() as conn:
+        # status/result_r: гонка со скорингом не должна «исполнить» уже истёкший/закрытый
+        # сигнал и запостить по нему «вход исполнен» (аудит 05.10)
         cur = conn.execute(
-            "UPDATE signals SET filled_at=?, updated_at=? WHERE id=? AND filled_at IS NULL",
+            "UPDATE signals SET filled_at=?, updated_at=? WHERE id=? AND filled_at IS NULL "
+            "AND status='open' AND result_r IS NULL",
             (iso_ts, clock.utcnow_iso(), signal_id))
         return cur.rowcount == 1
 
@@ -506,7 +509,9 @@ def _outcome_from_bars(row, df) -> tuple | None:
         hi, lo = float(b["high"]), float(b["low"])
         bar_dt = pd.to_datetime(b["dt"], utc=True)
         if not filled:
-            if (bar_dt - decision).total_seconds() > MAX_WAIT_HOURS * 3600:
+            # >=: окно ровно 50ч (бары, ОТКРЫВШИЕСЯ в [decision, decision+50ч)) — как в
+            # симуляторе; '>' пускал филл на баре +50ч, окно было 51ч (аудит 05.10, #494)
+            if (bar_dt - decision).total_seconds() >= MAX_WAIT_HOURS * 3600:
                 # лимитка не исполнилась за окно — сделки не было (тач ПОСЛЕ окна не в счёт:
                 # подписчик, следующий контракту, уже снял ордер — аудит-2 математики [7]).
                 # Время снятия — КОНЕЦ окна, а не бар, на котором мы это заметили: момент
@@ -949,8 +954,10 @@ def signal_xray(sid: int) -> dict | None:
         if not a or not b:
             return None
         from datetime import datetime
-        return round((datetime.fromisoformat(b) - datetime.fromisoformat(a))
-                     .total_seconds() / 3600, 1)
+        # closed_at — ОТКРЫТИЕ бара выхода, стрим-filled_at — реальное время: выход в баре
+        # филла давал «в позиции −0.5ч» (аудит 05.10) — не ниже нуля
+        return max(0.0, round((datetime.fromisoformat(b) - datetime.fromisoformat(a))
+                              .total_seconds() / 3600, 1))
 
     entry, stop = float(row["entry"]), float(row["stop"])
     return {

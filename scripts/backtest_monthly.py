@@ -6,9 +6,13 @@
 Живые правила (runtime прода): сетапы 6226+LTF, min_stop_pct 1.3, трейлинг 1.5/0.2
 без тейка, cap 6 на сторону, тормоз 3 стопа / 6ч, дедуп, 1h+4h, 9 эталонных символов.
 Издержки — ТЕКУЩАЯ модель входа (маркет по касанию, замер 31.08): тейкер 0.055%/сторона,
-слип 0.02%, фандинг 0.125 bps/бар. Паритет-чек перед публикацией: by_setup должен
-содержать 6226, LTF-BB, LTF-OB; n и ΣR сверяются с записанным бейслайном
-(02.09.2026: n=5353, base +720.9R / taker +622.4R).
+слип 0.02%, фандинг 0.125 bps за 1h. Паритет-чек перед публикацией: by_setup должен
+содержать 6226, LTF-BB, LTF-OB.
+
+ИСХОД — САМ ЖИВОЙ СУДЬЯ (journal._outcome_from_bars) на 1h-барах для всех сигналов
+(05.10.2026, аудит): прежняя модель _simulate_open пропускала стоп на баре филла,
+судила 4h-сигналы 4h-барами и выходила по тейку — +622.4R против +75.8R по правилам
+живого бота (n=5309, exp +0.014, DD 110.9R; 4 года до 07.2025 ≈ +1R, посл. 12 мес +72R).
 """
 from __future__ import annotations
 
@@ -33,10 +37,12 @@ def run(fee: float) -> dict:
                        "--fee", str(fee), "--slip", "0.02", "--funding", "0.125",
                        "--entry-fill", "touch"])
     bars, signals = load(args)
+    h1 = {sym: df for (sym, tf), df in bars.items() if tf == "1h"}
     rep = simulate_portfolio(
         bars, signals, max_open_per_side=6, cooldown_stops=3, cooldown_hours=6.0,
         dedup=True, fee_pct=fee, slippage_pct=0.02, funding_bps_per_bar=0.125,
-        trail_activate_r=1.5, trail_distance_r=0.2, entry_fill="touch")
+        trail_activate_r=1.5, trail_distance_r=0.2, entry_fill="touch",
+        live_judge_bars=h1, tp_exit=False, max_hold_hours=168.0)
     per: dict = defaultdict(list)
     for t in rep.detail:
         per[(t.exit_dt.year, t.exit_dt.month)].append(t.result_r)

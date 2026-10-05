@@ -1134,3 +1134,22 @@ def test_pause_age_text():
     now = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
     assert bot.pause_age_text("2026-10-04T23:00:00+00:00", now) == "13 ч"   # не «0 дн.»
     assert bot.pause_age_text("2026-09-13T18:18:31+00:00", now) == "22 дн."
+
+
+def test_decision_is_fresh():
+    """Аудит 05.10: 4h-сигнал, заблокированный на своём баре, проходил гейты через 1–3ч со
+    старым created_at — в журнал попадал ход ДО публикации (#360). Только первый такт."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace as NS
+    now = datetime(2026, 8, 22, 7, 0, 11, tzinfo=timezone.utc)
+    sig4h = NS(created_at="2026-08-22T00:00:00+00:00", timeframe="4h")   # закрыт в 04:00
+    assert bot.decision_is_fresh(sig4h, now) is False                   # #360: +3ч
+    assert bot.decision_is_fresh(sig4h, datetime(2026, 8, 22, 4, 0, 30,
+                                                 tzinfo=timezone.utc)) is True
+    sig1h = NS(created_at="2026-08-22T06:00:00+00:00", timeframe="1h")   # закрыт в 07:00
+    assert bot.decision_is_fresh(sig1h, now) is True
+    late_wake = datetime(2026, 8, 22, 7, 42, tzinfo=timezone.utc)        # такт после сна Mac
+    assert bot.decision_is_fresh(sig1h, late_wake) is True
+    assert bot.decision_is_fresh(sig1h, datetime(2026, 8, 22, 7, 50,
+                                                 tzinfo=timezone.utc)) is False
+    assert bot.decision_is_fresh(NS(created_at="мусор", timeframe="1h"), now) is False
