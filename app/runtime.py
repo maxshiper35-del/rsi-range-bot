@@ -67,6 +67,15 @@ def paused_since() -> str | None:
     return row["updated_at"] if row else None
 
 
+def last_offsite_at() -> str | None:
+    """Когда бэкап последний раз успешно скопирован в iCloud (пишет scripts/backup_db)."""
+    return _raw("last_offsite_at")
+
+
+def last_offsite_alert_at() -> str | None:
+    return _raw("last_offsite_alert_at")
+
+
 def last_overdue_alert_at() -> str | None:
     """Когда последний раз алертили «судья не разрешает сигналы» — троттлинг."""
     return _raw("last_overdue_alert_at")

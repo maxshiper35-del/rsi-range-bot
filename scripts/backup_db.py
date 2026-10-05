@@ -6,11 +6,12 @@ data/signals.db — единственный источник правды (сд
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app import clock, db, runtime
+from app import clock, runtime
 from app.config import get_settings
 from app.logging_conf import get_logger
 
@@ -73,9 +74,19 @@ def _verify_integrity(path: Path) -> None:
         Path(str(path) + suffix).unlink(missing_ok=True)
 
 
+# только настоящие бэкапы: посторонний signals-<что-угодно>.db сортировался ПОСЛЕ меток
+# времени, навсегда занимал слот и вытеснял реальную копию (05.10 тестовый
+# signals-fake.db в iCloud вытеснил копию за 30.09 — аудит 05.10)
+_BACKUP_NAME = re.compile(r"^signals-\d{8}T\d{6}Z\.db$")
+
+
+def _backups(dst_dir: Path) -> list[Path]:
+    return sorted(f for f in dst_dir.glob("signals-*.db") if _BACKUP_NAME.match(f.name))
+
+
 def _rotate(dst_dir: Path, keep_last: int) -> None:
     """Оставить keep_last свежих файлов signals-*.db, старые удалить (с компаньонами)."""
-    backups = sorted(dst_dir.glob("signals-*.db"))
+    backups = _backups(dst_dir)
     for old in backups[:-keep_last] if keep_last > 0 else backups:
         old.unlink()
         for suffix in ("-wal", "-shm"):                     # ротация не копит сироты
@@ -91,12 +102,14 @@ def offsite_copy(src: Path, keep_last: int = 7) -> Path | None:
     прода на Mac): смерть SSD не уносит подписчиков/платежи/трек-рекорд вместе с
     основными бэкапами (аудит 02.09). Нет iCloud — молча пропускаем (не macOS/CI)."""
     if not _ICLOUD_DIR.parent.exists():
+        get_logger("backup_db").warning("оффсайт пропущен: нет iCloud Drive (%s)",
+                                        _ICLOUD_DIR.parent)
         return None
     _ICLOUD_DIR.mkdir(parents=True, exist_ok=True)
     import shutil
     dst = _ICLOUD_DIR / src.name
     shutil.copy2(src, dst)
-    for old in sorted(_ICLOUD_DIR.glob("signals-*.db"))[:-keep_last]:
+    for old in _backups(_ICLOUD_DIR)[:-keep_last]:
         old.unlink()
     return dst
 
@@ -123,13 +136,16 @@ def rotate_logs(log_dir: Path = Path("logs"), max_bytes: int = 10 * 1024 * 1024)
 
 def main() -> None:
     log = get_logger("backup_db")
-    db.init_db()                                # settings-таблица гарантированно существует
+    # СНАЧАЛА копия, без миграций: init_db здесь применял к боевой БД любые .sql из
+    # рабочего дерева ДО снятия копии — «страховочный» бэкап уже содержал миграцию 023
+    # (аудит 05.10), а сломанная миграция останавливала бы все бэкапы
     path = backup_once()
     log.info("бэкап создан: %s (%d байт)", path, path.stat().st_size)
     try:
         off = offsite_copy(path)
         if off is not None:
             log.info("оффсайт-копия: %s", off)
+            runtime.set_value("last_offsite_at", clock.utcnow_iso())   # сторож в боте
     except Exception as e:                      # noqa: BLE001 — оффсайт не валит основной бэкап
         log.warning("оффсайт-копия не удалась: %s", e)
     try:

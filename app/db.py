@@ -19,11 +19,12 @@ def get_conn() -> sqlite3.Connection:
     if conn is None:
         s = get_settings()
         s.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(s.db_path, check_same_thread=False, timeout=30)
+        conn = sqlite3.connect(s.db_path, check_same_thread=False, timeout=15)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
-        conn.execute("PRAGMA busy_timeout=5000;")
+        # одно значение: PRAGMA перекрывал timeout=30 из connect -> фактически 5с (аудит 05.10)
+        conn.execute("PRAGMA busy_timeout=15000;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         _local.conn = conn
     return conn

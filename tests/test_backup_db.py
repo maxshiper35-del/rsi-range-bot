@@ -33,6 +33,10 @@ def test_main_records_backup_timestamp(fresh_db, monkeypatch, tmp_path):
     fake_path = tmp_path / "signals-fake.db"
     fake_path.write_bytes(b"x")
     monkeypatch.setattr(backup_db, "backup_once", lambda: fake_path)
+    # ИЗОЛЯЦИЯ: без подмены main() писал в НАСТОЯЩИЙ iCloud (signals-fake.db вытеснил
+    # реальную копию, аудит 05.10) и copy-truncate'ил боевые logs/
+    monkeypatch.setattr(backup_db, "_ICLOUD_DIR", tmp_path / "icloud" / "RSIRange-Backups")
+    monkeypatch.setattr(backup_db, "rotate_logs", lambda *a, **k: 0)
 
     assert runtime.last_backup_at() is None
     backup_db.main()
@@ -72,3 +76,25 @@ def test_backup_rotation(fresh_db, tmp_path):
     assert len(remaining) == 3                      # 5 старых + 1 новый -> оставили 3
     assert newest.name in remaining                 # свежий бэкап не удалён
     assert "signals-20200100T000000Z.db" not in remaining   # старейшие удалены
+
+
+def test_rotation_ignores_foreign_names(tmp_path, monkeypatch):
+    """Посторонний signals-*.db не занимает слот ротации и не удаляется ею."""
+    from scripts import backup_db
+    d = tmp_path / "RSIRange-Backups"
+    d.mkdir(parents=True)
+    for day in range(1, 10):
+        (d / f"signals-202610{day:02d}T020000Z.db").write_bytes(b"x")
+    (d / "signals-fake.db").write_bytes(b"x")
+    backup_db._rotate(d, keep_last=7)
+    left = sorted(f.name for f in d.iterdir())
+    assert "signals-fake.db" in left                   # не трогаем чужое
+    assert len([n for n in left if n != "signals-fake.db"]) == 7
+    assert "signals-20261009T020000Z.db" in left and "signals-20261002T020000Z.db" not in left
+    # оффсайт: та же логика
+    monkeypatch.setattr(backup_db, "_ICLOUD_DIR", d)
+    src = tmp_path / "signals-20261010T020000Z.db"
+    src.write_bytes(b"y")
+    backup_db.offsite_copy(src, keep_last=7)
+    names = sorted(f.name for f in d.iterdir() if f.name != "signals-fake.db")
+    assert len(names) == 7 and names[-1] == "signals-20261010T020000Z.db"

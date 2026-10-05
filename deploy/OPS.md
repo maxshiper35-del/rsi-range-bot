@@ -4,8 +4,16 @@ Hetzner (135.181.32.158) не оплачен и остановлен — про�
 Прошлый runbook (серверный) — в git-истории этого файла; вернётся сервер —
 восстановить оттуда и вернуть `make deploy`.
 
-Требования к маку: не выключать, не давать засыпать (System Settings → Displays →
-Advanced → «Prevent automatic sleeping…» или `caffeinate`), интернет постоянный.
+Требования к маку: **всегда от сети** (05.10 ночью шёл от батареи, разрядился, утром
+перезагрузился) и **без сна, включая закрытую крышку**: «Prevent automatic sleeping» и
+`caffeinate` закрывают только сон по простою, а Clamshell Sleep останавливал прод на 2–11ч
+(30.09–04.10, `pmset -g log`). Один раз, в Терминале (нужен пароль):
+
+```bash
+sudo pmset -a disablesleep 1
+```
+
+Проверка: `pmset -g | grep SleepDisabled` → `1`. Интернет постоянный.
 
 ## Процессы (launchd, gui-домен пользователя)
 
@@ -23,7 +31,9 @@ Advanced → «Prevent automatic sleeping…» или `caffeinate`), интер�
 # статус / логи / рестарт
 launchctl list | grep rsirange
 tail -30 logs/bot.log
-launchctl kickstart -k gui/$(id -u)/com.rsirange.bot      # или make restart-local
+launchctl kickstart -k gui/$(id -u)/com.rsirange.bot
+launchctl kickstart -k gui/$(id -u)/com.rsirange.webapp
+# make НЕ работает: /usr/bin/make — шим Xcode, без принятой лицензии падает (exit 69)
 ```
 
 ⚠️ После ребута мака агенты gui-домена поднимаются ТОЛЬКО после логина пользователя —
@@ -31,7 +41,10 @@ launchctl kickstart -k gui/$(id -u)/com.rsirange.bot      # или make restart-
 
 ## Деплой правок кода
 
-Локально: тесты зелёные → `make restart-local` (бот+webapp). `make deploy` (Hetzner)
+Локально: тесты зелёные (`.venv/bin/python -m pytest`) → две команды `launchctl kickstart -k`
+выше (бот+webapp); правка плиста webapp — `cp` в ~/Library/LaunchAgents, затем
+`launchctl bootout` + `bootstrap`. Бэкап вручную: `.venv/bin/python -m scripts.backup_db`.
+`make deploy` (Hetzner)
 сознательно отключён — двойной инстанс = конфликт getUpdates и дубли постов
 (инцидент 27-29.08).
 
@@ -74,11 +87,26 @@ backtest-parity-checklist):
 
 ## Восстановление из бэкапа
 
+Останавливать ОБА процесса, что держат БД (бот И webapp): с живым webapp `cp` поверх
+файла и удаление -wal давали «database disk image is malformed» в Mini App и потерю
+записей (проверено на копии, аудит 05.10). Ещё надёжнее — онлайн-восстановление через
+SQLite backup API (согласовано с WAL, процессы можно не трогать):
+
+```bash
+.venv/bin/python -c "import sqlite3; sqlite3.connect('data/backups/signals-<свежий>.db').backup(sqlite3.connect('data/signals.db'))"
+launchctl kickstart -k gui/$(id -u)/com.rsirange.bot
+launchctl kickstart -k gui/$(id -u)/com.rsirange.webapp
+```
+
+Ручной вариант (если файл БД повреждён и не открывается):
+
 ```bash
 launchctl bootout gui/$(id -u)/com.rsirange.bot
+launchctl bootout gui/$(id -u)/com.rsirange.webapp
 cp data/backups/signals-<свежий>.db data/signals.db
 rm -f data/signals.db-wal data/signals.db-shm
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.rsirange.bot.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.rsirange.webapp.plist
 ```
 
 Проверка: `/health` в боте (тик поллера, бэкап, executor), дашборд открывается,

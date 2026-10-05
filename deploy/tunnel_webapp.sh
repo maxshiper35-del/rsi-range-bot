@@ -34,7 +34,9 @@ fi
 FAILS=0
 while kill -0 "$CF" 2>/dev/null; do
   sleep 60
-  if curl -s -o /dev/null -m 10 "$URL/healthz"; then
+  # -f: HTTP >= 400 = провал. Без него отключённый туннель (edge отвечает 530) считался
+  # живым — сторож не срабатывал (инцидент 31.08–02.09, аудит 05.10)
+  if curl -fs -o /dev/null -m 10 "$URL/healthz"; then
     FAILS=0
   else
     FAILS=$((FAILS + 1))

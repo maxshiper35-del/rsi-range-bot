@@ -3552,6 +3552,20 @@ def main() -> None:
                 except Exception as e:                     # noqa: BLE001
                     log.warning("backup stale алерт админу %s: %s", admin_id, e)
             await asyncio.to_thread(runtime.set_last_backup_alert_at, now_)
+        # оффсайт (iCloud) молча отвалился: локальные бэкапы идут, «другого диска» нет —
+        # алерт раз в сутки, если оффсайт был и протух > 50ч (аудит 05.10)
+        last_off = runtime.last_offsite_at()
+        if last_off and should_alert_backup_stale(last_off, runtime.last_offsite_alert_at(),
+                                                  now_, stale_hours=50):
+            text = (f"⚠️ Оффсайт-копия бэкапа в iCloud не обновлялась "
+                    f"{_fmt_age(last_off, datetime.now(timezone.utc))} — проверьте iCloud Drive "
+                    "(вход, место) и logs/backup.log. Локальные бэкапы при этом идут.")
+            for admin_id in cfg.admin_ids:
+                try:
+                    await bot.send_message(admin_id, text)
+                except Exception as e:                     # noqa: BLE001
+                    log.warning("offsite stale алерт админу %s: %s", admin_id, e)
+            await asyncio.to_thread(runtime.set_value, "last_offsite_alert_at", now_)
         # watchdog такта поллера: процесс жив (обслуживание тикает), но скан-цикл встал —
         # порог = 2× slack (полный пропущенный цикл + буфер, не единичный медленный тик)
         tick_stale = poller_tick_slack_seconds(runtime.timeframes()) * 2

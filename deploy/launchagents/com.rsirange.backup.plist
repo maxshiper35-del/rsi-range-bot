@@ -6,7 +6,7 @@
   Установка:
     cp deploy/com.rsirange.backup.plist ~/Library/LaunchAgents/
     launchctl load ~/Library/LaunchAgents/com.rsirange.backup.plist
-  Запустить вручную: launchctl start com.rsirange.backup   (или: make backup-db)
+  Запустить вручную: launchctl start com.rsirange.backup   (или: .venv/bin/python -m scripts.backup_db — make сломан шимом Xcode)
   Логи — logs/backup.log в каталоге проекта.
 -->
 <plist version="1.0">
