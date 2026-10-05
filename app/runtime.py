@@ -67,6 +67,13 @@ def paused_since() -> str | None:
     return row["updated_at"] if row else None
 
 
+def backtest_public() -> bool:
+    """Показывать ли секцию «Бэктест 5 лет» в публичном дашборде. Дефолт ВЫКЛ (05.10):
+    прежний расчёт пропускал стоп на баре входа и мерил выходы по тейку — +622R против
+    +76R по правилам живого судьи. Включает владелец после пересборки и решения."""
+    return (_raw("backtest_public") or "0").lower() in _TRUE
+
+
 def last_offsite_at() -> str | None:
     """Когда бэкап последний раз успешно скопирован в iCloud (пишет scripts/backup_db)."""
     return _raw("last_offsite_at")

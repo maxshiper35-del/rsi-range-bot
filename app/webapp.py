@@ -414,6 +414,8 @@ _ADMIN_SETTINGS: dict[str, dict] = {
     "usdt_bonus_days":   {"t": "int", "min": 0, "max": 30,
                           "label": "Бонус за USDT, дней", "group": "Подписка"},
     "affiliate_url":     {"t": "url", "label": "Реф-ссылка биржи", "group": "Прочее"},
+    "backtest_public":   {"t": "bool", "label": "Секция «Бэктест 5 лет» в дашборде",
+                          "group": "Прочее"},
     "executor_enabled":  {"t": "bool", "label": "Executor (нужны ключи BingX)", "group": "Прочее"},
 }
 
@@ -463,6 +465,7 @@ def _admin_settings_payload() -> list:
         "usdt_bonus_days": runtime.usdt_bonus_days(),
         "affiliate_url": runtime.affiliate_url(),
         "executor_enabled": runtime.executor_enabled(),
+        "backtest_public": runtime.backtest_public(),
     }
     return [{"key": k, "value": cur[k], "label": v["label"], "t": v["t"],
              "group": v["group"], **({"choices": v["choices"]} if "choices" in v else {}),
@@ -790,6 +793,9 @@ _BT_PUBLIC_KEYS = ("generated_at", "fee_pct", "symbols", "tfs", "period", "total
 def api_backtest() -> Response:
     """Помесячный бэктест текущей конфигурации (scripts/backtest_monthly.py) —
     статический JSON из репо, НЕ живой журнал: секция дашборда подписана как модель."""
+    if not runtime.backtest_public():
+        # снят с витрины до решения владельца: старая модель завышала итог ~8× (05.10)
+        return _no_store({"ok": False, "err": "бэктест на пересчёте"}, 404)
     try:
         mtime = _BT_JSON.stat().st_mtime
     except OSError:
