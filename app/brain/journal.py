@@ -473,7 +473,7 @@ def update_outcomes(latest_prices: dict[str, float]) -> int:
     return closed
 
 
-def _outcome_from_bars(row, df) -> tuple | None:
+def _outcome_from_bars(row, df, fill_through_frac: float = 0.0) -> tuple | None:
     """Исход по ХРОНОЛОГИИ закрытых баров ПОСЛЕ ЗАКРЫТИЯ решающего бара (честный скоринг).
 
     Фазы: (1) ждём касания entry (лимитный вход, low<=entry<=high) — без fill сделки НЕТ;
@@ -553,7 +553,15 @@ def _outcome_from_bars(row, df) -> tuple | None:
                 # определён контрактом и не зависит от ТФ скоринга и глубины фетча.
                 expire_dt = decision + pd.Timedelta(hours=MAX_WAIT_HOURS)
                 return ("expired", "expired", None, None, None, expire_dt.isoformat())
-            if not (lo <= entry <= hi):
+            if fill_through_frac > 0:
+                # ТОЛЬКО для исследований (замер модели входа 05.10): пассивная лимитка
+                # исполняется, лишь когда цена прошла уровень на долю дистанции стопа.
+                # Прод вызывает с 0 — контракт журнала «касание» не меняется.
+                eps = fill_through_frac * risk
+                touched = (lo <= entry - eps) if side == "LONG" else (hi >= entry + eps)
+            else:
+                touched = lo <= entry <= hi
+            if not touched:
                 continue
             filled = True                            # вход исполнен на ЭТОМ баре
             fill_dt = bar_dt.isoformat()

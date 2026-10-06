@@ -33,7 +33,8 @@ from app.sim.backtest import _cost_r, _simulate_open
 def _live_outcome(sig: dict, df1h: pd.DataFrame, idx1h: pd.DatetimeIndex, *,
                   fee_pct: float, slippage_pct: float, funding_bps_per_bar: float,
                   trail_activate_r: float | None, trail_distance_r: float,
-                  tp_exit: bool, max_hold_hours: float):
+                  tp_exit: bool, max_hold_hours: float, fill_through_frac: float = 0.0,
+                  extra_cost_r: float = 0.0):
     """Исход сигнала САМИМ живым судьёй (journal._outcome_from_bars) на 1h-барах — паритет
     с публичным журналом по построению: стоп на баре филла = −1R, на баре филла нет тейка
     и трейлинга, окно ожидания 50ч, потолок удержания, 4h-сигналы судятся 1h-барами.
@@ -58,7 +59,7 @@ def _live_outcome(sig: dict, df1h: pd.DataFrame, idx1h: pd.DatetimeIndex, *,
            "timeframe": sig["tf"], "created_at": created.isoformat(), "filled_at": None,
            "status": "open", "tp1": sig["tp"], "tp2": None, "tp3": None,
            "snapshot_json": _json.dumps({"setup": sig.get("setup"), "trail": trail})}
-    res = _outcome_from_bars(row, win)
+    res = _outcome_from_bars(row, win, fill_through_frac=fill_through_frac)
     if res is None or res[0] == "open":
         return None
     status, event, r, _exit_px, fill_dt, exit_dt = res
@@ -69,7 +70,8 @@ def _live_outcome(sig: dict, df1h: pd.DataFrame, idx1h: pd.DatetimeIndex, *,
     risk = abs(sig["entry"] - sig["stop"])
     held_h = max(0.0, (closed_dt - fill).total_seconds() / 3600.0)
     cost = (_cost_r(sig["entry"], sig["stop"], fee_pct, slippage_pct)
-            + funding_bps_per_bar / 10000.0 * sig["entry"] / risk * int(held_h))
+            + funding_bps_per_bar / 10000.0 * sig["entry"] / risk * int(held_h)
+            + extra_cost_r)
     kind = f"{event}-stop" if status == "stopped" else status
     return kind, float(r) - cost, fill, closed_dt
 
@@ -150,7 +152,8 @@ def simulate_portfolio(bars: dict, signals: list, *,
                        through_frac: float = 0.05,
                        live_judge_bars: dict | None = None,
                        tp_exit: bool = False,
-                       max_hold_hours: float = 168.0) -> PortfolioReport:
+                       max_hold_hours: float = 168.0,
+                       extra_cost_r: float = 0.0) -> PortfolioReport:
     """bars: {(symbol, tf): df} — те же кэш-бары, по которым считались сигналы.
     signals: список словарей из scripts.dump_signals (symbol, tf, bar_index, side, ...).
 
@@ -226,7 +229,9 @@ def simulate_portfolio(bars: dict, signals: list, *,
                 fee_pct=fee_pct, slippage_pct=slippage_pct,
                 funding_bps_per_bar=funding_bps_per_bar, trail_activate_r=trail_activate_r,
                 trail_distance_r=trail_distance_r, tp_exit=tp_exit,
-                max_hold_hours=max_hold_hours)
+                max_hold_hours=max_hold_hours,
+                fill_through_frac=through_frac if entry_fill == "through" else 0.0,
+                extra_cost_r=extra_cost_r)
             if lres is None:
                 continue
             kind, r_net, fill_dt, closed_dt = lres

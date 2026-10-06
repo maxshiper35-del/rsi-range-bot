@@ -37,3 +37,26 @@ def test_live_judge_counts_fill_bar_stop():
     assert legacy.trades == 1 and legacy.total_r > 0          # старая модель: бар филла пропущен
     assert live.trades == 1 and live.total_r == -1.0          # живой судья: стоп на баре филла
     assert live.detail[0].outcome.endswith("stop")            # тормоз стороны его считает
+
+
+def test_judge_fill_through_option_default_unchanged():
+    """fill_through_frac — только для исследований: дефолт 0 = касание (контракт журнала);
+    >0 — лимитка исполняется лишь при проходе уровня на долю стопа."""
+    import json
+
+    from app.brain.journal import _outcome_from_bars
+    t0 = pd.Timestamp("2026-01-01T00:00:00Z")
+    rows = [(101, 101, 100.0, 100.5)]                   # касание 100 ровно, без прохода
+    rows += [(100.5, 107, 100.2, 106)] * 5
+    df = pd.DataFrame({"dt": [t0 + pd.Timedelta(hours=i + 1) for i in range(len(rows))],
+                       "open": [r[0] for r in rows], "high": [r[1] for r in rows],
+                       "low": [r[2] for r in rows], "close": [r[3] for r in rows]})
+    row = {"entry": 100.0, "stop": 98.0, "side": "LONG", "timeframe": "1h",
+           "created_at": t0.isoformat(), "filled_at": None, "status": "open",
+           "tp1": 106.0, "tp2": None, "tp3": None,
+           "snapshot_json": json.dumps({"trail": {"activate_r": 1.5, "distance_r": 0.2,
+                                                  "tp_exit": False, "max_hold_hours": 168}})}
+    touch = _outcome_from_bars(row, df)
+    assert touch is not None and touch[4] is not None             # касание = филл
+    through = _outcome_from_bars(row, df, fill_through_frac=0.05)  # нужен проход до 99.9
+    assert through is None or through[4] is None                  # прохода не было — нет филла
