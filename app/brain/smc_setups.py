@@ -661,6 +661,9 @@ class SMCEngine:
 
     def __init__(self, config: SMCConfig | None = None):
         self.cfg = config or SMCConfig()
+        # сигналы, которые выиграли бы бар БЕЗ гейта «вход уже пройден», — для тени
+        # (scan_auto пишет их как shadow='late_entry'); сброс в начале analyze_multi
+        self.late_shadow: list[Signal] = []
 
     def _setup_enabled(self, tag: str) -> bool:
         """Тег включён при префикс-матче в ЛЮБУЮ сторону: enabled=('LTF',) покрывает
@@ -692,10 +695,25 @@ class SMCEngine:
             signals = [c for c in signals
                        if c.entry > 0
                        and abs(c.entry - c.stop) / c.entry * 100.0 >= self.cfg.min_stop_pct]
-        if signals and self.cfg.late_entry_gate != "off":
+        gate = self.cfg.late_entry_gate
+        if signals and gate != "off":
+            # гейт ДО выбора лучшего (как min_stop_pct): бар достаётся валидному кандидату;
+            # победитель без гейта, если он «поздний», уходит в тень для проверки вперёд
             market = float(df["close"].iloc[-1])
-            signals = [c for c in signals
-                       if not _entry_passed(c, market, self.cfg.late_entry_gate)]
+            winner = self._finalize([c for c in signals
+                                     if not _entry_passed(c, market, gate)],
+                                    df, htf_df, partner_df)
+            ungated = self._finalize(signals, df, htf_df, partner_df)
+            if (ungated is not None and ungated is not winner
+                    and _entry_passed(ungated, market, gate)):
+                self.late_shadow.append(ungated)
+            return winner
+        return self._finalize(signals, df, htf_df, partner_df)
+
+    def _finalize(self, signals: list[Signal], df: pd.DataFrame,
+                  htf_df: pd.DataFrame | None,
+                  partner_df: pd.DataFrame | None) -> Signal | None:
+        """Хвост analyze_single: блок контртренда HTF, SMT-вето, лучший по confidence."""
         # жёсткий блок контртренда: подтверждённая структура HTF против стороны сигнала ->
         # сигнал не выдаётся (штраф −0.25 в confidence пропускал лонги в сползании 17.07).
         # htf_df=None (старший ТФ набора) и неподтверждённая структура — блока нет.
@@ -731,6 +749,7 @@ class SMCEngine:
         выше по стеку (scan_auto/scan_semiauto)."""
         tfs = sorted(frames, key=lambda t: self.TF_MINUTES.get(t, 10 ** 9))
         out: list[Signal] = []
+        self.late_shadow = []
         for i, tf in enumerate(tfs):
             htf = next((frames[h] for h in tfs[i + 1:]), None)   # ближайший старший
             sig = self.analyze_single(frames[tf], symbol, tf, htf_df=htf)

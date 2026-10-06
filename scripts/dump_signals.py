@@ -208,6 +208,7 @@ def _prod_config(args) -> tuple[SMCConfig, dict]:
         enabled_setups=runtime.enabled_setups(),
         htf_block_countertrend=runtime.htf_block_countertrend(),
         min_stop_pct=runtime.min_stop_pct(),
+        late_entry_gate=runtime.late_entry_gate(),
         use_time_filter=runtime.time_filter_enabled())
     for item in args.set:
         key, _, raw = item.partition("=")

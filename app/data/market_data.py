@@ -170,6 +170,7 @@ async def run_poller(on_candidate, engine=None, on_tick=None, on_close=None) -> 
                 enabled_setups=runtime.enabled_setups(),
                 htf_block_countertrend=runtime.htf_block_countertrend(),
                 min_stop_pct=runtime.min_stop_pct(),
+                late_entry_gate=runtime.late_entry_gate(),
                 use_time_filter=runtime.time_filter_enabled()))
             found, closed = await asyncio.to_thread(
                 poll_once, runtime.symbols(), tfs, eng, None, 1.5, scan_new=not paused)

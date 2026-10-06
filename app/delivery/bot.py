@@ -154,6 +154,7 @@ def scan_auto(symbol: str, frames: dict[str, pd.DataFrame],
             continue
         sid = journal.record_signal(sig)
         out.append((sig, sid))
+    _record_late_shadows(engine, now)
     return out
 
 
@@ -181,7 +182,24 @@ def scan_semiauto(symbol: str, frames: dict[str, pd.DataFrame],
             continue
         sid = journal.record_candidate(sig)
         out.append((sig, sid))
+    _record_late_shadows(engine, now)
     return out
+
+
+def _record_late_shadows(engine, now: datetime) -> None:
+    """Победители бара, отсечённые гейтом «вход уже пройден» (SMCEngine.late_shadow), —
+    в тень через те же гейты, что прошёл бы живой сигнал: честный контрфакт для проверки
+    вперёд (docs/measurements/2026-10-06-late-entry-gate.md). Не публикуются."""
+    for sig in list(getattr(engine, "late_shadow", None) or []):
+        if not decision_is_fresh(sig, now):
+            continue
+        if journal.find_duplicate_setup(sig) is not None:
+            continue
+        if not _side_capacity_ok(sig.side.value, sig.symbol):
+            continue
+        if not _side_cooldown_ok(sig.side.value, sig.symbol):
+            continue
+        journal.record_shadow(sig, reason="late_entry")
 
 
 def scan_watchlist(symbols: list[str], engine: SMCEngine | None = None,
@@ -2957,6 +2975,16 @@ def main() -> None:
             lines.append("Закрытых теневых исходов пока нет.")
         lines.append("Правило решения: ≥60 закрытых и ≥3 мес — exp ≤ 0 → выключить насовсем; "
                      "exp ≥ +0.05R → вернуть в публикацию; между — продолжать.")
+        gate = await asyncio.to_thread(runtime.late_entry_gate)
+        late = await asyncio.to_thread(journal.shadow_stats, None, "late_entry")
+        lines.append("")
+        lines.append(f"⏱ <b>Гейт «вход уже пройден»</b>: {templates.esc(gate)} "
+                     "(отсечённые — в тени)")
+        for (tag, tf), d in sorted(late.items()):
+            lines.append(f"{templates.esc(tag)}@{templates.esc(tf)}: n={d['n']} · "
+                         f"ΣR {d['sum']:+.2f} · exp {d['exp']:+.3f}R · побед {d['wins']}")
+        if not late:
+            lines.append("Закрытых отсечённых исходов пока нет.")
         await m.answer("\n".join(lines), parse_mode="HTML")
 
     @dp.message(Command("bysetup"))
@@ -3417,6 +3445,7 @@ def main() -> None:
                                          htf_block_countertrend=(
                                              runtime.htf_block_countertrend()),
                                          min_stop_pct=runtime.min_stop_pct(),
+                                         late_entry_gate=runtime.late_entry_gate(),
                                          use_time_filter=runtime.time_filter_enabled()),
                            htf_tf="4h")
         return (watchlist_gate_decision(rep.expectancy_r, rep.trades),

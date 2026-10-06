@@ -180,7 +180,7 @@ def _insert(signal: Signal, status: str, event: str) -> int:
     return sid
 
 
-def record_shadow(signal: Signal) -> int:
+def record_shadow(signal: Signal, reason: str = "setup_off") -> int:
     """Теневой сигнал (сетап на проверке вперёд): status='rejected' — механизм теневого
     исхода уже есть (update_outcomes_from_bars пишет result_r, событие 'shadow'), а
     публичная стата, гейты, executor и посты rejected не видят. Когорту отделяет флаг
@@ -189,19 +189,19 @@ def record_shadow(signal: Signal) -> int:
     from dataclasses import replace
     snap = dict(signal.indicators_snapshot) if isinstance(signal.indicators_snapshot,
                                                           dict) else {}
-    snap["shadow"] = "setup_off"
+    snap["shadow"] = reason             # setup_off — сетап в тени; late_entry — гейт входа
     return _insert(replace(signal, indicators_snapshot=snap), "rejected", "shadow")
 
 
-def shadow_stats(since_iso: str | None = None) -> dict:
+def shadow_stats(since_iso: str | None = None, reason: str = "setup_off") -> dict:
     """Итоги теневой когорты: закрытые исходы по тегу/ТФ. -> {(tag, tf): {n, sum, exp, wins}}"""
     q = ("SELECT s.timeframe, s.snapshot_json, s.result_r FROM signals s "
          "WHERE s.status='rejected' AND s.result_r IS NOT NULL "
-         "AND s.snapshot_json LIKE '%\"shadow\": \"setup_off\"%'")
-    args: tuple = ()
+         "AND s.snapshot_json LIKE ?")
+    args: tuple = (f'%"shadow": "{reason}"%',)
     if since_iso:
         q += " AND s.created_at >= ?"
-        args = (since_iso,)
+        args = (*args, since_iso)
     out: dict = {}
     for r in db.query(q, args):
         key = (_setup_of(r), r["timeframe"])

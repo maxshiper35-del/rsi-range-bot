@@ -565,3 +565,35 @@ def test_late_entry_gate_rejects_candidate_before_argmax():
         assert ss.SMCEngine(cfg).analyze_single(df, "X/USDT:USDT", "1h") is ok
     finally:
         mod.build_6226, mod.build_ltf_poi = orig
+
+
+def test_late_entry_gate_records_ungated_winner_for_shadow():
+    """Гейт включён: бар достаётся валидному кандидату, а победитель без гейта (поздний)
+    попадает в engine.late_shadow для тени; гейт выключен — late_shadow пуст."""
+    import pandas as pd
+
+    from app.brain import smc_setups as ss
+    from app.core.signal_engine import Side, Signal
+
+    def mk(setup, entry, stop, conf):
+        return Signal(symbol="X/USDT:USDT", side=Side.LONG, timeframe="1h", entry=entry,
+                      stop=stop, take_profits=[entry + 10], risk_reward=2.0, confidence=conf,
+                      reasons=[], created_at="2026-01-01T00:00:00+00:00",
+                      indicators_snapshot={"setup": setup})
+
+    df = pd.DataFrame({"open": [100.0], "high": [101.0], "low": [96.0], "close": [97.0],
+                       "volume": [1.0]})
+    late, ok = mk("6226", 99.0, 95.0, 0.9), mk("LTF-BB", 96.0, 93.0, 0.6)
+    orig = (ss.build_6226, ss.build_ltf_poi)
+    try:
+        ss.build_6226 = lambda *a, **k: late
+        ss.build_ltf_poi = lambda *a, **k: ok
+        eng = ss.SMCEngine(ss.SMCConfig(enabled_setups=("6226", "LTF"),
+                                        use_time_filter=False, late_entry_gate="entry"))
+        assert eng.analyze_multi({"1h": df}, "X/USDT:USDT") == [ok]
+        assert eng.late_shadow == [late]
+        eng.cfg.late_entry_gate = "off"
+        assert eng.analyze_multi({"1h": df}, "X/USDT:USDT") == [late]
+        assert eng.late_shadow == []
+    finally:
+        ss.build_6226, ss.build_ltf_poi = orig

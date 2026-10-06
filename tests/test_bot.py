@@ -1193,3 +1193,52 @@ def test_shadow_setup_recorded_not_published(fresh_db, monkeypatch):
     st = journal.shadow_stats()
     assert st[("LTF-BB", "4h")]["n"] == 1 and st[("LTF-BB", "4h")]["sum"] == -1.0
     assert journal.stats()["trades"] == 0
+
+
+def test_late_entry_shadow_recorded_not_published(fresh_db, monkeypatch):
+    """Гейт «вход уже пройден» (06.10): победитель бара, отсечённый гейтом
+    (SMCEngine.late_shadow), пишется в тень с shadow='late_entry', не публикуется;
+    shadow_stats разделяет когорты по причине."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import db
+    from app.brain import journal
+    from app.core.signal_engine import Side, Signal
+
+    now = datetime.now(timezone.utc)
+    created = (now - timedelta(minutes=61)).isoformat()
+
+    def mk(tf, entry, side=Side.LONG):
+        k = 0.97 if side == Side.LONG else 1.03
+        return Signal(symbol="BTC/USDT:USDT", side=side, timeframe=tf, entry=entry,
+                      stop=entry * k, take_profits=[entry * (2 - k)], risk_reward=2.0,
+                      confidence=0.7, reasons=["r"], created_at=created,
+                      indicators_snapshot={"setup": "6226"})
+
+    class _Eng:
+        late_shadow: list = []
+
+        def analyze_multi(self, frames, symbol):
+            # 1h: «поздний» SHORT отсечён гейтом; 4h: поздний LONG, но на том же 4h-баре
+            # опубликован валидный LONG — тень не мешает живому сигналу (дедуп)
+            self.late_shadow = [mk("1h", 105.0, Side.SHORT), mk("4h", 99.0)]
+            return [mk("4h", 100.0)]
+
+    out = bot.scan_auto("BTC/USDT:USDT", {}, _Eng())
+    assert [(s.timeframe, s.entry) for s, _ in out] == [("4h", 100.0)]
+    rows = db.query("SELECT id, status, entry, snapshot_json FROM signals ORDER BY id")
+    assert [(r["status"], r["entry"]) for r in rows] == [("open", 100.0), ("rejected", 105.0)]
+    assert '"shadow": "late_entry"' in rows[1]["snapshot_json"]
+    db.execute("UPDATE signals SET result_r=-1.0, closed_at=? WHERE id=?",
+               (now.isoformat(), rows[1]["id"]))
+    assert journal.shadow_stats(reason="late_entry")[("6226", "1h")]["n"] == 1
+    assert journal.shadow_stats() == {}                           # когорта setup_off пуста
+
+
+def test_late_entry_gate_runtime_default_off_and_validated(fresh_db):
+    from app import runtime
+    assert runtime.late_entry_gate() == "off"
+    runtime.set_value("late_entry_gate", "ENTRY")
+    assert runtime.late_entry_gate() == "entry"
+    runtime.set_value("late_entry_gate", "мусор")
+    assert runtime.late_entry_gate() == "off"

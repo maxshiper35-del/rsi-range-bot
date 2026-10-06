@@ -402,6 +402,9 @@ _ADMIN_SETTINGS: dict[str, dict] = {
                           "label": "Лимит на сторону (0 = БЕЗ лимита!)", "group": "Сигналы"},
     "watchlist_auto_enabled": {"t": "bool", "group": "Сигналы",
                                "label": "Авто-вотчлист (подбирает и экзотику)"},
+    "late_entry_gate":   {"t": "choice", "choices": ("off", "stop", "entry"),
+                          "label": "Гейт «вход уже пройден» (entry — замер 06.10)",
+                          "group": "Сигналы"},
     "channel_enabled":   {"t": "bool", "label": "Постить в канал", "group": "Канал"},
     "channel_mode":      {"t": "choice", "choices": ("full", "teaser"),
                           "label": "Режим канала", "group": "Канал"},
@@ -466,6 +469,7 @@ def _admin_settings_payload() -> list:
         "affiliate_url": runtime.affiliate_url(),
         "executor_enabled": runtime.executor_enabled(),
         "backtest_public": runtime.backtest_public(),
+        "late_entry_gate": runtime.late_entry_gate(),
     }
     return [{"key": k, "value": cur[k], "label": v["label"], "t": v["t"],
              "group": v["group"], **({"choices": v["choices"]} if "choices" in v else {}),

@@ -83,6 +83,19 @@ def shadow_setups() -> set[tuple[str, str]]:
     return out
 
 
+_LATE_ENTRY_GATES = ("off", "stop", "entry")
+
+
+def late_entry_gate() -> str:
+    """Гейт «вход уже пройден» (SMCConfig.late_entry_gate): 'entry' — не публиковать сигнал,
+    чей вход рынок уже прошёл к закрытию решающего бара; 'stop' — только уже за стопом;
+    'off' — нет. Отсечённый победитель бара пишется в тень (shadow='late_entry').
+    Замер 06.10.2026 (docs/measurements/2026-10-06-late-entry-gate.md): 'entry' принят на
+    обеих половинах (5 лет M0: TRAIN +2→+252R, OOS +57→+106R; живой журнал — то же)."""
+    v = (_raw("late_entry_gate") or "off").strip().lower()
+    return v if v in _LATE_ENTRY_GATES else "off"
+
+
 def backtest_public() -> bool:
     """Показывать ли секцию «Бэктест 5 лет» в публичном дашборде. Дефолт ВЫКЛ (05.10):
     прежний расчёт пропускал стоп на баре входа и мерил выходы по тейку — +622R против
@@ -641,6 +654,7 @@ def effective() -> dict:
         "trail_only_exit": trail_only_exit(),
         "trail_max_hold_hours": trail_max_hold_hours(),
         "enabled_setups": enabled_setups(),
+        "late_entry_gate": late_entry_gate(),
         "price_stars": price_stars(),
         "price_usdt": price_usdt(),
         "sub_days": sub_days(),
