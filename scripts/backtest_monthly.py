@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,11 +28,22 @@ from scripts.run_portfolio import load, parse_args
 
 SYMS = ("BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,1000PEPE/USDT:USDT,"
         "NEAR/USDT:USDT,ONDO/USDT:USDT,HYPE/USDT:USDT,ZEC/USDT:USDT")
+# кэш сигналов для бэктеста и замеров; SIG_DIR=data/cache5y/sig_prod — снимок с паритетом
+# конфига движка (dump_signals --prod, 06.10.2026)
+SIG_DIR = os.environ.get("SIG_DIR", "data/cache5y/sig_parity")
+
+
+def check_baseline(n: int, total: float) -> str:
+    """Эталон n=5309 / +73.3R есть только у sig_parity; другой кэш печатает свою базу."""
+    if SIG_DIR.rstrip("/").endswith("sig_parity"):
+        assert n == 5309 and abs(total - 73.3) < 0.5, f"бейслайн: n={n} Σ={total}"
+        return "бейслайн воспроизведён (n=5309, +73.3R)"
+    return f"бейслайн на {SIG_DIR}: n={n} Σ={total:+.1f}R (новый кэш, эталона нет)"
 
 
 def run(fee: float) -> dict:
     args = parse_args(["--symbols", SYMS, "--tfs", "1h,4h",
-                       "--cache", "data/cache5y", "--signals", "data/cache5y/sig_parity",
+                       "--cache", "data/cache5y", "--signals", SIG_DIR,
                        "--setups", "6226,LTF", "--min-stop-pct", "1.3",
                        "--trail-activate", "1.5", "--trail-dist", "0.2",
                        "--fee", str(fee), "--slip", "0.02", "--funding", "0.125",

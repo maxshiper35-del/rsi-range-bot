@@ -7,7 +7,7 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor
 
 from app.sim.portfolio import simulate_portfolio
-from scripts.backtest_monthly import SYMS
+from scripts.backtest_monthly import SIG_DIR, SYMS, check_baseline
 from scripts.run_portfolio import load, parse_args
 
 OOS_FROM = "2025-07-28"
@@ -21,7 +21,7 @@ MODELS = {
 
 def run(m: dict, a: str | None, b: str | None) -> dict:
     argv = ["--symbols", SYMS, "--tfs", "1h,4h", "--cache", "data/cache5y",
-            "--signals", "data/cache5y/sig_parity", "--setups", "6226,LTF",
+            "--signals", SIG_DIR, "--setups", "6226,LTF",
             "--min-stop-pct", "1.3", "--fee", str(m["fee"]), "--slip", str(m["slip"]),
             "--funding", "0.125"]
     if a:
@@ -51,8 +51,7 @@ def main() -> None:
     with ProcessPoolExecutor(max_workers=9) as pool:
         res = {(n, a, b): r for n, a, b, r in pool.map(_job, jobs)}
     full = res[("M0 маркет-модель", None, None)]
-    assert full["n"] == 5309 and abs(full["sum"] - 73.3) < 0.5, f"бейслайн: {full}"
-    print("M0 воспроизводит бэктест (n=5309, +73.3R)")
+    print("M0:", check_baseline(full["n"], full["sum"]))
     for (n, a, b), r in sorted(res.items(), key=lambda kv: (kv[0][0], str(kv[0][1]))):
         if a is None and b is None:
             continue

@@ -8,23 +8,28 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor
 
 from app.sim.portfolio import simulate_portfolio
-from scripts.backtest_monthly import SYMS
+from scripts.backtest_monthly import SIG_DIR, SYMS, check_baseline
 from scripts.run_portfolio import load, parse_args
 
 OOS_FROM = "2025-07-28"
 BASE = {"setups": "6226,LTF", "min_stop": 1.3, "act": 1.5, "dist": 0.2, "tfs": "1h,4h"}
 VARIANTS = {
-    "V1 1:1 вкл": {"setups": "6226,1:1,LTF"},
+    "V1 1:1 вкл": {"setups": "6226,1:1,LTF", "sig": "_setups_11"},
     "V2 trail 0.3": {"dist": 0.3},
     "V3 act 1.0": {"act": 1.0},
-    "V4 stop 1.0": {"min_stop": 1.0},
-    "V5 stop 1.6": {"min_stop": 1.6},
+    "V4 stop 1.0": {"min_stop": 1.0, "sig": "_stop10"},
+    "V5 stop 1.6": {"min_stop": 1.6, "sig": "_stop16"},
 }
+# sig_prod снят с гейтами движка прода (сетапы, min_stop ДО выбора кандидата): вариант,
+# меняющий такой гейт, читает свой снимок <SIG_DIR><sig> (dump_signals --prod --set ...).
+# На старом sig_parity (снят без гейтов) суффикс не нужен — фильтр в портфельном слое.
+_PER_VARIANT_SIG = not SIG_DIR.rstrip("/").endswith("sig_parity")
 
 
 def run(cfg: dict, from_dt: str | None, to_dt: str | None) -> dict:
     argv = ["--symbols", SYMS, "--tfs", "1h,4h", "--cache", "data/cache5y",
-            "--signals", "data/cache5y/sig_parity", "--setups", cfg["setups"],
+            "--signals", SIG_DIR + (cfg.get("sig", "") if _PER_VARIANT_SIG else ""),
+            "--setups", cfg["setups"],
             "--min-stop-pct", str(cfg["min_stop"]), "--fee", "0.055", "--slip", "0.02",
             "--funding", "0.125", "--entry-fill", "touch"]
     if from_dt:
@@ -56,8 +61,7 @@ def main() -> None:
     with ProcessPoolExecutor(max_workers=12) as pool:
         res = {(n, a, b): r for n, a, b, r in pool.map(_job, jobs)}
     full = res[("base", None, None)]
-    assert full["n"] == 5309 and abs(full["sum"] - 73.3) < 0.5, f"бейслайн: {full}"
-    print("бейслайн воспроизведён (n=5309, +73.3R)")
+    print(check_baseline(full["n"], full["sum"]))
     for name in VARIANTS:
         ok = True
         for label, (a, z) in (("TRAIN", halves[0]), ("OOS", halves[1])):

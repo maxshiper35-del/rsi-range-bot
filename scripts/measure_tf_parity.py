@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from app.sim.portfolio import simulate_portfolio
-from scripts.backtest_monthly import SYMS
+from scripts.backtest_monthly import SIG_DIR, SYMS, check_baseline
 from scripts.run_portfolio import load, parse_args
 
 OOS_FROM = "2025-07-28"
@@ -14,7 +14,7 @@ OOS_FROM = "2025-07-28"
 
 def _run(tfs: str, from_dt: str | None, to_dt: str | None):
     argv = ["--symbols", SYMS, "--tfs", "1h,4h", "--cache", "data/cache5y",
-            "--signals", "data/cache5y/sig_parity", "--setups", "6226,LTF",
+            "--signals", SIG_DIR, "--setups", "6226,LTF",
             "--min-stop-pct", "1.3", "--fee", "0.055", "--slip", "0.02",
             "--funding", "0.125", "--entry-fill", "touch"]
     if from_dt:
@@ -39,9 +39,7 @@ def _line(name, r):
 
 def main() -> None:
     full = _run("1h,4h", None, None)
-    assert full.trades == 5309 and abs(full.total_r - 73.3) < 0.5, \
-        f"бейслайн не совпал с backtest_monthly.json: {full.trades}/{full.total_r:.1f}"
-    print("бейслайн воспроизведён (n=5309, +73.3R)")
+    print(check_baseline(full.trades, full.total_r))
     verdict = True
     for label, a, b in (("TRAIN", None, OOS_FROM), ("OOS", OOS_FROM, None)):
         base, var = _run("1h,4h", a, b), _run("1h", a, b)

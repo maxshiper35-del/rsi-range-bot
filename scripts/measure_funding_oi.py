@@ -13,7 +13,7 @@ import pandas as pd
 
 from app.brain.smc_setups import SMCEngine
 from app.sim.portfolio import simulate_portfolio
-from scripts.backtest_monthly import SYMS
+from scripts.backtest_monthly import SIG_DIR, SYMS, check_baseline
 from scripts.run_portfolio import load, parse_args
 
 OOS_FROM = "2025-07-28"
@@ -99,7 +99,7 @@ def _keep(variant: str, side: str, fp: float | None, op: float | None,
 
 def _load():
     argv = ["--symbols", SYMS, "--tfs", "1h,4h", "--cache", "data/cache5y",
-            "--signals", "data/cache5y/sig_parity", "--setups", "6226,LTF",
+            "--signals", SIG_DIR, "--setups", "6226,LTF",
             "--min-stop-pct", "1.3", "--fee", str(FEE), "--slip", str(SLIP),
             "--funding", str(FUND_BPS)]
     return load(parse_args(argv))
@@ -162,8 +162,7 @@ def main() -> None:
         for job, r, c in pool.map(_job, jobs):
             res[job], cover[job] = r, c
     chk = res[("check", "ALL")]
-    assert chk["n"] == 5309 and abs(chk["sum"] - 73.3) < 0.5, f"бейслайн: {chk}"
-    print("база без доп. издержки воспроизводит бэктест (n=5309, +73.3R)")
+    print("база без доп. издержки:", check_baseline(chk["n"], chk["sum"]))
     rng = np.random.default_rng(20261006)
     verdicts = {}
     for half in HALVES:
