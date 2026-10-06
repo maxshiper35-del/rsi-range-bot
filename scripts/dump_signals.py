@@ -191,7 +191,7 @@ def main() -> None:
 
 _PROD_KEYS = ("enabled_setups", "min_confidence", "min_impulse_atr", "min_rr_open_model",
               "htf_block_countertrend", "min_stop_pct", "use_time_filter", "ob_full_move",
-              "smt_mode")
+              "smt_mode", "late_entry_gate")
 
 
 def _prod_config(args) -> tuple[SMCConfig, dict]:

@@ -526,3 +526,42 @@ def test_veto_break_into_hpz_flag_off_is_noop():
     assert base is not None
     on = SMCConfig(use_time_filter=False, min_confidence=0.0, veto_break_into_hpz=True)
     build_6226(df, "T", on)   # не падает; исход зависит от зон в синтетике
+
+
+def test_late_entry_gate_rejects_candidate_before_argmax():
+    """Гейт «вход уже пройден» (06.10.2026): кандидат, чей вход (или стоп) рынок уже
+    прошёл к закрытию решающего бара, отбрасывается ДО выбора лучшего — побеждает
+    следующий валидный кандидат; "off" — поведение прежнее."""
+    import pandas as pd
+
+    from app.brain import smc_setups as ss
+    from app.core.signal_engine import Side, Signal
+
+    def mk(setup, side, entry, stop, conf):
+        return Signal(symbol="X/USDT:USDT", side=side, timeframe="1h", entry=entry, stop=stop,
+                      take_profits=[entry + (entry - stop) * 2], risk_reward=2.0,
+                      confidence=conf, reasons=[], created_at="2026-01-01T00:00:00+00:00",
+                      indicators_snapshot={"setup": setup})
+
+    df = pd.DataFrame({"open": [100.0], "high": [101.0], "low": [96.0], "close": [97.0],
+                       "volume": [1.0]})
+    late = mk("6226", Side.LONG, entry=99.0, stop=95.0, conf=0.9)    # рынок 97 < входа 99
+    dead = mk("6226", Side.LONG, entry=99.0, stop=97.5, conf=0.95)   # рынок 97 <= стопа
+    ok = mk("LTF-BB", Side.LONG, entry=96.0, stop=93.0, conf=0.6)    # рынок выше входа
+    assert ss._entry_passed(late, 97.0, "entry") and not ss._entry_passed(late, 97.0, "stop")
+    assert ss._entry_passed(dead, 97.0, "stop")
+    assert not ss._entry_passed(ok, 97.0, "entry")
+    short = mk("6226", Side.SHORT, entry=101.0, stop=105.0, conf=0.9)
+    assert ss._entry_passed(short, 102.0, "entry") and not ss._entry_passed(short, 100.0, "entry")
+
+    import app.brain.smc_setups as mod
+    orig = (mod.build_6226, mod.build_ltf_poi)
+    try:
+        mod.build_6226 = lambda *a, **k: late
+        mod.build_ltf_poi = lambda *a, **k: ok
+        cfg = ss.SMCConfig(enabled_setups=("6226", "LTF"), use_time_filter=False)
+        assert ss.SMCEngine(cfg).analyze_single(df, "X/USDT:USDT", "1h") is late
+        cfg.late_entry_gate = "entry"
+        assert ss.SMCEngine(cfg).analyze_single(df, "X/USDT:USDT", "1h") is ok
+    finally:
+        mod.build_6226, mod.build_ltf_poi = orig

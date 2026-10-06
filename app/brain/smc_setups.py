@@ -96,6 +96,9 @@ class SMCConfig(StrategyConfig):
     # измеренном матожидании того же порядка; сигналы со стопом 0.13% стоили целый 1R
     # и были убыточны в момент рождения. 0 = гейт выключен.
     min_stop_pct: float = 0.0
+    # гейт «вход уже пройден» (замер 06.10.2026): close решающего бара уже за стопом
+    # ("stop") или за уровнем входа ("entry") — сетап сыгран до публикации; "off" — нет
+    late_entry_gate: str = "off"
 
     # --- A/B-кандидаты 11.08.2026: ВСЕ ТРИ ОТКЛОНЕНЫ ЗАМЕРОМ, дефолты «выключено» ---
     # Гейт замера: 5-летний портфельный прогон в паритете проду (9 символов, 1h+4h,
@@ -593,6 +596,16 @@ def _signal_created_at(df: pd.DataFrame) -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _entry_passed(sig: Signal, market: float, mode: str) -> bool:
+    """Цена закрытия решающего бара уже за стопом (mode="stop") или за уровнем входа
+    (mode="entry"): LONG-лимитка ниже рынка ждёт отката, а рынок уже под ней."""
+    if mode == "stop":
+        return market <= sig.stop if sig.side == Side.LONG else market >= sig.stop
+    if mode == "entry":
+        return market < sig.entry if sig.side == Side.LONG else market > sig.entry
+    raise ValueError(f"late_entry_gate: {mode!r}")
+
+
 def _mk_signal(df: pd.DataFrame, symbol: str, side: Side, timeframe: str,
                entry: float, stop: float,
                tps: list[float], rr: float, confidence: float, reasons: list[str],
@@ -679,6 +692,10 @@ class SMCEngine:
             signals = [c for c in signals
                        if c.entry > 0
                        and abs(c.entry - c.stop) / c.entry * 100.0 >= self.cfg.min_stop_pct]
+        if signals and self.cfg.late_entry_gate != "off":
+            market = float(df["close"].iloc[-1])
+            signals = [c for c in signals
+                       if not _entry_passed(c, market, self.cfg.late_entry_gate)]
         # жёсткий блок контртренда: подтверждённая структура HTF против стороны сигнала ->
         # сигнал не выдаётся (штраф −0.25 в confidence пропускал лонги в сползании 17.07).
         # htf_df=None (старший ТФ набора) и неподтверждённая структура — блока нет.
