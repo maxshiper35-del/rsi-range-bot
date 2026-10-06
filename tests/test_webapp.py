@@ -528,8 +528,9 @@ def test_api_backtest_static_json(fresh_db):
     r = c.get("/api/backtest")
     assert r.status_code == 200
     d = r.get_json()
-    # паритет с живым судьёй (05.10): 5309 сделок, +73.3R — не прежние оптимистичные 5353/+622
-    assert len(d["months"]) == 60 and d["totals"]["trades"] == 5309
+    # паритет с живым судьёй (05.10) и снимок sig_prod с гейтами движка прода (06.10):
+    # 6675 сделок, +59.3R — не оптимистичные 5353/+622 и не 5309/+73.3 урезанного снимка
+    assert len(d["months"]) == 60 and d["totals"]["trades"] == 6675
     assert "by_setup" not in d
     body = r.get_data(as_text=True)
     for token in ("6226", "LTF", "1:1", "open-SMC", "bias", "sweep", "confl"):

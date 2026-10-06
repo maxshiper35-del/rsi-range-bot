@@ -13,6 +13,11 @@
 (05.10.2026, аудит): прежняя модель _simulate_open пропускала стоп на баре филла,
 судила 4h-сигналы 4h-барами и выходила по тейку — +622.4R против +75.8R по правилам
 живого бота (n=5309, exp +0.014, DD 110.9R; 4 года до 07.2025 ≈ +1R, посл. 12 мес +72R).
+
+КЭШ СИГНАЛОВ — sig_prod (06.10.2026): снят `dump_signals --prod` с гейтами движка прода
+(сетапы и min_stop ДО выбора кандидата, HTF закрытыми свечами, окно 199). Старый
+sig_parity терял ~40% сигналов прода. На sig_prod: n=6675, +59.3R, exp +0.009
+(TRAIN +2.2R, OOS +57.1R); с реальным слипом демо (−0.08R/сделку) — минус на обеих половинах.
 """
 from __future__ import annotations
 
@@ -30,15 +35,17 @@ SYMS = ("BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,1000PEPE/USDT:U
         "NEAR/USDT:USDT,ONDO/USDT:USDT,HYPE/USDT:USDT,ZEC/USDT:USDT")
 # кэш сигналов для бэктеста и замеров; SIG_DIR=data/cache5y/sig_prod — снимок с паритетом
 # конфига движка (dump_signals --prod, 06.10.2026)
-SIG_DIR = os.environ.get("SIG_DIR", "data/cache5y/sig_parity")
+SIG_DIR = os.environ.get("SIG_DIR", "data/cache5y/sig_prod")
+# эталон базы (M0, 1h+4h, весь период) по кэшу: сверка, что замер мерит то же, что бэктест
+_BASELINES = {"sig_prod": (6675, 59.3), "sig_parity": (5309, 73.3)}
 
 
 def check_baseline(n: int, total: float) -> str:
-    """Эталон n=5309 / +73.3R есть только у sig_parity; другой кэш печатает свою базу."""
-    if SIG_DIR.rstrip("/").endswith("sig_parity"):
-        assert n == 5309 and abs(total - 73.3) < 0.5, f"бейслайн: n={n} Σ={total}"
-        return "бейслайн воспроизведён (n=5309, +73.3R)"
-    return f"бейслайн на {SIG_DIR}: n={n} Σ={total:+.1f}R (новый кэш, эталона нет)"
+    ref = _BASELINES.get(SIG_DIR.rstrip("/").rsplit("/", 1)[-1])
+    if ref is None:
+        return f"бейслайн на {SIG_DIR}: n={n} Σ={total:+.1f}R (эталона нет)"
+    assert n == ref[0] and abs(total - ref[1]) < 0.5, f"бейслайн {SIG_DIR}: n={n} Σ={total}"
+    return f"бейслайн воспроизведён ({SIG_DIR}: n={n}, {total:+.1f}R)"
 
 
 def run(fee: float) -> dict:
