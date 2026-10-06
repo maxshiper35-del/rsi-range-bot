@@ -473,6 +473,13 @@ def update_outcomes(latest_prices: dict[str, float]) -> int:
     return closed
 
 
+def _bar_span(dts):
+    """Длина бара скоринга по самим барам (медиана шага); один бар — 1ч (ТФ скоринга)."""
+    import pandas as pd
+    steps = dts.diff().dropna()
+    return steps.median() if len(steps) else pd.Timedelta(hours=1)
+
+
 def _outcome_from_bars(row, df, fill_through_frac: float = 0.0) -> tuple | None:
     """Исход по ХРОНОЛОГИИ закрытых баров ПОСЛЕ ЗАКРЫТИЯ решающего бара (честный скоринг).
 
@@ -517,6 +524,15 @@ def _outcome_from_bars(row, df, fill_through_frac: float = 0.0) -> tuple | None:
     # рождения и ушёл в −1R в публичный журнал). Старт — строго с закрытия решающего бара.
     decision = created + pd.Timedelta(minutes=SMCEngine.TF_MINUTES.get(row["timeframe"], 60))
 
+    def _touched(lo: float, hi: float) -> bool:
+        if fill_through_frac > 0:
+            # ТОЛЬКО для исследований (замер модели входа 05.10): пассивная лимитка
+            # исполняется, лишь когда цена прошла уровень на долю дистанции стопа.
+            # Прод вызывает с 0 — контракт журнала «касание» не меняется.
+            eps = fill_through_frac * risk
+            return (lo <= entry - eps) if side == "LONG" else (hi >= entry + eps)
+        return lo <= entry <= hi
+
     tp_block_dt = None                               # dt бара филла: тейк на нём не присуждаем
     # если филл УЖЕ зафиксирован ранее (bar-скоринг или реалтайм-стрим) — НЕ перевыводим
     # его и НИКОГДА не истекаем (аудит 2026-07-13 [1]). Доскориваем с бара, СОДЕРЖАЩЕГО филл.
@@ -530,9 +546,23 @@ def _outcome_from_bars(row, df, fill_through_frac: float = 0.0) -> tuple | None:
             # окно баров НЕ покрывает филл: скоринг по обрезку пропустил бы стоп в дыре и
             # мог флипнуть исход (аудит-2 [5]) — ждём, поллер добирает глубину фетча
             return None
-        bars = df.loc[dts >= at_or_before.iloc[-1]]
-        if not bars.empty:
-            tp_block_dt = pd.to_datetime(bars.iloc[0]["dt"], utc=True)
+        fill_bar = at_or_before.iloc[-1]
+        if fill_ts >= fill_bar + _bar_span(dts):
+            # бар, СОДЕРЖАЩИЙ филл, ещё не закрыт (такт посреди бара — догон после
+            # простоя): последний закрытый бар целиком РАНЬШЕ входа, стоп по нему — цена
+            # до сделки (#506, 06.10: стоп «на» собственном сигнальном баре). Ждём бар.
+            return None
+        # Стрим мог не видеть рынок (сон Mac, обрыв, переподключение): касание по барам
+        # после решения, но РАНЬШЕ бара стримового филла — вход по контракту «первое
+        # касание», как в бэктесте. Иначе стоп между настоящим и «стримовым» входом
+        # терялся (#503: касание 05.10 18:00, стоп 19:00, стрим «исполнил» 06.10 14:18).
+        for _, b in df.loc[(dts >= decision) & (dts < fill_bar)].iterrows():
+            if _touched(float(b["low"]), float(b["high"])):
+                fill_bar = pd.to_datetime(b["dt"], utc=True)
+                fill_dt = fill_bar.isoformat()
+                break
+        bars = df.loc[dts >= fill_bar]
+        tp_block_dt = fill_bar
     else:
         filled = False
         fill_dt = None
@@ -553,15 +583,7 @@ def _outcome_from_bars(row, df, fill_through_frac: float = 0.0) -> tuple | None:
                 # определён контрактом и не зависит от ТФ скоринга и глубины фетча.
                 expire_dt = decision + pd.Timedelta(hours=MAX_WAIT_HOURS)
                 return ("expired", "expired", None, None, None, expire_dt.isoformat())
-            if fill_through_frac > 0:
-                # ТОЛЬКО для исследований (замер модели входа 05.10): пассивная лимитка
-                # исполняется, лишь когда цена прошла уровень на долю дистанции стопа.
-                # Прод вызывает с 0 — контракт журнала «касание» не меняется.
-                eps = fill_through_frac * risk
-                touched = (lo <= entry - eps) if side == "LONG" else (hi >= entry + eps)
-            else:
-                touched = lo <= entry <= hi
-            if not touched:
+            if not _touched(lo, hi):
                 continue
             filled = True                            # вход исполнен на ЭТОМ баре
             fill_dt = bar_dt.isoformat()
@@ -700,6 +722,11 @@ def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
             if fill_won and not shadow:
                 closed.append({**base, "status": "filled", "result_r": None,
                                "exit_price": None, "price_move_pct": None})
+        elif fill_dt is not None and fill_dt != row["filled_at"]:
+            # судья нашёл касание РАНЬШЕ стримового филла (стрим не видел рынок): время
+            # входа в журнале — по факту; пост «вход исполнен» уже был, второго не шлём
+            db.execute("UPDATE signals SET filled_at=?, updated_at=? WHERE id=? AND filled_at=?",
+                       (fill_dt, now, row["id"], row["filled_at"]))
         if status == "open":
             continue                                 # вход есть, развязки ещё нет
         r_val = round(result_r, 4) if result_r is not None else None

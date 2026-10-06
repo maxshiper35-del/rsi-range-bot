@@ -959,3 +959,55 @@ def test_try_mark_filled_only_open(fresh_db):
     assert journal.try_mark_filled(sid, "2026-01-02T00:00:00+00:00") is False
     db.execute("UPDATE signals SET status='open' WHERE id=?", (sid,))
     assert journal.try_mark_filled(sid, "2026-01-02T00:00:00+00:00") is True
+
+
+def _sig_1h(**kw):
+    s = _sig(**kw)
+    s.timeframe = "1h"
+    return s
+
+
+def test_stream_fill_in_unclosed_bar_waits_not_judged_on_earlier_bar(fresh_db):
+    """#506 (06.10.2026): такт посреди бара (догон после сна Mac). Стрим-филл в 14:41
+    внутри ещё не закрытого бара 14:00; последний закрытый бар 13:00 — ДО входа (его low
+    ниже стопа). Раньше стоп судился по нему (−1R «на» сигнальном баре) — теперь ждём."""
+    from app import db
+    from app.brain import journal
+    # сигнальный бар 13:00 (решение в 14:00) закрылся НИЖЕ стопа — как у #506
+    journal.record_signal(_sig_1h(side=Side.LONG, entry=100.0, stop=95.0, tp=110.0,
+                                  created_at="2026-01-01T13:00:00+00:00"))
+    db.execute("UPDATE signals SET filled_at=? WHERE id=1", ("2026-01-01T14:41:00+00:00",))
+    before_fill = [(101, 102, 97, 99), (99, 101, 94, 94.5)]       # 12:00, 13:00 (сигнальный)
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(before_fill, start="2026-01-01T12:00:00+00:00", step_min=60)})
+    assert res == []
+    assert fresh_db.query_one("SELECT status FROM signals WHERE id=1")["status"] == "open"
+    # бар филла 14:00 закрылся: вход и выход судятся с НЕГО (тут — без стопа, держим)
+    with_fill_bar = before_fill + [(99, 103, 99.5, 102)]
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(with_fill_bar, start="2026-01-01T12:00:00+00:00", step_min=60)})
+    assert res == []
+    assert fresh_db.query_one("SELECT status FROM signals WHERE id=1")["status"] == "open"
+
+
+def test_stream_fill_after_outage_uses_earlier_bar_touch(fresh_db):
+    """#503 (06.10.2026): стрим не видел рынок сутки; по барам вход коснулся в 18:00 и
+    стоп в 19:00, стрим «исполнил» на следующий день. Вход — по первому касанию (как в
+    бэктесте), стоп между ними засчитан, filled_at в журнале исправлен без поста «filled»."""
+    from app import db
+    from app.brain import journal
+    journal.record_signal(_sig_1h(side=Side.SHORT, entry=100.0, stop=104.0, tp=90.0,
+                                  created_at="2026-01-01T14:00:00+00:00"))
+    db.execute("UPDATE signals SET filled_at=? WHERE id=1", ("2026-01-02T14:18:00+00:00",))
+    rows = [(97, 98, 96, 97)] * 3                                 # 15:00..17:00 — ниже входа
+    rows += [(97, 100.5, 97, 100)]                                # 18:00 — касание 100
+    rows += [(100, 105, 99, 104.5)]                               # 19:00 — стоп 104
+    rows += [(104.5, 106, 101, 102)] * 19                         # 20:00 .. 14:00 след. дня
+    res = journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(rows, start="2026-01-01T15:00:00+00:00", step_min=60)})
+    assert [c["status"] for c in res] == ["stopped"]              # без повторного «filled»
+    row = fresh_db.query_one("SELECT status, result_r, filled_at, closed_at FROM signals "
+                             "WHERE id=1")
+    assert row["status"] == "stopped" and row["result_r"] == -1.0
+    assert row["filled_at"] == "2026-01-01T18:00:00+00:00"
+    assert row["closed_at"] == "2026-01-01T19:00:00+00:00"
