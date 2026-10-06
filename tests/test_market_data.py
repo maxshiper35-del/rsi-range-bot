@@ -240,3 +240,26 @@ def test_poll_once_paused_scores_open_but_finds_no_new(fresh_db):
     assert row["status"] == "tp1" and row["result_r"] == 2.0
     done = [c for c in closed if c["id"] == sid and c["status"] == "tp1"]
     assert done and done[0]["closed_at"]                # время бара выхода — для гейта свежести
+
+
+def test_poll_once_engine_sees_engine_window_while_scoring_gets_deep_frame(fresh_db):
+    """Углублённый под скоринг фетч (до 999 баров) не доходит до движка: длина окна
+    меняла сигналы (06.10.2026). Движку — последние ENGINE_WINDOW, скорингу — всё."""
+    from app.data import market_data
+
+    seen = []
+
+    class _Spy:
+        def analyze_multi(self, frames, symbol):
+            seen.append({tf: len(df) for tf, df in frames.items()})
+            return []
+
+    def deep_loader(symbol, timeframes):
+        n = 600
+        df = pd.DataFrame({"open": [100.0] * n, "high": [101.0] * n, "low": [99.0] * n,
+                           "close": [100.0] * n, "volume": [1.0] * n})
+        return {tf: df for tf in timeframes}
+
+    poll_once(["BTC/USDT:USDT"], ["1h", "4h"], engine=_Spy(), frames_loader=deep_loader,
+              mode="auto")
+    assert seen == [{"1h": market_data.ENGINE_WINDOW, "4h": market_data.ENGINE_WINDOW}]

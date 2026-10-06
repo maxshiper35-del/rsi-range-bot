@@ -26,6 +26,10 @@ def seconds_to_next_close(tf: str, now_ts: float) -> float:
     return rem if rem > 0 else float(period)
 
 
+# окно движка: limit=200 минус формирующийся бар — так снят и бэктест (dump_signals --prod)
+ENGINE_WINDOW = 199
+
+
 def _scoring_limit(symbol: str, tf: str) -> int:
     """Глубина фетча для скоринга: если у символа есть старый нескорённый сигнал (филл или
     создание за левым краем стандартных 200 баров), обрезанное окно даёт слепые зоны —
@@ -94,7 +98,12 @@ def poll_once(symbols: list, timeframes: list, engine=None,
             entry_tf = min(frames, key=lambda t: SMCEngine.TF_MINUTES.get(t, 10 ** 9))
             bars_by_symbol[symbol] = frames[entry_tf]
             if scan_new:
-                found.extend(scan(symbol, frames, engine))  # (Signal, sid) на каждый входной ТФ
+                # движку — ровно ENGINE_WINDOW закрытых баров: углублённый под скоринг фетч
+                # (_scoring_limit, до 999) менял сигналы (BTC 1h, 5 лет: 199 баров — 877,
+                # 999 — 1038, общих 656) и делал их зависимыми от чужой открытой позиции
+                engine_frames = {tf: df.tail(ENGINE_WINDOW).reset_index(drop=True)
+                                 for tf, df in frames.items()}
+                found.extend(scan(symbol, engine_frames, engine))  # (Signal, sid) на каждый ТФ
         except Exception as e:                          # noqa: BLE001 — один символ не роняет цикл
             log.warning("poll %s: %s", symbol, e)
     # осиротевшие позиции: символы с открытыми сигналами, ВЫПАВШИЕ из вотчлиста
