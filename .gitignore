@@ -12,6 +12,7 @@ data/*.db.tmp
 data/backups/
 data/cache/
 data/cache5y/
+data/cache_live/
 
 # логи
 logs/
