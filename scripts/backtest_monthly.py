@@ -18,6 +18,8 @@
 (сетапы и min_stop ДО выбора кандидата, HTF закрытыми свечами, окно 199). Старый
 sig_parity терял ~40% сигналов прода. На sig_prod: n=6675, +59.3R, exp +0.009
 (TRAIN +2.2R, OOS +57.1R); с реальным слипом демо (−0.08R/сделку) — минус на обеих половинах.
+С 07.10.2026 прод — с гейтом «вход уже пройден» (late_entry_gate=entry, замер 06.10):
+снимок sig_prod_late_entry, n=5819, +358.1R, exp +0.061 (TRAIN +251.8R, OOS +106.3R).
 """
 from __future__ import annotations
 
@@ -35,9 +37,12 @@ SYMS = ("BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,1000PEPE/USDT:U
         "NEAR/USDT:USDT,ONDO/USDT:USDT,HYPE/USDT:USDT,ZEC/USDT:USDT")
 # кэш сигналов для бэктеста и замеров; SIG_DIR=data/cache5y/sig_prod — снимок с паритетом
 # конфига движка (dump_signals --prod, 06.10.2026)
-SIG_DIR = os.environ.get("SIG_DIR", "data/cache5y/sig_prod")
+# прод с 07.10.2026 — гейт «вход уже пройден» (late_entry_gate=entry): снимок
+# sig_prod_late_entry; sig_prod — тот же прод-конфиг без гейта (база замера 06.10)
+SIG_DIR = os.environ.get("SIG_DIR", "data/cache5y/sig_prod_late_entry")
 # эталон базы (M0, 1h+4h, весь период) по кэшу: сверка, что замер мерит то же, что бэктест
-_BASELINES = {"sig_prod": (6675, 59.3), "sig_parity": (5309, 73.3)}
+_BASELINES = {"sig_prod_late_entry": (5819, 358.1), "sig_prod": (6675, 59.3),
+              "sig_parity": (5309, 73.3)}
 
 
 def check_baseline(n: int, total: float) -> str:

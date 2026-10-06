@@ -91,9 +91,10 @@ def late_entry_gate() -> str:
     чей вход рынок уже прошёл к закрытию решающего бара; 'stop' — только уже за стопом;
     'off' — нет. Отсечённый победитель бара пишется в тень (shadow='late_entry').
     Замер 06.10.2026 (docs/measurements/2026-10-06-late-entry-gate.md): 'entry' принят на
-    обеих половинах (5 лет M0: TRAIN +2→+252R, OOS +57→+106R; живой журнал — то же)."""
-    v = (_raw("late_entry_gate") or "off").strip().lower()
-    return v if v in _LATE_ENTRY_GATES else "off"
+    обеих половинах (5 лет M0: TRAIN +2→+252R, OOS +57→+106R; живой журнал — то же).
+    Дефолт 'entry' — решение владельца 06.10.2026."""
+    v = (_raw("late_entry_gate") or "entry").strip().lower()
+    return v if v in _LATE_ENTRY_GATES else "entry"
 
 
 def backtest_public() -> bool:

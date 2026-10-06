@@ -1235,10 +1235,10 @@ def test_late_entry_shadow_recorded_not_published(fresh_db, monkeypatch):
     assert journal.shadow_stats() == {}                           # когорта setup_off пуста
 
 
-def test_late_entry_gate_runtime_default_off_and_validated(fresh_db):
+def test_late_entry_gate_runtime_default_entry_and_validated(fresh_db):
     from app import runtime
+    assert runtime.late_entry_gate() == "entry"                 # решение владельца 06.10
+    runtime.set_value("late_entry_gate", "OFF")
     assert runtime.late_entry_gate() == "off"
-    runtime.set_value("late_entry_gate", "ENTRY")
-    assert runtime.late_entry_gate() == "entry"
     runtime.set_value("late_entry_gate", "мусор")
-    assert runtime.late_entry_gate() == "off"
+    assert runtime.late_entry_gate() == "entry"
