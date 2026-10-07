@@ -60,3 +60,21 @@ def test_judge_fill_through_option_default_unchanged():
     assert touch is not None and touch[4] is not None             # касание = филл
     through = _outcome_from_bars(row, df, fill_through_frac=0.05)  # нужен проход до 99.9
     assert through is None or through[4] is None                  # прохода не было — нет филла
+
+
+def test_symbol_cooldown_skips_reentry_after_losing_stop():
+    """Пауза монеты+стороны (замер 07.10): после стопа −1R (бар выхода 06:00 закрыт в
+    07:00) повторный LONG той же монеты в окне H пропускается; H=0 — берётся."""
+    df = _bars()
+    bars = {("AAA/USDT:USDT", "1h"): df}
+    again = {**_sig(), "bar_index": 9, "dt": "2026-01-01 09:00:00+00:00", "setup": "Y",
+             "entry": 106.0, "stop": 104.0}
+    kw = dict(fee_pct=0.0, slippage_pct=0.0, funding_bps_per_bar=0.0, trail_activate_r=1.5,
+              trail_distance_r=0.2, live_judge_bars={"AAA/USDT:USDT": df}, tp_exit=False,
+              max_hold_hours=168.0, cooldown_stops=0)
+    off = simulate_portfolio(bars, [_sig(), again], **kw)
+    on = simulate_portfolio(bars, [_sig(), again], symbol_cooldown_hours=24.0, **kw)
+    assert off.trades == 2 and on.trades == 1 and on.skipped_cooldown == 1
+    other_side = {**again, "side": "SHORT", "entry": 106.0, "stop": 108.0}
+    assert simulate_portfolio(bars, [_sig(), other_side], symbol_cooldown_hours=24.0,
+                              **kw).skipped_cooldown == 0             # другая сторона — нет

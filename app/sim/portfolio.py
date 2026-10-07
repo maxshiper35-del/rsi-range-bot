@@ -153,7 +153,8 @@ def simulate_portfolio(bars: dict, signals: list, *,
                        live_judge_bars: dict | None = None,
                        tp_exit: bool = False,
                        max_hold_hours: float = 168.0,
-                       extra_cost_r: float = 0.0) -> PortfolioReport:
+                       extra_cost_r: float = 0.0,
+                       symbol_cooldown_hours: float = 0.0) -> PortfolioReport:
     """bars: {(symbol, tf): df} — те же кэш-бары, по которым считались сигналы.
     signals: список словарей из scripts.dump_signals (symbol, tf, bar_index, side, ...).
 
@@ -202,6 +203,20 @@ def simulate_portfolio(bars: dict, signals: list, *,
                    if c["side"] == side and counts_as_stop(c)
                    and cutoff <= c["closed_dt"] <= now)
 
+    def symbol_cooled(sig: dict) -> bool:
+        """Пауза монеты+стороны после УБЫТОЧНОГО стопа (замер 07.10.2026): стоп известен к
+        решению (бар выхода закрыт), и с него прошло не больше symbol_cooldown_hours."""
+        decision = (pd.Timestamp(sig["dt"])
+                    + pd.Timedelta(minutes=SMCEngine.TF_MINUTES.get(sig["tf"], 60)))
+        for c in closed:
+            if (c["symbol"] == sig["symbol"] and c["side"] == sig["side"]
+                    and c["outcome"].endswith("stop") and c["result_r"] < 0):
+                cdt = pd.Timestamp(c["closed_dt"])
+                if (cdt + pd.Timedelta(hours=1) <= decision
+                        and decision - cdt <= pd.Timedelta(hours=symbol_cooldown_hours)):
+                    return True
+        return False
+
     def duplicate_active(sig: dict, now: pd.Timestamp) -> bool:
         return any(a["symbol"] == sig["symbol"] and a["tf"] == sig["tf"]
                    and a["side"] == sig["side"] and a["setup"] == sig["setup"]
@@ -219,6 +234,9 @@ def simulate_portfolio(bars: dict, signals: list, *,
             skipped["cap"] += 1
             continue
         if cooldown_stops > 0 and recent_stops(sig["side"], now) >= cooldown_stops:
+            skipped["cooldown"] += 1
+            continue
+        if symbol_cooldown_hours > 0 and symbol_cooled(sig):
             skipped["cooldown"] += 1
             continue
 
