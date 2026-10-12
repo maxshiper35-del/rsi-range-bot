@@ -113,6 +113,11 @@ def last_offsite_alert_at() -> str | None:
     return _raw("last_offsite_alert_at")
 
 
+def last_battery_alert_at() -> str | None:
+    """Когда последний раз предупреждали «Mac на батарее» (пусто — тревоги нет)."""
+    return _raw("last_battery_alert_at") or None
+
+
 def last_overdue_alert_at() -> str | None:
     """Когда последний раз алертили «судья не разрешает сигналы» — троттлинг."""
     return _raw("last_overdue_alert_at")

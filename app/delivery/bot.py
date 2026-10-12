@@ -697,6 +697,54 @@ def result_is_fresh(c: dict, now: datetime, max_age_hours: float = 12.0) -> bool
     return (now - closed).total_seconds() <= max_age_hours * 3600
 
 
+def _pmset_batt() -> dict | None:
+    """Статус питания Mac (sync, через to_thread); не macOS / ошибка — None."""
+    import subprocess
+    import sys
+    if sys.platform != "darwin":
+        return None
+    try:
+        out = subprocess.run(["/usr/bin/pmset", "-g", "batt"], capture_output=True,
+                             text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_pmset_batt(out)
+
+
+def parse_pmset_batt(text: str) -> dict | None:
+    """Вывод `pmset -g batt` -> {"on_battery", "pct", "remaining"}; None — не разобрать
+    (не Mac / нет батареи). 09.10.2026 зарядку отключили вечером, сон выключен — Mac
+    молча работал на батарее до 04:00, сел, и бот лежал 3.5 дня."""
+    src = re.search(r"Now drawing from '([^']+)'", text or "")
+    if not src:
+        return None
+    pct = re.search(r"(\d+)%", text)
+    rem = re.search(r"(\d+:\d+) remaining", text)
+    return {"on_battery": "Battery" in src.group(1),
+            "pct": int(pct.group(1)) if pct else None,
+            "remaining": rem.group(1) if rem else None}
+
+
+def should_alert_battery(status: dict | None, last_alert_at: str | None,
+                         now_iso: str) -> bool:
+    """На батарее — алерт раз в час, при заряде <= 20% — раз в 15 минут."""
+    if not status or not status["on_battery"]:
+        return False
+    if last_alert_at is None:
+        return True
+    every_min = 15 if (status["pct"] is not None and status["pct"] <= 20) else 60
+    age = (datetime.fromisoformat(now_iso) - datetime.fromisoformat(last_alert_at))
+    return age.total_seconds() >= every_min * 60
+
+
+def battery_alert_text(status: dict) -> str:
+    pct = f"{status['pct']}%" if status["pct"] is not None else "?"
+    rem = (f", осталось ~{status['remaining']}"
+           if status["remaining"] and status["remaining"] != "0:00" else "")
+    return (f"🔋 Mac работает от батареи: {pct}{rem}. Сон отключён — когда батарея сядет, "
+            "бот выключится и сделки останутся без сопровождения. Подключите зарядку.")
+
+
 def should_remind_pause(paused_since: str | None, last_reminder_at: str | None,
                         now_iso: str, min_age_hours: float = 12.0,
                         rethrottle_hours: float = 24.0) -> bool:
@@ -3660,6 +3708,27 @@ def main() -> None:
                 except Exception as e:                     # noqa: BLE001
                     log.warning("offsite stale алерт админу %s: %s", admin_id, e)
             await asyncio.to_thread(runtime.set_value, "last_offsite_alert_at", now_)
+        # питание: Mac на батарее — бот живёт, пока не сядет (09.10: 3.5 дня простоя)
+        try:
+            batt = await asyncio.to_thread(_pmset_batt)
+            last_b = runtime.last_battery_alert_at()
+            if should_alert_battery(batt, last_b, now_):
+                for admin_id in cfg.admin_ids:
+                    try:
+                        await bot.send_message(admin_id, battery_alert_text(batt))
+                    except Exception as e:                 # noqa: BLE001
+                        log.warning("battery алерт админу %s: %s", admin_id, e)
+                await asyncio.to_thread(runtime.set_value, "last_battery_alert_at", now_)
+            elif batt and not batt["on_battery"] and last_b:
+                for admin_id in cfg.admin_ids:
+                    try:
+                        await bot.send_message(admin_id, "🔌 Питание восстановлено — Mac "
+                                               "снова на зарядке.")
+                    except Exception as e:                 # noqa: BLE001
+                        log.warning("battery ok админу %s: %s", admin_id, e)
+                await asyncio.to_thread(runtime.set_value, "last_battery_alert_at", "")
+        except Exception as e:                             # noqa: BLE001
+            log.warning("battery check: %s", e)
         # watchdog такта поллера: процесс жив (обслуживание тикает), но скан-цикл встал —
         # порог = 2× slack (полный пропущенный цикл + буфер, не единичный медленный тик)
         tick_stale = poller_tick_slack_seconds(runtime.timeframes()) * 2

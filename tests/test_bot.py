@@ -1242,3 +1242,23 @@ def test_late_entry_gate_runtime_default_entry_and_validated(fresh_db):
     assert runtime.late_entry_gate() == "off"
     runtime.set_value("late_entry_gate", "мусор")
     assert runtime.late_entry_gate() == "entry"
+
+
+def test_battery_alert_parse_and_throttle():
+    """09.10.2026: зарядку отключили, Mac сел на батарее — бот лежал 3.5 дня.
+    Алерт: на батарее раз в час, при <= 20% — раз в 15 мин; на зарядке — молчим."""
+    ac = bot.parse_pmset_batt("Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t"
+                              "100%; charged; 0:00 remaining present: true")
+    assert ac == {"on_battery": False, "pct": 100, "remaining": "0:00"}
+    batt = bot.parse_pmset_batt("Now drawing from 'Battery Power'\n -InternalBattery-0 "
+                                "(id=1)\t87%; discharging; 5:12 remaining present: true")
+    assert batt == {"on_battery": True, "pct": 87, "remaining": "5:12"}
+    assert bot.parse_pmset_batt("") is None
+    now = "2026-10-09T02:00:00+00:00"
+    assert bot.should_alert_battery(ac, None, now) is False
+    assert bot.should_alert_battery(batt, None, now) is True
+    assert bot.should_alert_battery(batt, "2026-10-09T01:30:00+00:00", now) is False
+    assert bot.should_alert_battery(batt, "2026-10-09T00:59:00+00:00", now) is True
+    low = {**batt, "pct": 15}
+    assert bot.should_alert_battery(low, "2026-10-09T01:44:00+00:00", now) is True
+    assert "87%" in bot.battery_alert_text(batt) and "5:12" in bot.battery_alert_text(batt)
