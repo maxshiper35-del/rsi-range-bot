@@ -480,7 +480,8 @@ def _bar_span(dts):
     return steps.median() if len(steps) else pd.Timedelta(hours=1)
 
 
-def _outcome_from_bars(row, df, fill_through_frac: float = 0.0) -> tuple | None:
+def _outcome_from_bars(row, df, fill_through_frac: float = 0.0,
+                      state: dict | None = None) -> tuple | None:
     """Исход по ХРОНОЛОГИИ закрытых баров ПОСЛЕ ЗАКРЫТИЯ решающего бара (честный скоринг).
 
     Фазы: (1) ждём касания entry (лимитный вход, low<=entry<=high) — без fill сделки НЕТ;
@@ -637,7 +638,10 @@ def _outcome_from_bars(row, df, fill_through_frac: float = 0.0) -> tuple | None:
                 return ("stopped", "timeout", round(r_now, 4), close_p, fill_dt,
                         bar_dt.isoformat())
     if filled:
-        # вход есть, развязки нет — сообщить о филле
+        # вход есть, развязки нет — сообщить о филле; state["stop"] — стоп, действующий со
+        # СЛЕДУЮЩЕГО бара (подтянутый трейлом или исходный) — executor ставит его на биржу
+        if state is not None:
+            state["stop"] = cur_stop
         return ("open", None, None, None, fill_dt, None)
     return None                                      # всё ещё ждём fill
 
@@ -700,10 +704,19 @@ def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
         df = bars_by_symbol.get(row["symbol"])
         if df is None:
             continue
-        res = _outcome_from_bars(row, df)
+        st: dict = {}
+        res = _outcome_from_bars(row, df, state=st)
         if res is None:
             continue
         status, event, result_r, exit_price, fill_dt, exit_dt = res
+        if status == "open" and st.get("stop") is not None and st["stop"] != row["stop"]:
+            # трейл подтянут: персистим уровень для executor (только в сторону сделки —
+            # судья иного не выдаёт, гейт на случай гонок двух тактов)
+            new = float(st["stop"])
+            old = row["trail_stop"] if "trail_stop" in row.keys() else None
+            tighter = (old is None or (new > old if row["side"] == "LONG" else new < old))
+            if tighter:
+                db.execute("UPDATE signals SET trail_stop=? WHERE id=?", (new, row["id"]))
         now = clock.utcnow_iso()
         shadow = row["status"] == "rejected"
         base = {"id": row["id"], "symbol": row["symbol"], "side": row["side"],

@@ -12,11 +12,11 @@
 стакан исполняет худшие сделки и пропускает победителей); тейкер-по-касанию +0.149R.
 Журнал считает филл касанием entry — TRIGGER_MARKET воспроизводит ту же семантику,
 а реальная цена исполнения (fill_px) честно меряет слип входа в еженедельном отчёте.
-Промежуточный трейлинг НЕ дублируется на бирже: текущий подтянутый стоп нигде не
-персистится (событие 'trail' в signal_events — это уже ВЫХОД), а повторная реализация
-той же математики — прямой риск расхождения с трек-рекордом. Аварийный стоп на бирже
-покрывает случай «бот умер» тем же худшим исходом -1R, что и журнал; выход по трейлингу
-исполняется рыночным закрытием после решения журнала (задержка <= такта обслуживания).
+Трейлинг ДУБЛИРУЕТСЯ на бирже (20.10.2026): журнал персистит подтянутый стоп открытой
+сделки (signals.trail_stop, та же математика судьи — без второй реализации), executor
+переставляет стоп-ордер BingX на этот уровень (_sync_trail_stops). Раньше трейл жил только
+в журнале, выход исполнялся рыночным закрытием после бара — замер 20.10: на 24 выходах
+по трейлу executor отставал на −0.48R (при развороте позицию забирал исходный стоп).
 Ошибка слежения executor-против-журнала — измеряемая величина, не скрытая.
 
 БЕЗОПАСНОСТЬ. Sandbox (VST) ЗАХАРДКОЖЕН — v1 физически не умеет торговать реальные
@@ -438,6 +438,8 @@ def reconcile() -> list[str]:
 
     # переход placed -> filled (информативно): вход исчез из открытых, позиция есть
     _sync_fill_states(ex, report)
+    # трейл журнала -> стоп на бирже (после сверки филлов: свежий филл тоже ведём)
+    _sync_trail_stops(ex, report)
     # сироты: позиции биржи без учёта (наследие сломанного детектора филлов) —
     # алерт не чаще раза в час, закрытие только по /executor sweep
     import time as _time
@@ -772,6 +774,105 @@ def _record_close(ex, t, created) -> None:
                     t["signal_id"]))
     except Exception:                                   # noqa: BLE001 — отчётные поля не критичны
         pass
+
+
+def _is_tighter(side: str, new: float, cur: float) -> bool:
+    return new > cur if side == "LONG" else new < cur
+
+
+def _find_stop_order(ex, t, level: float):
+    """Наш стоп на бирже: по id из note ('sl:<id>' — довешенный/переставленный) либо
+    прикреплённый ко входу — STOP_MARKET той же стороны позиции на уровне level с нашим
+    объёмом (смоук 20.10: BingX отдаёт его в fetch_open_orders, info.type/positionSide/
+    stopPrice/origQty). None — не найден (исполнен/снят)."""
+    oid = _sl_id(t["note"])
+    opens = ex.fetch_open_orders(t["symbol"]) or []
+    if oid:
+        return next((o for o in opens if str(o.get("id")) == oid), None)
+    want = float(ex.price_to_precision(t["symbol"], level))
+    qty = float(t["qty"])
+    for o in opens:
+        info = o.get("info") or {}
+        if (str(info.get("type", "")).upper() not in ("STOP_MARKET", "STOP")
+                or str(info.get("positionSide", "")).upper() != t["side"]):
+            continue
+        try:
+            px = float(info.get("stopPrice") or o.get("stopPrice") or 0.0)
+            q = float(info.get("origQty") or o.get("amount") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if abs(px - want) <= abs(want) * 1e-6 and abs(q - qty) <= qty * 1e-6:
+            return o
+    return None
+
+
+_TRAIL_WARNED: dict = {}
+
+
+def _sync_trail_stops(ex, report: list[str]) -> None:
+    """Стоп на бирже вслед за трейлом журнала: новый reduce-only стоп ставится ДО снятия
+    старого (позиция ни на миг без стопа). Цена уже за новым уровнем (101400) — журнал
+    засчитает выход по трейлу на закрытии бара; закрываемся по рынку сразу."""
+    import time as _t
+
+    from ccxt import ExchangeError as _ExErr
+    rows = db.query(
+        "SELECT eo.*, s.trail_stop FROM executor_orders eo JOIN signals s "
+        "ON s.id = eo.signal_id WHERE eo.state='filled' AND s.status='open' "
+        "AND s.result_r IS NULL AND s.trail_stop IS NOT NULL")
+    for t in rows:
+        sid, sym = t["signal_id"], t["symbol"]
+        cur = t["trail_px"] if t["trail_px"] is not None else t["stop_px"]
+        new = float(t["trail_stop"])
+        if cur is None or not _is_tighter(t["side"], new, float(cur)):
+            continue
+        new_px = float(ex.price_to_precision(sym, new))
+        if not _is_tighter(t["side"], new_px, float(cur)):
+            continue                                    # сдвиг меньше тика
+        try:
+            old = _find_stop_order(ex, t, float(cur))
+            if old is None:
+                # стоп уже сработал (позиция закрыта) — закрытие оформит ветка close по
+                # журналу; живая позиция без найденного стопа — алерт раз в час
+                if _position_qty(ex, sym, t["side"]) > 0 and _alert_due(
+                        _TRAIL_WARNED.setdefault(sid, {"at": None}), _t.monotonic()):
+                    _TRAIL_WARNED[sid]["at"] = _t.monotonic()
+                    report.append(f"⚠️ #{sid} {sym}: стоп на бирже не найден — трейл "
+                                  f"{new_px:g} не переставлен")
+                continue
+            close_side = "sell" if t["side"] == "LONG" else "buy"
+            try:
+                o = ex.create_order(sym, "market", close_side, float(t["qty"]), None,
+                                    params={"stopLossPrice": new_px, "hedged": True})
+            except _ExErr as e:
+                if "101400" not in str(e):
+                    raise
+                closed = _close_position(ex, t, max_qty=float(t["qty"]))
+                _cancel_stop(ex, sym, old.get("id"))
+                _set_state(sid, "closed", f"трейл {new_px:g}: цена уже за стопом — по рынку")
+                report.append(f"📤 #{sid} {sym}: цена уже за трейлом {new_px:g} — "
+                              f"закрыто по рынку {closed:g} (VST)")
+                continue
+            db.execute("UPDATE executor_orders SET trail_px=?, note=?, updated_at=? "
+                       "WHERE signal_id=?",
+                       (new_px, f"sl:{(o or {}).get('id') or ''}", clock.utcnow_iso(), sid))
+            _cancel_stop(ex, sym, old.get("id"))
+            report.append(f"🪜 #{sid} {sym} {t['side']}: стоп подтянут "
+                          f"{float(cur):g} → {new_px:g} (VST)")
+        except Exception as e:                          # noqa: BLE001 — один сигнал не роняет такт
+            report.append(f"⚠️ #{sid} {sym}: трейл не переставлен — "
+                          f"{type(e).__name__}: {str(e)[:100]}")
+
+
+def _cancel_stop(ex, symbol: str, oid) -> None:
+    """Снять старый стоп после постановки нового; уже исполнен/снят — не ошибка."""
+    if not oid:
+        return
+    try:
+        ex.cancel_order(oid, symbol)
+    except Exception as e:                              # noqa: BLE001
+        if "not exist" not in str(e).lower() and "80016" not in str(e):
+            raise
 
 
 _PLACING_STALE_MIN = 10

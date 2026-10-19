@@ -579,3 +579,102 @@ def test_kill_switch_keeps_fresh_fill(fresh_db, monkeypatch):
     assert db.query_one("SELECT state FROM executor_orders WHERE signal_id=911")["state"] \
         == "filled"
     assert closed == []
+
+
+class _TrailEx:
+    """Биржа для трейла: прикреплённый STOP_MARKET входа, позиция, журнал вызовов."""
+
+    def __init__(self, stop_px=98.0, qty=10.0, reject=False):
+        self.opens = [{"id": "SL0", "info": {"type": "STOP_MARKET", "positionSide": "LONG",
+                                             "stopPrice": str(stop_px), "origQty": str(qty)}}]
+        self.pos, self.reject = qty, reject
+        self.created, self.cancelled = [], []
+
+    def price_to_precision(self, symbol, px):
+        return str(round(px, 4))
+
+    def fetch_open_orders(self, symbol):
+        return list(self.opens)
+
+    def fetch_positions(self, symbols):
+        return [{"symbol": symbols[0], "side": "long", "contracts": self.pos}]
+
+    def create_order(self, symbol, typ, side, qty, price, params=None):
+        from ccxt import ExchangeError
+        params = params or {}
+        if "stopLossPrice" in params:
+            if self.reject:
+                raise ExchangeError('bingx {"code":101400,"msg":"SL Price must be lower"}')
+            self.created.append(("stop", params["stopLossPrice"], qty))
+            o = {"id": f"SL{len(self.created)}", "info": {
+                "type": "STOP_MARKET", "positionSide": "LONG",
+                "stopPrice": str(params["stopLossPrice"]), "origQty": str(qty)}}
+            self.opens.append(o)
+            return o
+        self.created.append(("market", side, qty))
+        self.pos = 0.0
+        return {"id": "M1", "average": 103.0}
+
+    def cancel_order(self, oid, symbol):
+        self.cancelled.append(oid)
+        self.opens = [o for o in self.opens if o["id"] != oid]
+
+    def fetch_order(self, oid, symbol):
+        return {"id": oid, "average": 103.0}
+
+    def fetch_my_trades(self, symbol, limit=20):
+        return []
+
+
+def _seed_trail(trail_stop, sid=961):
+    from app import db
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at, filled_at, trail_stop) VALUES "
+        f"({sid},'TTT/USDT:USDT','LONG','1h',100,98,2.0,0.7,'{{}}','open',"
+        "'2026-10-20T01:00:00+00:00','2026-10-20T02:00:00+00:00', ?)", (trail_stop,))
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, created_at) VALUES (?, 'TTT/USDT:USDT','LONG',10,100,98,"
+        "?, 'filled','2026-10-20T01:00:00+00:00')", (sid, f"rsiE{sid}"))
+
+
+def test_trail_moves_exchange_stop_new_before_old(fresh_db):
+    """20.10: трейл журнала -> стоп BingX. Новый стоп ставится ДО снятия старого
+    (прикреплённого ко входу), уровень и id помнятся; повтор того же уровня — тишина."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_trail(103.6)
+    fake, report = _TrailEx(), []
+    ex._sync_trail_stops(fake, report)
+    assert fake.created == [("stop", 103.6, 10.0)] and fake.cancelled == ["SL0"]
+    row = db.query_one("SELECT trail_px, note, state FROM executor_orders WHERE signal_id=961")
+    assert (row["trail_px"], row["note"], row["state"]) == (103.6, "sl:SL1", "filled")
+    assert any("стоп подтянут 98 → 103.6" in line for line in report)
+    ex._sync_trail_stops(fake, report)                       # уровень тот же — ничего
+    assert len(fake.created) == 1
+    db.execute("UPDATE signals SET trail_stop=104.2 WHERE id=961")
+    ex._sync_trail_stops(fake, report)                       # следующий шаг: по id из note
+    assert fake.created[-1] == ("stop", 104.2, 10.0) and fake.cancelled[-1] == "SL1"
+
+
+def test_trail_price_already_beyond_closes_at_market(fresh_db):
+    """Цена уже за новым уровнем (101400): журнал засчитает выход на закрытии бара —
+    executor закрывается по рынку сразу и снимает старый стоп."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_trail(103.6, sid=962)
+    fake, report = _TrailEx(reject=True), []
+    ex._sync_trail_stops(fake, report)
+    assert ("market", "sell", 10.0) in fake.created and fake.cancelled == ["SL0"]
+    row = db.query_one("SELECT state, close_px FROM executor_orders WHERE signal_id=962")
+    assert row["state"] == "closed" and row["close_px"] == 103.0
+
+
+def test_trail_no_stop_found_on_flat_position_is_silent(fresh_db):
+    from app.v2 import bingx_executor as ex
+    _seed_trail(103.6, sid=963)
+    fake, report = _TrailEx(), []
+    fake.opens, fake.pos = [], 0.0                           # стоп сработал, позиция плоская
+    ex._sync_trail_stops(fake, report)
+    assert fake.created == [] and report == []

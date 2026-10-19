@@ -1011,3 +1011,26 @@ def test_stream_fill_after_outage_uses_earlier_bar_touch(fresh_db):
     assert row["status"] == "stopped" and row["result_r"] == -1.0
     assert row["filled_at"] == "2026-01-01T18:00:00+00:00"
     assert row["closed_at"] == "2026-01-01T19:00:00+00:00"
+
+
+def test_open_trade_persists_trailed_stop_for_executor(fresh_db):
+    """Трейлинг на бирже (20.10): журнал сохраняет подтянутый стоп открытой сделки в
+    signals.trail_stop — executor переставляет по нему стоп BingX. Только в сторону сделки."""
+    from app import db, runtime
+    from app.brain import journal
+    runtime.set_value("trail_activate_r", "1.5")       # conftest глушит трейл (0)
+    runtime.set_value("trail_distance_r", "0.2")
+    journal.record_signal(_sig_1h(side=Side.LONG, entry=100.0, stop=98.0, tp=110.0,
+                                  created_at="2026-01-01T00:00:00+00:00"))
+    rows = [(101, 101, 99.5, 100.5)]                 # 01:00 — филл 100 (low 99.5 > стопа)
+    rows += [(100.5, 104, 100.2, 103.5)]             # 02:00 — MFE +2R >= 1.5R: стоп 103.6
+    journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(rows, start="2026-01-01T01:00:00+00:00", step_min=60)})
+    row = db.query_one("SELECT status, trail_stop FROM signals WHERE id=1")
+    assert row["status"] == "open" and abs(row["trail_stop"] - 103.6) < 1e-9
+    # откат без выхода и без нового пика — уровень не ослабляется
+    rows += [(103.5, 103.7, 103.65, 103.66)]
+    journal.update_outcomes_from_bars(
+        {"BTC/USDT:USDT": _bars(rows, start="2026-01-01T01:00:00+00:00", step_min=60)})
+    assert abs(db.query_one("SELECT trail_stop FROM signals WHERE id=1")["trail_stop"]
+               - 103.6) < 1e-9
