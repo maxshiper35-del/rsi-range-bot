@@ -678,3 +678,39 @@ def test_trail_no_stop_found_on_flat_position_is_silent(fresh_db):
     fake.opens, fake.pos = [], 0.0                           # стоп сработал, позиция плоская
     ex._sync_trail_stops(fake, report)
     assert fake.created == [] and report == []
+
+
+def test_entry_and_stop_close_prices_from_own_trades(fresh_db):
+    """24.10: без since «последний из 20 трейдов» был ЧУЖИМ (#655 WLD: вход 0.5003 вместо
+    0.5871, фантомные −8R; отчёт исполнения −29R вместо +1.9R). Теперь — трейды после
+    постановки, ближайшие к уровню входа/стопа."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, confidence, "
+        "snapshot_json, status, created_at) VALUES (971,'WLD/USDT:USDT','SHORT','1h',0.5884,"
+        "0.5978,2.0,0.7,'{}','open','2026-10-22T00:00:00+00:00')")
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, client_id, "
+        "state, created_at) VALUES (971,'WLD/USDT:USDT','SHORT',2549.39,0.5884,0.5978,'rsiE971',"
+        "'filled','2026-10-22T00:00:30+00:00')")
+    from datetime import datetime
+    t0 = int(datetime.fromisoformat("2026-10-22T00:00:30+00:00").timestamp() * 1000)
+
+    class _Ex:
+        def fetch_my_trades(self, symbol, since=None, limit=20):
+            trades = [
+                {"side": "sell", "price": 0.5003, "timestamp": t0 - 86_400_000,
+                 "info": {"positionSide": "SHORT"}},      # чужой, сутками раньше
+                {"side": "sell", "price": 0.5871, "timestamp": t0 + 360_000,
+                 "info": {"positionSide": "SHORT"}},      # наш вход
+                {"side": "buy", "price": 0.5979, "timestamp": t0 + 7_200_000,
+                 "info": {"positionSide": "SHORT"}},      # наш стоп
+            ]
+            return [tr for tr in trades if since is None or tr["timestamp"] >= since]
+
+    row = db.query_one("SELECT * FROM executor_orders WHERE signal_id=971")
+    ex._record_entry_from_trades(_Ex(), row)
+    ex._record_stop_close(_Ex(), row)
+    got = db.query_one("SELECT fill_px, close_px FROM executor_orders WHERE signal_id=971")
+    assert (got["fill_px"], got["close_px"]) == (0.5871, 0.5979)

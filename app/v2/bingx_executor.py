@@ -641,24 +641,47 @@ def _effective_filled(o, t) -> float:
     return float(t["qty"]) if o.get("status") == "closed" else 0.0
 
 
+def _trades_since(ex, t) -> list:
+    """Трейды символа нашей стороны позиции С МОМЕНТА постановки входа, по времени.
+    Без since BingX отдавал не последние трейды — «последний из 20» оказывался ЧУЖИМ
+    (#655 WLD: записан вход 0.5003 при реальном 0.5871 → фантомные −8R; 14 из 99 сделок
+    с неправдоподобной ценой, отчёт исполнения врал: −29R вместо +1.9R, замер 24.10)."""
+    from datetime import datetime
+    since = int(datetime.fromisoformat(t["created_at"]).timestamp() * 1000) - 60_000
+    out = []
+    for tr in ex.fetch_my_trades(t["symbol"], since=since, limit=100) or []:
+        pos_side = ((tr.get("info") or {}).get("positionSide") or "").upper()
+        if pos_side in ("", t["side"]) and (tr.get("timestamp") or 0) >= since:
+            out.append(tr)
+    return sorted(out, key=lambda tr: tr.get("timestamp") or 0)
+
+
+def _nearest(trades: list, side: str, level: float | None, after: int = 0):
+    """Трейд нужной стороны после `after`, ближайший по цене к ожидаемому уровню (вход —
+    триггер на entry, стоп — уровень стопа): при слитой позиции символа отделяет наш
+    трейд от соседского. level=None — первый по времени."""
+    cand = [tr for tr in trades if tr.get("side") == side and (tr.get("timestamp") or 0) > after]
+    if not cand:
+        return None
+    if level is None:
+        return cand[0]
+    return min(cand, key=lambda tr: abs(float(tr.get("price") or 0.0) - level))
+
+
 def _record_entry_from_trades(ex, t) -> None:
     """Цена входа сработавшего триггера (best-effort): сам триггер-ордер не несёт
-    филла — берём последний трейд ВХОДНОЙ стороны по символу. Без этого слип входа
-    триггерных сделок выпадал бы из отчёта «исполнение vs журнал»."""
+    филла — берём трейд ВХОДНОЙ стороны после постановки, ближайший к уровню входа.
+    Без этого слип входа триггерных сделок выпадал бы из отчёта «исполнение vs журнал»."""
     try:
         entry_side = "buy" if t["side"] == "LONG" else "sell"
-        for tr in reversed(ex.fetch_my_trades(t["symbol"], limit=20) or []):
-            info = tr.get("info") or {}
-            pos_side = (info.get("positionSide") or "").upper()
-            if tr.get("side") == entry_side and pos_side in ("", t["side"]):
-                px = tr.get("price")
-                db.execute(
-                    "UPDATE executor_orders SET fill_px=COALESCE(fill_px, ?), "
-                    "fill_qty=COALESCE(fill_qty, ?), fill_fee=COALESCE(fill_fee, ?) "
-                    "WHERE signal_id=?",
-                    (float(px) if px else None, float(t["qty"]), _fee_cost(tr),
-                     t["signal_id"]))
-                return
+        tr = _nearest(_trades_since(ex, t), entry_side, float(t["entry_px"] or 0) or None)
+        if tr is not None:
+            px = tr.get("price")
+            db.execute(
+                "UPDATE executor_orders SET fill_px=COALESCE(fill_px, ?), "
+                "fill_qty=COALESCE(fill_qty, ?), fill_fee=COALESCE(fill_fee, ?) "
+                "WHERE signal_id=?",
+                (float(px) if px else None, float(t["qty"]), _fee_cost(tr), t["signal_id"]))
     except Exception:                                   # noqa: BLE001 — отчётные поля не критичны
         pass
 
@@ -686,18 +709,20 @@ def _record_stop_close(ex, t) -> None:
     стоп-ауты — систематическое смещение замера в лучшую сторону."""
     try:
         close_side = "sell" if t["side"] == "LONG" else "buy"
-        for tr in reversed(ex.fetch_my_trades(t["symbol"], limit=20) or []):
-            info = tr.get("info") or {}
-            pos_side = (info.get("positionSide") or "").upper()
-            if tr.get("side") == close_side and pos_side in ("", t["side"]):
-                px = tr.get("price")
-                db.execute(
-                    "UPDATE executor_orders SET close_px=COALESCE(close_px, ?), "
-                    "close_fee=COALESCE(close_fee, ?), "
-                    "closed_at=COALESCE(closed_at, ?) WHERE signal_id=?",
-                    (float(px) if px else None, _fee_cost(tr), clock.utcnow_iso(),
-                     t["signal_id"]))
-                return
+        entry_side = "buy" if close_side == "sell" else "sell"
+        trades = _trades_since(ex, t)
+        ent = _nearest(trades, entry_side, float(t["entry_px"] or 0) or None)
+        level = t["trail_px"] if "trail_px" in t.keys() and t["trail_px"] else t["stop_px"]
+        tr = _nearest(trades, close_side, float(level) if level else None,
+                      after=(ent.get("timestamp") or 0) if ent else 0)
+        if tr is not None:
+            px = tr.get("price")
+            db.execute(
+                "UPDATE executor_orders SET close_px=COALESCE(close_px, ?), "
+                "close_fee=COALESCE(close_fee, ?), "
+                "closed_at=COALESCE(closed_at, ?) WHERE signal_id=?",
+                (float(px) if px else None, _fee_cost(tr), clock.utcnow_iso(),
+                 t["signal_id"]))
     except Exception:                                   # noqa: BLE001 — отчётные поля не критичны
         pass
 
@@ -845,7 +870,9 @@ def _sync_trail_stops(ex, report: list[str]) -> None:
                 o = ex.create_order(sym, "market", close_side, float(t["qty"]), None,
                                     params={"stopLossPrice": new_px, "hedged": True})
             except _ExErr as e:
-                if "101400" not in str(e):
+                # цена уже за новым уровнем: 101400 (вход со связкой) / 110412 (стоп-лосс
+                # отдельным ордером, смоук 23.10 #681 ZEC) — журнал засчитает выход
+                if "101400" not in str(e) and "110412" not in str(e):
                     raise
                 closed = _close_position(ex, t, max_qty=float(t["qty"]))
                 _cancel_stop(ex, sym, old.get("id"))
@@ -860,8 +887,11 @@ def _sync_trail_stops(ex, report: list[str]) -> None:
             report.append(f"🪜 #{sid} {sym} {t['side']}: стоп подтянут "
                           f"{float(cur):g} → {new_px:g} (VST)")
         except Exception as e:                          # noqa: BLE001 — один сигнал не роняет такт
-            report.append(f"⚠️ #{sid} {sym}: трейл не переставлен — "
-                          f"{type(e).__name__}: {str(e)[:100]}")
+            stamp = _TRAIL_WARNED.setdefault(sid, {"at": None})
+            if _alert_due(stamp, _t.monotonic()):       # повтор каждый такт — не спамить
+                stamp["at"] = _t.monotonic()
+                report.append(f"⚠️ #{sid} {sym}: трейл не переставлен — "
+                              f"{type(e).__name__}: {str(e)[:100]}")
 
 
 def _cancel_stop(ex, symbol: str, oid) -> None:
