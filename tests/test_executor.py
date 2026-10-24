@@ -718,3 +718,75 @@ def test_entry_and_stop_close_prices_from_own_trades(fresh_db):
     ex._record_stop_close(_Ex(), row)
     got = db.query_one("SELECT fill_px, close_px FROM executor_orders WHERE signal_id=971")
     assert (got["fill_px"], got["close_px"]) == (0.5871, 0.5979)
+
+
+class _NativeEx(_TrailEx):
+    """+ тикер для активации нативного трейла."""
+
+    def __init__(self, last, **kw):
+        super().__init__(**kw)
+        self.last = last
+
+    def fetch_ticker(self, symbol):
+        return {"last": self.last}
+
+    def create_order(self, symbol, typ, side, qty, price, params=None):
+        params = params or {}
+        if "trailingAmount" in params:
+            assert params.get("hedged") is True and params.get("reduceOnly") is True
+            self.created.append(("trail", params["trailingAmount"], side, qty))
+            return {"id": "TR1"}
+        return super().create_order(symbol, typ, side, qty, price, params)
+
+
+def _seed_native(sid=981, trail_stop=None):
+    import json
+
+    from app import db
+    snap = json.dumps({"trail": {"activate_r": 1.5, "distance_r": 0.2, "tp_exit": False,
+                                 "max_hold_hours": 168}})
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at, filled_at, trail_stop) VALUES "
+        f"({sid},'TTT/USDT:USDT','LONG','1h',100,98,2.0,0.7,?,'open',"
+        "'2026-10-24T01:00:00+00:00','2026-10-24T02:00:00+00:00', ?)", (snap, trail_stop))
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, created_at) VALUES (?, 'TTT/USDT:USDT','LONG',10,100,98,"
+        "?, 'filled','2026-10-24T01:00:00+00:00')", (sid, f"rsiE{sid}"))
+
+
+def test_native_trail_waits_for_activation_then_places_exchange_trailing(fresh_db):
+    """24.10: BingX игнорирует activationPrice — активирует executor. До +1.5R ничего;
+    после — TRAILING_STOP_MARKET reduce-only с отступом 0.2R в цене, один раз."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native()
+    fake, report = _NativeEx(last=102.5), []                   # +1.25R — рано
+    assert ex._sync_native_trails(fake, report) == set() and fake.created == []
+    fake.last = 103.1                                          # +1.55R — активация
+    assert ex._sync_native_trails(fake, report) == {981}
+    assert fake.created == [("trail", 0.4, "sell", 10.0)]
+    assert db.query_one("SELECT trail_order_id FROM executor_orders WHERE signal_id=981")[
+        "trail_order_id"] == "TR1"
+    ex._sync_native_trails(fake, report)                       # повтор — без второго ордера
+    assert len(fake.created) == 1 and any("трейлинг-стоп на бирже" in x for x in report)
+
+
+def test_native_trail_activates_on_journal_trail_and_closes_if_price_beyond(fresh_db):
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(982, trail_stop=103.6)                       # журнал подтянул трейл
+    fake, report = _NativeEx(last=101.0), []                   # цена уже ниже 103.6
+    assert ex._sync_native_trails(fake, report) == set()
+    assert ("market", "sell", 10.0) in fake.created
+    row = db.query_one("SELECT state FROM executor_orders WHERE signal_id=982")
+    assert row["state"] == "closed"
+
+
+def test_hourly_trail_skips_positions_with_native_trailing(fresh_db):
+    from app.v2 import bingx_executor as ex
+    _seed_trail(103.6, sid=983)
+    fake, report = _TrailEx(), []
+    ex._sync_trail_stops(fake, report, skip={983})
+    assert fake.created == [] and fake.cancelled == []

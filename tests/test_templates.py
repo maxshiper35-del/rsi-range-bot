@@ -184,6 +184,8 @@ def test_trail_line_published_matches_scoring_rule():
     trail = {"setup": "6226", "trail": {"activate_r": 1.5, "distance_r": 0.5}}
     line = templates.trail_line(_sig(snap=trail))
     assert "115" in line and "+1.5R" in line and "0.5R" in line   # LONG: 100 + 1.5*10
+    # параметры нативного трейлинг-ордера: отступ ценой 0.5*10=5 и % от активации 5/115
+    assert "активация" in line and "отступ <code>5" in line and "4.35%" in line
     short = templates.trail_line(_sig(side=Side.SHORT, snap=trail))
     assert "85" in short                                           # SHORT: 100 - 1.5*10
     assert templates.trail_line(_sig()) == ""                      # без правила — пусто

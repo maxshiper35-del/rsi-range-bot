@@ -219,8 +219,8 @@ def _open_signals_private() -> list:
     """Открытые С УРОВНЯМИ (вход/стоп — платный слой) и живым unrealized R.
     Тегов сетапов нет и здесь: таксономия — собственность стратегии, её не видит никто."""
     rows = list(db.query(
-        "SELECT id, symbol, side, timeframe, entry, stop, tp1, created_at, filled_at "
-        "FROM signals WHERE status='open' AND result_r IS NULL "
+        "SELECT id, symbol, side, timeframe, entry, stop, tp1, created_at, filled_at, "
+        "snapshot_json FROM signals WHERE status='open' AND result_r IS NULL "
         "ORDER BY created_at DESC"))
     prices = _last_prices(sorted({r["symbol"] for r in rows})) if rows else {}
     now = clock.utcnow()
@@ -239,10 +239,18 @@ def _open_signals_private() -> list:
         if in_pos and price and risk:
             move = price - r["entry"] if r["side"] == "LONG" else r["entry"] - price
             ur = round(move / risk, 2)
+        trail = None
+        rule = journal._trail_of(r)
+        if rule and risk:
+            sg = 1 if r["side"] == "LONG" else -1
+            act = r["entry"] + sg * rule["activate_r"] * risk
+            gap = rule["distance_r"] * risk
+            trail = {"act": round(act, 8), "gap": round(gap, 8),
+                     "pct": round(gap / act * 100, 2) if act else None}
         out.append({"id": r["id"], "symbol": r["symbol"].split("/")[0],
                     "side": r["side"], "tf": r["timeframe"], "age_h": age_h,
                     "in_pos": in_pos, "entry": r["entry"], "stop": r["stop"],
-                    "tp1": r["tp1"], "ur": ur})
+                    "tp1": r["tp1"], "ur": ur, "trail": trail})
     return out
 
 

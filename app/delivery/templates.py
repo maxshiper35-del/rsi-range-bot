@@ -82,7 +82,7 @@ def _market_line(sig: Signal) -> str:
     return f"💹 Цена сейчас:  <code>{_price(market)}</code>\n" if market else ""
 
 
-def trail_line(sig: Signal, entry_prefix: str = "🔁 Трейлинг:") -> str:
+def trail_line(sig: Signal, entry_prefix: str = "🔁 Трейлинг-стоп ордером на бирже:") -> str:
     """Правило подтяжки стопа ИЗ СНАПШОТА сигнала — то же, по которому судит журнал.
 
     Без этой строки подписчик держал бы фиксированный стоп, а статистика считала бы
@@ -100,8 +100,15 @@ def trail_line(sig: Signal, entry_prefix: str = "🔁 Трейлинг:") -> str
         return ""
     risk = abs(sig.entry - sig.stop)
     trigger = (sig.entry + act * risk) if sig.side.value == "LONG" else (sig.entry - act * risk)
-    line = (f"{entry_prefix} после <code>{_price(trigger)}</code> (+{act:g}R) "
-            f"двигать стоп на {dist:g}R от максимума хода\n")
+    # параметры НАТИВНОГО трейлинг-ордера биржи (24.10): журнал судит «максимум − dist·R» в
+    # реальном времени; стоп, переставляемый руками раз в час, исполняется хуже (−0.27R на
+    # выход по трейлу, docs/measurements/2026-10-24-trail-exit-realism.md). Отступ — и ценой
+    # (Bybit/BingX), и процентом от цены активации (Binance callback rate).
+    gap = dist * risk
+    pct = gap / trigger * 100 if trigger else 0.0
+    line = (f"{entry_prefix} активация <code>{_price(trigger)}</code> (+{act:g}R), "
+            f"отступ <code>{_price(gap)}</code> ({dist:g}R ≈ {pct:.2f}%) — "
+            f"стоп за ценой ведёт сама биржа\n")
     if not t.get("tp_exit", True):
         hold = t.get("max_hold_hours") or 0
         hold_txt = f", но не дольше {int(float(hold) / 24)} дн" if float(hold) >= 24 else ""

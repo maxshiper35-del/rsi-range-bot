@@ -779,7 +779,7 @@ function renderMine(noAnim) {
           <span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span>
           <span class="meta">${esc(o.tf)}${o.age_h != null ? " · " + Math.round(o.age_h) + "ч" : ""}</span>
           <span class="pc-r">${res}</span><span class="chb" data-chart="${o.id}">📈</span></div>
-        <div class="pc-lv">вход <b>${fmtP(o.entry)}</b> · стоп <b>${fmtP(o.stop)}</b>${o.tp1 ? ` · цель <b>${fmtP(o.tp1)}</b>` : ""}</div>
+        <div class="pc-lv">вход <b>${fmtP(o.entry)}</b> · стоп <b>${fmtP(o.stop)}</b>${o.tp1 ? ` · цель <b>${fmtP(o.tp1)}</b>` : ""}${o.trail ? `<br>трейлинг-стоп: активация <b>${fmtP(o.trail.act)}</b> · отступ <b>${fmtP(o.trail.gap)}</b>${o.trail.pct != null ? ` (${o.trail.pct}%)` : ""}` : ""}</div>
         ${sizing(o)}</div>`;
     }).join("");
     h += sec(`<section><div class="sec-h"><h2>МОИ ПОЗИЦИИ</h2>
