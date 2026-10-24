@@ -13,6 +13,7 @@ data/backups/
 data/cache/
 data/cache5y/
 data/cache_live/
+data/cache_univ/
 
 # логи
 logs/

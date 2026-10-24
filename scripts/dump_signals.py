@@ -50,7 +50,8 @@ def parse_htf_map(raw: str) -> dict:
 def scan_signals(df: pd.DataFrame, symbol: str, tf: str, cfg: SMCConfig,
                  window: int, htf_tf: str | None, min_bars: int = 20,
                  partner_df: pd.DataFrame | None = None,
-                 htf_bars: pd.DataFrame | None = None) -> list[dict]:
+                 htf_bars: pd.DataFrame | None = None,
+                 only=None) -> list[dict]:
     """Пройти историю бар за баром и записать КАЖДЫЙ сигнал движка (без симуляции сделок).
 
     Без лукахеда: движку видно только окно закрытых баров до текущего включительно —
@@ -61,7 +62,9 @@ def scan_signals(df: pd.DataFrame, symbol: str, tf: str, cfg: SMCConfig,
     htf_bars (паритет с продом): старший ТФ берётся из его собственного кэша — только
     свечи, ЗАКРЫТЫЕ к закрытию текущего бара, последние `window` штук (вживую
     fetch_closed_ohlcv отбрасывает формирующуюся свечу). Без htf_bars — ресемпл окна
-    (частичная последняя свеча, ~window/4 свечей истории)."""
+    (частичная последняя свеча, ~window/4 свечей истории).
+    only (булева маска длины df): сканировать только эти бары — движок без состояния между
+    вызовами, поэтому сигнал на баре тот же, что при полном проходе (замеры по окнам)."""
     engine = SMCEngine(cfg)
     htf_minutes = SMCEngine.TF_MINUTES.get(htf_tf, 0) if htf_tf else 0
     p_ts = partner_df["ts"].to_numpy() if partner_df is not None else None
@@ -70,6 +73,8 @@ def scan_signals(df: pd.DataFrame, symbol: str, tf: str, cfg: SMCConfig,
                  if htf_bars is not None and htf_minutes else None)
     out: list[dict] = []
     for i in range(min_bars, len(df)):
+        if only is not None and not only[i]:
+            continue
         win = df.iloc[max(0, i - window + 1):i + 1].reset_index(drop=True)
         if htf_close is not None:
             k = int(htf_close.searchsorted(df["ts"].iloc[i] + tf_ms, side="right"))
