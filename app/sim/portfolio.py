@@ -34,7 +34,7 @@ def _live_outcome(sig: dict, df1h: pd.DataFrame, idx1h: pd.DatetimeIndex, *,
                   fee_pct: float, slippage_pct: float, funding_bps_per_bar: float,
                   trail_activate_r: float | None, trail_distance_r: float,
                   tp_exit: bool, max_hold_hours: float, fill_through_frac: float = 0.0,
-                  extra_cost_r: float = 0.0):
+                  extra_cost_r: float = 0.0, gap_open: bool = False):
     """Исход сигнала САМИМ живым судьёй (journal._outcome_from_bars) на 1h-барах — паритет
     с публичным журналом по построению: стоп на баре филла = −1R, на баре филла нет тейка
     и трейлинга, окно ожидания 50ч, потолок удержания, 4h-сигналы судятся 1h-барами.
@@ -59,7 +59,8 @@ def _live_outcome(sig: dict, df1h: pd.DataFrame, idx1h: pd.DatetimeIndex, *,
            "timeframe": sig["tf"], "created_at": created.isoformat(), "filled_at": None,
            "status": "open", "tp1": sig["tp"], "tp2": None, "tp3": None,
            "snapshot_json": _json.dumps({"setup": sig.get("setup"), "trail": trail})}
-    res = _outcome_from_bars(row, win, fill_through_frac=fill_through_frac)
+    res = _outcome_from_bars(row, win, fill_through_frac=fill_through_frac,
+                             gap_open=gap_open)
     if res is None or res[0] == "open":
         return None
     status, event, r, _exit_px, fill_dt, exit_dt = res
@@ -154,7 +155,8 @@ def simulate_portfolio(bars: dict, signals: list, *,
                        tp_exit: bool = False,
                        max_hold_hours: float = 168.0,
                        extra_cost_r: float = 0.0,
-                       symbol_cooldown_hours: float = 0.0) -> PortfolioReport:
+                       symbol_cooldown_hours: float = 0.0,
+                       gap_open: bool = False) -> PortfolioReport:
     """bars: {(symbol, tf): df} — те же кэш-бары, по которым считались сигналы.
     signals: список словарей из scripts.dump_signals (symbol, tf, bar_index, side, ...).
 
@@ -249,7 +251,7 @@ def simulate_portfolio(bars: dict, signals: list, *,
                 trail_distance_r=trail_distance_r, tp_exit=tp_exit,
                 max_hold_hours=max_hold_hours,
                 fill_through_frac=through_frac if entry_fill == "through" else 0.0,
-                extra_cost_r=extra_cost_r)
+                extra_cost_r=extra_cost_r, gap_open=gap_open)
             if lres is None:
                 continue
             kind, r_net, fill_dt, closed_dt = lres

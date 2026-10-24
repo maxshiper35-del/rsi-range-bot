@@ -603,8 +603,12 @@ class _TrailEx:
         from ccxt import ExchangeError
         params = params or {}
         if "stopLossPrice" in params:
+            # стоп ЗАКРЫВАЕТ позицию: без reduceOnly ccxt в hedge ставит сторону ордера
+            # (sell -> SHORT) — это был бы ордер на открытие встречной позиции
+            assert params.get("hedged") is True and params.get("reduceOnly") is True
             if self.reject:
-                raise ExchangeError('bingx {"code":101400,"msg":"SL Price must be lower"}')
+                raise ExchangeError('bingx {"code":110411,"msg":"Stop Loss price should be lower '
+                                    'than the current price"}')
             self.created.append(("stop", params["stopLossPrice"], qty))
             o = {"id": f"SL{len(self.created)}", "info": {
                 "type": "STOP_MARKET", "positionSide": "LONG",

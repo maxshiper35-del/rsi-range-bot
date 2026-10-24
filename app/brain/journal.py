@@ -481,7 +481,7 @@ def _bar_span(dts):
 
 
 def _outcome_from_bars(row, df, fill_through_frac: float = 0.0,
-                      state: dict | None = None) -> tuple | None:
+                      state: dict | None = None, gap_open: bool = False) -> tuple | None:
     """Исход по ХРОНОЛОГИИ закрытых баров ПОСЛЕ ЗАКРЫТИЯ решающего бара (честный скоринг).
 
     Фазы: (1) ждём касания entry (лимитный вход, low<=entry<=high) — без fill сделки НЕТ;
@@ -589,7 +589,16 @@ def _outcome_from_bars(row, df, fill_through_frac: float = 0.0,
             filled = True                            # вход исполнен на ЭТОМ баре
             fill_dt = bar_dt.isoformat()
             tp_block_dt = bar_dt
+        # gap_open (ИССЛЕДОВАНИЕ, 24.10): бар ПОСЛЕ филла открылся уже за стопом — стоп-
+        # ордер исполняется по открытию, а не по уровню (трейл, подтянутый на закрытии
+        # бара с длинной тенью, часто оказывается выше следующего открытия). Прод — False.
+        gap = gap_open and bar_dt != tp_block_dt and "open" in b.index
+        op = float(b["open"]) if gap else None
         if side == "LONG":
+            if gap and op is not None and op <= cur_stop:
+                event = "stopped" if cur_stop == stop else "trail"
+                return ("stopped", event, round((op - entry) / risk, 4), op, fill_dt,
+                        bar_dt.isoformat())
             if lo <= cur_stop:
                 r_stop = (cur_stop - entry) / risk           # −1.0 либо плюс, если подтянут
                 event = "stopped" if cur_stop == stop else "trail"
@@ -598,6 +607,10 @@ def _outcome_from_bars(row, df, fill_through_frac: float = 0.0,
             hit = ([] if bar_dt == tp_block_dt or not tp_exits
                    else [(c, tp) for c, tp in tps if hi >= tp])
         else:
+            if gap and op is not None and op >= cur_stop:
+                event = "stopped" if cur_stop == stop else "trail"
+                return ("stopped", event, round((entry - op) / risk, 4), op, fill_dt,
+                        bar_dt.isoformat())
             if hi >= cur_stop:
                 r_stop = (entry - cur_stop) / risk
                 event = "stopped" if cur_stop == stop else "trail"

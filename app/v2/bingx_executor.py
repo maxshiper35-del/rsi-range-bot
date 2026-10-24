@@ -588,6 +588,13 @@ def _entry_order(ex, t):
     return o
 
 
+# Стоп, ЗАКРЫВАЮЩИЙ позицию в hedge-режиме. ccxt для stopLossPrice и сам ставит reduceOnly
+# (positionSide = сторона закрываемой позиции) — здесь явно, чтобы не зависеть от версии.
+# 110411/110412 («стоп должен быть ниже/выше цены») — НЕ сторона: цена к моменту
+# перестановки уже за новым уровнем трейла (бар закрылся ниже «пик − 0.2R»).
+_CLOSE_STOP = {"hedged": True, "reduceOnly": True}
+
+
 def _place_deferred_stop(ex, t, report: list[str]) -> None:
     """Довесить аварийный стоп ПОСЛЕ филла (постановка со связкой была отвергнута:
     BingX валидирует SL от текущей цены — #434 ENA 02.09). reduce-only STOP_MARKET;
@@ -598,7 +605,7 @@ def _place_deferred_stop(ex, t, report: list[str]) -> None:
         o = ex.create_order(
             t["symbol"], "market", close_side, float(t["qty"]), None,
             params={"stopLossPrice": float(ex.price_to_precision(
-                t["symbol"], t["stop_px"])), "hedged": True})
+                t["symbol"], t["stop_px"])), **_CLOSE_STOP})
         _set_state(t["signal_id"], "filled", f"sl:{(o or {}).get('id') or ''}")
         report.append(f"🛑 #{t['signal_id']} {t['symbol']}: аварийный стоп довешен")
     except Exception as e:                              # noqa: BLE001 — виден админу, журнал закроет сам
@@ -868,11 +875,11 @@ def _sync_trail_stops(ex, report: list[str]) -> None:
             close_side = "sell" if t["side"] == "LONG" else "buy"
             try:
                 o = ex.create_order(sym, "market", close_side, float(t["qty"]), None,
-                                    params={"stopLossPrice": new_px, "hedged": True})
+                                    params={"stopLossPrice": new_px, **_CLOSE_STOP})
             except _ExErr as e:
-                # цена уже за новым уровнем: 101400 (вход со связкой) / 110412 (стоп-лосс
-                # отдельным ордером, смоук 23.10 #681 ZEC) — журнал засчитает выход
-                if "101400" not in str(e) and "110412" not in str(e):
+                # цена уже за новым уровнем: 101400 (вход со связкой) / 110411 (LONG: стоп
+                # должен быть НИЖЕ цены) / 110412 (SHORT: ВЫШЕ) — журнал засчитает выход
+                if not any(c in str(e) for c in ("101400", "110411", "110412")):
                     raise
                 closed = _close_position(ex, t, max_qty=float(t["qty"]))
                 _cancel_stop(ex, sym, old.get("id"))

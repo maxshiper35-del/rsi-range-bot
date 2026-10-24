@@ -2963,6 +2963,15 @@ def main() -> None:
         value = "6226,1:1,open-SMC,LTF" if parts[1].strip().lower() == "all" else parts[1].strip()
         await _set(m, "enabled_setups", value, f"Включённые сетапы: {value}")
 
+    @dp.message(Command("forward"))
+    async def _forward_cmd(m):
+        # прогресс по правилам проверки вперёд (docs/measurements/2026-10-24-forward-rules.md)
+        if not _is_admin(m):
+            return
+        from app.brain import forward_check
+        txt = await asyncio.to_thread(forward_check.report, datetime.now(timezone.utc))
+        await m.answer(txt, parse_mode="HTML")
+
     @dp.message(Command("shadow"))
     async def _shadow_cmd(m):
         # теневой режим сетапов: итог контрфакта (не публикуется) — к решению по
@@ -4351,6 +4360,23 @@ def main() -> None:
                     for admin_id in cfg.admin_ids:
                         try:
                             await bot.send_message(admin_id, joined)
+                        except Exception:               # noqa: BLE001
+                            pass
+                # проверка решений вперёд (правила 24.10) — раз в ISO-неделю, маркер ДО отправки
+                _fy, _fw, _ = datetime.now(timezone.utc).isocalendar()
+                _fwk = f"{_fy}-W{_fw:02d}"
+                if runtime._raw("forward_report_last_week") != _fwk:
+                    await asyncio.to_thread(runtime.set_value, "forward_report_last_week", _fwk)
+                    try:
+                        from app.brain import forward_check
+                        _ftxt = await asyncio.to_thread(forward_check.report,
+                                                        datetime.now(timezone.utc))
+                    except Exception:                   # noqa: BLE001
+                        log.exception("forward report")
+                        _ftxt = None
+                    for admin_id in (cfg.admin_ids if _ftxt else ()):
+                        try:
+                            await bot.send_message(admin_id, _ftxt, parse_mode="HTML")
                         except Exception:               # noqa: BLE001
                             pass
                 # недельный отчёт «исполнение vs журнал» — админам. Маркер недели
