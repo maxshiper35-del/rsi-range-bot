@@ -389,6 +389,87 @@ def _recent_closed(tg_id: int, limit: int = 15) -> list:
             for r in ordered]
 
 
+def _splits(since_created: str | None = None) -> dict:
+    """Разбивка закрытых по стороне и ТФ ({n, r, w}). Сторона и ТФ публичны (CSV
+    /trackrecord), таксономии сетапов здесь нет."""
+    q = f"SELECT side, timeframe, result_r FROM signals WHERE {_CLOSED} "
+    args: tuple = ()
+    if since_created:
+        q += "AND created_at >= ?"
+        args = (since_created,)
+    side: dict = {}
+    tf: dict = {}
+    for r in db.query(q, args):
+        for key, bucket in ((r["side"], side), (r["timeframe"], tf)):
+            d = bucket.setdefault(key, {"n": 0, "r": 0.0, "w": 0})
+            d["n"] += 1
+            d["r"] += r["result_r"]
+            d["w"] += 1 if r["result_r"] > 0 else 0
+    for bucket in (side, tf):
+        for d in bucket.values():
+            d["r"] = round(d["r"], 2)
+    return {"side": side, "tf": tf}
+
+
+def _daily(since_created: str | None = None, days: int = 371) -> list:
+    """Итог закрытых по дням (календарь-тепловая карта) за последний год."""
+    from datetime import timedelta
+    cutoff = (clock.utcnow() - timedelta(days=days)).isoformat()
+    q = (f"SELECT substr(closed_at, 1, 10) AS d, COUNT(*) AS n, SUM(result_r) AS r "
+         f"FROM signals WHERE {_CLOSED} AND closed_at >= ? ")
+    args: tuple = (cutoff,)
+    if since_created:
+        q += "AND created_at >= ? "
+        args = (cutoff, since_created)
+    q += "GROUP BY d ORDER BY d"
+    return [{"d": r["d"], "n": r["n"], "r": round(float(r["r"]), 2)} for r in db.query(q, args)]
+
+
+_TRADE_FILTERS = {"side": {"long": "side='LONG'", "short": "side='SHORT'"},
+                  "res": {"win": "result_r > 0", "loss": "result_r <= 0"}}
+
+
+def _trades_page(offset: int, limit: int, side: str, tf: str, res: str, q: str) -> dict:
+    """Публичная история закрытых с фильтрами — граница та же, что у CSV /trackrecord:
+    исход, сторона, ТФ, даты; без сетапов. Итог и winrate — по ВСЕЙ выборке фильтра."""
+    where, args = [_CLOSED], []
+    if side in _TRADE_FILTERS["side"]:
+        where.append(_TRADE_FILTERS["side"][side])
+    if res in _TRADE_FILTERS["res"]:
+        where.append(_TRADE_FILTERS["res"][res])
+    if tf:
+        where.append("timeframe=?")
+        args.append(tf)
+    if q:
+        where.append("symbol LIKE ?")
+        args.append(q.upper() + "%")
+    w = " AND ".join(where)
+    agg = db.query_one(f"SELECT COUNT(*) AS n, COALESCE(SUM(result_r), 0) AS s, "
+                       f"COALESCE(SUM(result_r > 0), 0) AS w FROM signals WHERE {w}", tuple(args))
+    rows = db.query(
+        f"SELECT id, symbol, side, timeframe, result_r, created_at, filled_at, closed_at "
+        f"FROM signals WHERE {w} ORDER BY closed_at DESC, id DESC LIMIT ? OFFSET ?",
+        (*args, limit, offset))
+    from datetime import datetime
+    items = []
+    for r in rows:
+        hold = None
+        if r["filled_at"] and r["closed_at"]:
+            try:
+                hold = round(max(0.0, (datetime.fromisoformat(r["closed_at"])
+                                       - datetime.fromisoformat(r["filled_at"]))
+                                 .total_seconds() / 3600), 1)
+            except ValueError:
+                hold = None
+        items.append({"id": r["id"], "s": r["symbol"].split("/")[0], "side": r["side"],
+                      "tf": r["timeframe"], "r": round(r["result_r"], 2),
+                      "d": (r["closed_at"] or "")[:10], "c": (r["created_at"] or "")[:16],
+                      "h": hold})
+    n = int(agg["n"]) if agg else 0
+    return {"ok": True, "total": n, "sum_r": round(float(agg["s"]), 2) if agg else 0.0,
+            "wins": int(agg["w"]) if agg else 0, "offset": offset, "items": items}
+
+
 # ------------------- админ-панель (v5: пульт управления) -------------------
 # Первый АДМИНСКИЙ пишущий контур на публичном вебе: гейт — та же подпись initData
 # плюс uid в admin_ids; настройки меняются ТОЛЬКО по белому списку с валидацией
@@ -420,7 +501,56 @@ _ADMIN_SETTINGS: dict[str, dict] = {
     "backtest_public":   {"t": "bool", "label": "Секция «Бэктест 5 лет» в дашборде",
                           "group": "Прочее"},
     "executor_enabled":  {"t": "bool", "label": "Executor (нужны ключи BingX)", "group": "Прочее"},
+    # v6 (24.10.2026): всё, что админ раньше менял только командами бота
+    "min_stop_pct":      {"t": "float", "min": 0.0, "max": 10.0, "group": "Стратегия",
+                          "label": "Мин. стоп, % (1.3 — замер 24.10; 0 = выкл)"},
+    "side_cooldown_stops": {"t": "int", "min": 0, "max": 20, "group": "Стратегия",
+                            "label": "Тормоз стороны: стопов за окно (0 = выкл)"},
+    "side_cooldown_hours": {"t": "float", "min": 0.5, "max": 72, "group": "Стратегия",
+                            "label": "Тормоз стороны: окно, ч"},
+    "time_filter_enabled": {"t": "bool", "group": "Стратегия",
+                            "label": "Временное окно NY для 6226"},
+    "timeframes":        {"t": "choice", "choices": ("1h,4h", "1h", "4h"), "group": "Стратегия",
+                          "label": "Таймфреймы сканирования"},
+    "watchlist_size":    {"t": "int", "min": 3, "max": 40, "group": "Вотчлист",
+                          "label": "Размер авто-вотчлиста"},
+    "symbols":           {"t": "symbols", "group": "Вотчлист",
+                          "label": "Вотчлист (BTC/USDT:USDT, …) — авто перезапишет"},
+    "watchlist_blacklist": {"t": "symbols", "group": "Вотчлист",
+                            "label": "Чёрный список монет"},
+    "trial_days":        {"t": "int", "min": 0, "max": 60, "group": "Подписка",
+                          "label": "Триал новым юзерам, дней"},
+    "sub_price_usdt":    {"t": "float", "min": 0.0, "max": 10000, "group": "Подписка",
+                          "label": "Цена подписки, USDT"},
+    "intro_price_stars": {"t": "int", "min": 0, "max": 100000, "group": "Подписка",
+                          "label": "Пробный тариф, Stars (0 = скрыть)"},
+    "intro_hours":       {"t": "float", "min": 1, "max": 240, "group": "Подписка",
+                          "label": "Пробный тариф, часов"},
+    "quarter_price_stars": {"t": "int", "min": 0, "max": 1000000, "group": "Подписка",
+                            "label": "Квартал, Stars (0 = скрыть)"},
+    "year_price_stars":  {"t": "int", "min": 0, "max": 1000000, "group": "Подписка",
+                          "label": "Год, Stars (0 = скрыть)"},
+    "lifetime_price_stars": {"t": "int", "min": 0, "max": 1000000, "group": "Подписка",
+                             "label": "Lifetime, Stars (0 = скрыть)"},
+    "paid_signal_stars": {"t": "int", "min": 0, "max": 100000, "group": "Подписка",
+                          "label": "Разовая покупка сигнала, Stars (0 = выкл)"},
+    "referral_reward_days": {"t": "int", "min": 0, "max": 90, "group": "Подписка",
+                             "label": "Награда рефереру, дней"},
+    "display_leverage":  {"t": "float", "min": 0, "max": 125, "group": "Канал",
+                          "label": "Плечо в постах, ×N (0 = скрыть строку)"},
+    "signal_chart_enabled": {"t": "bool", "group": "Канал", "label": "График к посту сигнала"},
+    "lifecycle_chart_enabled": {"t": "bool", "group": "Канал",
+                                "label": "График к посту результата"},
+    "channel_cta_enabled": {"t": "bool", "group": "Канал", "label": "CTA-кнопки под постами"},
+    "cornix_block_enabled": {"t": "bool", "group": "Канал", "label": "Блок для Cornix в посте"},
+    "executor_risk_pct": {"t": "float", "min": 0.1, "max": 5.0, "group": "Executor (демо)",
+                          "label": "Риск на сделку, % эквити"},
+    "executor_daily_loss_pct": {"t": "float", "min": 0.0, "max": 50.0,
+                                "group": "Executor (демо)",
+                                "label": "Дневной стоп-кран, % эквити (0 = выкл)"},
 }
+
+_SYMBOL_RE = re.compile(r"[A-Z0-9]{1,20}/USDT:USDT")
 
 
 def _admin_uid(max_age_s: int = _AUTH_MAX_AGE_S) -> int | None:
@@ -448,6 +578,13 @@ def _validate_setting(key: str, value) -> str | None:
             return ""
         ok = isinstance(value, str) and value.startswith("https://") and len(value) < 500
         return value if ok else None
+    if t == "symbols":
+        if not isinstance(value, str) or len(value) > 2000:
+            return None
+        items = [x.strip().upper() for x in value.replace("\n", ",").split(",") if x.strip()]
+        if len(items) > 60 or not all(_SYMBOL_RE.fullmatch(x) for x in items):
+            return None
+        return ",".join(dict.fromkeys(items))            # порядок сохраняем, дубли — прочь
     if t in ("int", "float"):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
@@ -470,11 +607,51 @@ def _admin_settings_payload() -> list:
         "executor_enabled": runtime.executor_enabled(),
         "backtest_public": runtime.backtest_public(),
         "late_entry_gate": runtime.late_entry_gate(),
+        "min_stop_pct": runtime.min_stop_pct(),
+        "side_cooldown_stops": runtime.side_cooldown_stops(),
+        "side_cooldown_hours": runtime.side_cooldown_hours(),
+        "time_filter_enabled": runtime.time_filter_enabled(),
+        "timeframes": ",".join(runtime.timeframes()),
+        "watchlist_size": runtime.watchlist_size(),
+        "symbols": ",".join(runtime.symbols()),
+        "watchlist_blacklist": ",".join(runtime.watchlist_blacklist()),
+        "trial_days": runtime.trial_days(), "sub_price_usdt": runtime.price_usdt(),
+        "intro_price_stars": runtime.intro_price_stars(), "intro_hours": runtime.intro_hours(),
+        "quarter_price_stars": runtime.quarter_price_stars(),
+        "year_price_stars": runtime.year_price_stars(),
+        "lifetime_price_stars": runtime.lifetime_price_stars(),
+        "paid_signal_stars": runtime.paid_signal_stars(),
+        "referral_reward_days": runtime.referral_reward_days(),
+        "display_leverage": runtime.display_leverage(),
+        "signal_chart_enabled": runtime.signal_chart_enabled(),
+        "lifecycle_chart_enabled": runtime.lifecycle_chart_enabled(),
+        "channel_cta_enabled": runtime.channel_cta_enabled(),
+        "cornix_block_enabled": runtime.cornix_block_enabled(),
+        "executor_risk_pct": runtime.executor_risk_pct(),
+        "executor_daily_loss_pct": runtime.executor_daily_loss_pct(),
     }
     return [{"key": k, "value": cur[k], "label": v["label"], "t": v["t"],
              "group": v["group"], **({"choices": v["choices"]} if "choices" in v else {}),
              **({"min": v["min"], "max": v["max"]} if "min" in v else {})}
             for k, v in _ADMIN_SETTINGS.items()]
+
+
+_LOG = Path("logs/bot.log")
+_SECRET_RE = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}|[A-Za-z0-9]{40,}")
+
+
+def _log_tail(n: int = 30) -> list:
+    """Последние WARNING/ERROR бота (хвост файла ~256 КБ). Токеноподобные строки
+    вымарываются — лог могут читать с телефона, а секретам в UI не место."""
+    try:
+        with _LOG.open("rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 262144))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+    out = [ln for ln in lines if " WARNING " in ln or " ERROR " in ln]
+    return [_SECRET_RE.sub("•••", ln)[:300] for ln in out[-n:]][::-1]
 
 
 @app.get("/api/admin")
@@ -518,21 +695,68 @@ def api_admin() -> Response:
     open_full = [dict(r) for r in db.query(
         "SELECT id, symbol, side, timeframe, entry, stop, created_at, filled_at "
         "FROM signals WHERE status='open' AND result_r IS NULL ORDER BY created_at DESC")]
+    from datetime import timedelta
+
+    from app.power import pmset_batt
+    since90 = (now - timedelta(days=90)).isoformat()
+    daily = [dict(r) for r in db.query(
+        "SELECT substr(paid_at, 1, 10) AS d, currency AS cur, ROUND(SUM(amount), 2) AS s, "
+        "COUNT(*) AS n FROM payments WHERE status='paid' AND paid_at >= ? "
+        "GROUP BY d, cur ORDER BY d", (since90,))]
+    by_method = [dict(r) for r in db.query(
+        "SELECT method, currency AS cur, COUNT(*) AS n, ROUND(SUM(amount), 2) AS s "
+        "FROM payments WHERE status='paid' GROUP BY method, currency ORDER BY n DESC")]
+    funnel_row = db.query_one(
+        "SELECT COUNT(*) AS joined, "
+        "SUM(trial_granted_at IS NOT NULL) AS trial_ever, "
+        "SUM(EXISTS(SELECT 1 FROM payments p WHERE p.tg_id=users.tg_id AND p.status='paid')) "
+        "  AS paid_ever, "
+        "SUM((SELECT COUNT(*) FROM payments p WHERE p.tg_id=users.tg_id "
+        "     AND p.status='paid') >= 2) AS renewed "
+        "FROM users")
+    funnel = {k: int((funnel_row[k] if funnel_row else 0) or 0)
+              for k in ("joined", "trial_ever", "paid_ever", "renewed")}
+    funnel["paying_now"] = bd["paying"]
+    refunds = db.query_one("SELECT COUNT(*) AS n FROM payments WHERE status='refunded'")
+    shadow = {}
+    for reason, label in _SHADOW_LABEL.items():
+        st = journal.shadow_stats(reason=reason)
+        n = sum(v["n"] for v in st.values())
+        sm = round(sum(v["sum"] for v in st.values()), 2)
+        opn = db.query_one(
+            "SELECT COUNT(*) AS n FROM signals WHERE status='rejected' AND result_r IS NULL "
+            "AND closed_at IS NULL AND snapshot_json LIKE ?", (f'%"shadow": "{reason}"%',))
+        shadow[reason] = {"label": label, "n": n, "sum": sm,
+                          "exp": round(sm / n, 3) if n else None,
+                          "wins": sum(v["wins"] for v in st.values()),
+                          "open": opn["n"] if opn else 0}
+    today = now.isoformat()[:10]
+    today_row = db.query_one(
+        "SELECT SUM(status != 'rejected') AS pub, SUM(status = 'rejected') AS sh "
+        "FROM signals WHERE substr(created_at, 1, 10) = ?", (today,))
     payload = {
         "ok": True,
         "health": {
             "poller_tick_min": age_min(runtime.last_poller_tick_at()),
             "backup_min": age_min(runtime.last_backup_at()),
+            "offsite_min": age_min(runtime.last_offsite_at()),
             "webapp_url": runtime.webapp_url(),
             "executor_enabled": runtime.executor_enabled(),
             "paused": runtime.paused(),
+            "power": pmset_batt(),
+            "overdue": len(journal.overdue_open_signals(now_iso)),
+            "today_pub": int((today_row["pub"] if today_row else 0) or 0),
+            "today_shadow": int((today_row["sh"] if today_row else 0) or 0),
+            "log": _log_tail(),
         },
+        "shadow": shadow,
         "users": {"counts": payments.user_counts(), "paid_now": paid_now["n"],
                   "trial_now": bd["trial"], "granted_now": bd["granted"],
                   "lapsed": lapsed["n"], "acquisition": payments.acquisition_breakdown(),
                   "recent": recent_users},
         "money": {"payments_n": pays["n"], "payments_sum": round(float(pays["s"]), 2),
-                  "payments_by_cur": by_cur,
+                  "payments_by_cur": by_cur, "daily": daily, "by_method": by_method,
+                  "funnel": funnel, "refunds": refunds["n"] if refunds else 0,
                   "last": last_pays},
         "settings": _admin_settings_payload(),
         "open_signals": open_full,
@@ -592,6 +816,180 @@ def api_admin_user() -> Response:
     return _no_store({"ok": True})
 
 
+_USER_STATUS_SQL = """
+SELECT u.tg_id, u.username, u.tier, u.paid_until, u.joined_at, u.acquisition_source AS src,
+       u.invited_by, u.trial_granted_at, u.is_active, u.notify_muted, u.depo_usd,
+       (SELECT COUNT(*) FROM payments p WHERE p.tg_id=u.tg_id AND p.status='paid') AS pays_n,
+       (SELECT COUNT(*) FROM user_taken t WHERE t.tg_id=u.tg_id) AS taken_n,
+       (SELECT COUNT(*) FROM users r WHERE r.invited_by=u.tg_id) AS invited_n
+FROM users u
+"""
+
+
+def _user_status(r, now_iso: str) -> str:
+    active = bool(r["paid_until"]) and r["paid_until"] > now_iso
+    if active:
+        return "paying" if r["pays_n"] else ("trial" if r["trial_granted_at"] else "grant")
+    return "lapsed" if r["paid_until"] else "free"
+
+
+def _user_row(r, now_iso: str) -> dict:
+    """Строка юзера для админки — БЕЗ api-ключей и прочих секретов из таблицы users."""
+    return {"tg_id": r["tg_id"], "username": r["username"], "status": _user_status(r, now_iso),
+            "paid_until": (r["paid_until"] or "")[:10] or None,
+            "joined": (r["joined_at"] or "")[:10], "src": r["src"],
+            "invited_by": r["invited_by"], "pays_n": r["pays_n"], "taken_n": r["taken_n"],
+            "invited_n": r["invited_n"], "blocked": not r["is_active"],
+            "muted": bool(r["notify_muted"]), "depo": bool(r["depo_usd"])}
+
+
+@app.get("/api/admin/users")
+def api_admin_users() -> Response:
+    """Поиск/фильтр юзеров: q — tg_id или @username (подстрока), st — статус."""
+    if _admin_uid() is None:
+        return _no_store({"ok": False}, 403)
+    q = request.args.get("q", "").strip().lstrip("@")
+    st = request.args.get("st", "")
+    if len(q) > 40 or st not in ("", "paying", "trial", "grant", "lapsed", "free"):
+        return _no_store({"ok": False}, 400)
+    where, args = "", ()  # type: tuple[str, tuple]
+    if q:
+        where = "WHERE CAST(u.tg_id AS TEXT) LIKE ? OR u.username LIKE ?"
+        args = (q + "%", "%" + q + "%")
+    now_iso = clock.utcnow_iso()
+    rows = [_user_row(r, now_iso)
+            for r in db.query(_USER_STATUS_SQL + where + " ORDER BY u.joined_at DESC", args)]
+    if st:
+        rows = [r for r in rows if r["status"] == st]
+    return _no_store({"ok": True, "items": rows[:200], "total": len(rows)})
+
+
+@app.get("/api/admin/user")
+def api_admin_user_detail() -> Response:
+    """Карточка юзера: статус, платежи, рефералы, личный итог по отмеченным."""
+    if _admin_uid() is None:
+        return _no_store({"ok": False}, 403)
+    raw = request.args.get("id", "")
+    if not re.fullmatch(r"[0-9]{1,19}", raw):
+        return _no_store({"ok": False}, 400)
+    uid = int(raw)
+    r = db.query_one(_USER_STATUS_SQL + "WHERE u.tg_id=?", (uid,))
+    if r is None:
+        return _no_store({"ok": False, "err": "нет такого юзера"}, 404)
+    from app.delivery import payments
+    now_iso = clock.utcnow_iso()
+    pays = [dict(p) for p in db.query(
+        "SELECT id, method, amount, currency, days, status, created_at, paid_at FROM payments "
+        "WHERE tg_id=? ORDER BY COALESCE(paid_at, created_at) DESC LIMIT 50", (uid,))]
+    invited = [{"tg_id": x["tg_id"], "username": x["username"],
+                "rewarded": bool(x["referral_rewarded_at"]), "joined": (x["joined_at"] or "")[:10]}
+               for x in db.query("SELECT tg_id, username, referral_rewarded_at, joined_at "
+                                 "FROM users WHERE invited_by=? ORDER BY joined_at DESC", (uid,))]
+    deliv = {d["kind"]: d["n"] for d in db.query(
+        "SELECT kind, COUNT(*) AS n FROM deliveries WHERE tg_id=? GROUP BY kind", (uid,))}
+    return _no_store({"ok": True, "user": _user_row(r, now_iso), "payments": pays,
+                      "invited": invited, "deliveries": deliv,
+                      "taken": payments.taken_stats(uid),
+                      "notify": payments.notify_prefs(uid)})
+
+
+_SHADOW_LABEL = {"setup_off": "сетап в тени", "late_entry": "вход пройден"}
+
+
+@app.get("/api/admin/signals")
+def api_admin_signals() -> Response:
+    """Журнал для админа С УРОВНЯМИ: открытые, закрытые, тени. Тегов сетапов нет и тут —
+    граница стратегии единая для всех поверхностей дашборда (см. шапку модуля)."""
+    if _admin_uid() is None:
+        return _no_store({"ok": False}, 403)
+    view = request.args.get("view", "open")
+    q = request.args.get("q", "")
+    off_s = request.args.get("offset", "0")
+    if (view not in ("open", "closed", "shadow", "all") or not re.fullmatch(r"[A-Za-z0-9]{0,15}", q)
+            or not re.fullmatch(r"[0-9]{1,6}", off_s)):
+        return _no_store({"ok": False}, 400)
+    cond = {"open": "status='open' AND result_r IS NULL",
+            "closed": _CLOSED,
+            "shadow": "status='rejected' AND snapshot_json LIKE '%\"shadow\":%'",
+            "all": "1=1"}[view]
+    args: tuple = ()
+    if q:
+        cond += " AND symbol LIKE ?"
+        args = (q.upper() + "%",)
+    cnt = db.query_one(f"SELECT COUNT(*) AS n FROM signals WHERE {cond}", args)
+    total = cnt["n"] if cnt else 0
+    rows = db.query(
+        f"SELECT id, symbol, side, timeframe, entry, stop, tp1, status, result_r, created_at, "
+        f"filled_at, closed_at, trail_stop, snapshot_json FROM signals WHERE {cond} "
+        f"ORDER BY id DESC LIMIT 50 OFFSET ?", (*args, int(off_s)))
+    items = []
+    for r in rows:
+        try:
+            shadow = json.loads(r["snapshot_json"] or "{}").get("shadow")
+        except ValueError:
+            shadow = None
+        items.append({"id": r["id"], "s": r["symbol"].split("/")[0], "side": r["side"],
+                      "tf": r["timeframe"], "entry": r["entry"], "stop": r["stop"],
+                      "tp1": r["tp1"], "status": r["status"], "r": r["result_r"],
+                      "created": (r["created_at"] or "")[:16],
+                      "filled": (r["filled_at"] or "")[:16],
+                      "closed": (r["closed_at"] or "")[:16], "trail": r["trail_stop"],
+                      "shadow": _SHADOW_LABEL.get(shadow) if shadow else None})
+    return _no_store({"ok": True, "total": total, "items": items})
+
+
+_EXEC_CACHE: dict = {"at": 0.0, "status": None}
+
+
+@app.get("/api/admin/executor")
+def api_admin_executor() -> Response:
+    """Демо-executor: статус и эквити (сеть — кеш 60с), позиции, реальный R против журнала
+    по исправленным ценам исполнения (24.10), ошибки постановки."""
+    if _admin_uid() is None:
+        return _no_store({"ok": False}, 403)
+    from app.v2 import bingx_executor as bx
+    with _CHART_CACHE_LOCK:
+        cached = _EXEC_CACHE["status"] if time.monotonic() - _EXEC_CACHE["at"] < 60 else None
+    if cached is None:
+        try:
+            cached = bx.status()
+        except Exception as e:                            # noqa: BLE001 — сеть/ключи
+            cached = {"enabled": runtime.executor_enabled(), "vst": f"ошибка: {str(e)[:60]}"}
+        with _CHART_CACHE_LOCK:
+            _EXEC_CACHE.update(at=time.monotonic(), status=cached)
+    live = [dict(r) for r in db.query(
+        "SELECT eo.signal_id, eo.symbol, eo.side, eo.qty, eo.entry_px, eo.stop_px, eo.trail_px, "
+        "eo.state, eo.fill_px, eo.created_at, s.trail_stop FROM executor_orders eo "
+        "JOIN signals s ON s.id=eo.signal_id WHERE eo.state IN ('placing','placed','filled') "
+        "ORDER BY eo.created_at DESC")]
+    closed = []
+    for r in db.query(
+            "SELECT eo.signal_id, eo.symbol, eo.side, eo.qty, eo.fill_px, eo.close_px, "
+            "eo.fill_fee, eo.close_fee, eo.closed_at, s.entry, s.stop, s.result_r "
+            "FROM executor_orders eo JOIN signals s ON s.id=eo.signal_id "
+            "WHERE eo.state='closed' AND eo.fill_px IS NOT NULL AND eo.close_px IS NOT NULL "
+            "ORDER BY eo.closed_at DESC"):
+        risk = abs(r["entry"] - r["stop"])
+        if not risk or not r["qty"]:
+            continue
+        sg = 1 if r["side"] == "LONG" else -1
+        fees = ((r["fill_fee"] or 0) + (r["close_fee"] or 0)) / (risk * r["qty"])
+        closed.append({"id": r["signal_id"], "s": r["symbol"].split("/")[0], "side": r["side"],
+                       "real": round(sg * (r["close_px"] - r["fill_px"]) / risk - abs(fees), 3),
+                       "journal": r["result_r"],
+                       "slip": round(sg * (r["entry"] - r["fill_px"]) / risk, 3),
+                       "d": (r["closed_at"] or "")[:10]})
+    errors = [dict(r) for r in db.query(
+        "SELECT signal_id, symbol, note, created_at FROM executor_orders WHERE state='error' "
+        "ORDER BY created_at DESC LIMIT 15")]
+    n = len(closed)
+    summary = {"n": n, "real": round(sum(c["real"] for c in closed), 2),
+               "journal": round(sum(c["journal"] or 0 for c in closed), 2),
+               "slip": round(sum(c["slip"] for c in closed) / n, 3) if n else None}
+    return _no_store({"ok": True, "status": cached, "live": live, "closed": closed[:60],
+                      "summary": summary, "errors": errors})
+
+
 @app.get("/api/me")
 def api_me() -> Response:
     """Платный слой для валидного подписчика/админа. Без валидной подписи — 401."""
@@ -612,7 +1010,114 @@ def api_me() -> Response:
         payload["my_stats"] = _my_stats(uid)
         payload["recent_closed"] = _recent_closed(uid)
         payload["bot"] = runtime.bot_username()   # deep-link «поделиться карточкой»
+        payload["sub"] = _sub_info(uid)
+        payload["referral"] = _referral_info(uid)
+        dp = payments.depo_prefs(uid)
+        payload["depo"] = {"usd": dp[0], "risk": dp[1]} if dp else None
+        payload["notify"] = payments.notify_prefs(uid)
     return _no_store(payload)
+
+
+def _sub_info(uid: int) -> dict:
+    """Карточка подписки «Моё»: до какого числа, сколько осталось, вид (оплата/триал/грант)."""
+    from datetime import datetime
+
+    from app.delivery import payments
+    u = payments.get_user(uid)
+    until = u["paid_until"] if u else None
+    left = None
+    if until:
+        try:
+            left = round(max(0.0, (datetime.fromisoformat(until) - clock.utcnow())
+                             .total_seconds() / 86400), 2)
+        except ValueError:
+            left = None
+    paid = db.query_one("SELECT COUNT(*) AS n FROM payments WHERE tg_id=? AND status='paid'",
+                        (uid,))
+    kind = ("paid" if paid and paid["n"] else
+            "trial" if u is not None and u["trial_granted_at"] else
+            "grant" if left else "free")
+    return {"until": (until or "")[:10] or None, "days_left": left, "kind": kind,
+            "price_stars": runtime.price_stars(), "sub_days": runtime.sub_days()}
+
+
+def _referral_info(uid: int) -> dict:
+    from app.delivery import payments
+    st = payments.referral_stats(uid)
+    bot = runtime.bot_username()
+    return {"link": f"https://t.me/{bot}?start=ref_{uid}" if bot else None,
+            "invited": st["invited"], "rewarded": st["rewarded"],
+            "reward_days": runtime.referral_reward_days()}
+
+
+@app.post("/api/prefs")
+def api_prefs() -> Response:
+    """Личные настройки из «Моё» — те же поля, что /depo, /mute, /quiet в боте:
+    депозит и риск для расчёта объёма, мьют и тихие часы DM-сигналов. Только платник/админ."""
+    user = _auth_user()
+    if user is None:
+        return _no_store({"ok": False}, 401)
+    uid = int(user["id"])
+    from app.delivery import payments
+    if not (payments.is_paid(uid) or uid in get_settings().admin_ids):
+        return _no_store({"ok": False}, 403)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _no_store({"ok": False}, 400)
+
+    def num(v, lo, hi):
+        return (not isinstance(v, bool) and isinstance(v, (int, float))
+                and lo <= v <= hi)
+
+    if "depo_usd" in body or "risk_pct" in body:
+        usd, risk = body.get("depo_usd"), body.get("risk_pct")
+        if usd is None and risk is None:
+            payments.set_depo(uid, None, None)
+        elif num(usd, 10, 10_000_000) and num(risk, 0.1, 10):
+            payments.set_depo(uid, float(usd or 0), float(risk or 0))
+        else:
+            return _no_store({"ok": False, "err": "депозит 10…10 000 000, риск 0.1…10%"}, 400)
+    if "muted" in body:
+        if not isinstance(body["muted"], bool):
+            return _no_store({"ok": False}, 400)
+        payments.set_muted(uid, body["muted"])
+    if "quiet_start" in body or "quiet_end" in body:
+        qs, qe = body.get("quiet_start"), body.get("quiet_end")
+        if qs is None and qe is None:
+            payments.set_quiet_hours(uid, None, None)
+        elif (isinstance(qs, int) and isinstance(qe, int) and not isinstance(qs, bool)
+              and not isinstance(qe, bool) and 0 <= qs <= 23 and 0 <= qe <= 23):
+            payments.set_quiet_hours(uid, qs, qe)
+        else:
+            return _no_store({"ok": False, "err": "часы 0…23 (UTC)"}, 400)
+    dp = payments.depo_prefs(uid)
+    return _no_store({"ok": True, "depo": {"usd": dp[0], "risk": dp[1]} if dp else None,
+                      "notify": payments.notify_prefs(uid)})
+
+
+@app.get("/api/trades")
+def api_trades() -> Response:
+    """Публичная история закрытых с фильтрами и пагинацией (вкладка «Сделки»)."""
+    a = request.args
+
+    def int_arg(name: str, default: int, lo: int, hi: int) -> int | None:
+        raw = a.get(name, str(default))
+        if not re.fullmatch(r"[0-9]{1,6}", raw):
+            return None
+        v = int(raw)
+        return v if lo <= v <= hi else None
+
+    offset, limit = int_arg("offset", 0, 0, 100000), int_arg("limit", 40, 1, 100)
+    side, tf, res = a.get("side", ""), a.get("tf", ""), a.get("res", "")
+    q = a.get("q", "")
+    if (offset is None or limit is None or side not in ("", "long", "short")
+            or res not in ("", "win", "loss") or not re.fullmatch(r"(|15m|30m|1h|4h|1d)", tf)
+            or not re.fullmatch(r"[A-Za-z0-9]{0,15}", q)):
+        return _no_store({"ok": False}, 400)
+    body = json.dumps(_trades_page(offset, limit, side, tf, res, q), ensure_ascii=False)
+    resp = Response(body, mimetype="application/json")
+    resp.headers["Cache-Control"] = "public, max-age=30"
+    return resp
 
 
 @app.post("/api/take")
@@ -679,6 +1184,10 @@ def api_stats() -> Response:
         "r_epoch": r_ep, "sp_epoch": sp_ep, "h_epoch": h_ep,
         "kelly_all": journal.kelly_stats(),
         "kelly_epoch": journal.kelly_stats(epoch) if epoch else None,
+        "split_all": _splits(),
+        "split_epoch": _splits(epoch) if epoch else None,
+        "daily_all": _daily(),
+        "daily_epoch": _daily(epoch) if epoch else [],
     }
     body = json.dumps(payload, ensure_ascii=False)
     with _STATS_CACHE_LOCK:

@@ -1247,6 +1247,7 @@ def test_late_entry_gate_runtime_default_entry_and_validated(fresh_db):
 def test_battery_alert_parse_and_throttle():
     """09.10.2026: зарядку отключили, Mac сел на батарее — бот лежал 3.5 дня.
     Алерт: на батарее раз в час, при <= 20% — раз в 15 мин; на зарядке — молчим."""
+    from app import power as bot  # вынесено из bot.py (нужно и дашборду)
     ac = bot.parse_pmset_batt("Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t"
                               "100%; charged; 0:00 remaining present: true")
     assert ac == {"on_battery": False, "pct": 100, "remaining": "0:00"}

@@ -609,3 +609,157 @@ def test_admin_panel_grant_rewards_referrer(fresh_db, admin_env):
                                                "days": 30}, headers=hdr).status_code == 200
     assert payments.get_user(800301)["referral_rewarded_at"] is not None
     assert payments.is_paid(800300) is True
+
+
+# ------------------- v6 (24.10.2026): расширенный дашборд -------------------
+
+_SEQ = iter(range(10, 99))
+
+
+def _closed(sym: str, r: float, closed: str) -> int:
+    """Закрытая сделка с УНИКАЛЬНЫМ created_at (у _mk_closed он общий)."""
+    from app import db
+    n = next(_SEQ)
+    db.execute(
+        "INSERT INTO signals(symbol, side, timeframe, entry, stop, risk_reward, confidence, "
+        "snapshot_json, status, created_at, filled_at, closed_at, result_r) VALUES "
+        f"('{sym}','LONG','1h',1,0.9,2.0,0.7,'{{}}','stopped',"
+        f"'2026-07-01T{n % 24:02d}:{n:02d}:00+00:00','2026-07-01T00:00:00+00:00','{closed}',{r})")
+    return db.query_one("SELECT MAX(id) AS i FROM signals")["i"]
+
+def _mk_open_with_setup(sym: str = "AAA/USDT:USDT") -> int:
+    from app import db
+    db.execute(
+        "INSERT INTO signals(symbol, side, timeframe, entry, stop, tp1, risk_reward, "
+        "confidence, snapshot_json, status, created_at) VALUES "
+        f"('{sym}','LONG','1h',123.456,120.111,130.0,2.0,0.7,"
+        "'{\"setup\": \"6226\"}','open','2026-10-24T10:00:00+00:00')")
+    return db.query_one("SELECT MAX(id) AS i FROM signals")["i"]
+
+
+def test_api_trades_public_filters_pagination_and_no_leak(fresh_db):
+    """История закрытых: фильтры, итог по всей выборке, пагинация; без сетапов и без
+    открытых сделок (их уровни — платный слой)."""
+    from app.webapp import app as flask_app
+    for i in range(5):
+        _closed("BTC/USDT:USDT", 1.5 if i % 2 else -1.0, f"2026-08-0{i + 2}T00:00:00+00:00")
+    _closed("ETH/USDT:USDT", 2.0, "2026-08-09T00:00:00+00:00")
+    _mk_open_with_setup()
+    with flask_app.test_client() as c:
+        d = json.loads(c.get("/api/trades?limit=2").get_data(as_text=True))
+        assert d["total"] == 6 and len(d["items"]) == 2 and d["items"][0]["s"] == "ETH"
+        assert abs(d["sum_r"] - (2.0 + 1.5 * 2 - 1.0 * 3)) < 1e-9 and d["wins"] == 3
+        page2 = json.loads(c.get("/api/trades?limit=2&offset=2").get_data(as_text=True))
+        assert [x["id"] for x in page2["items"]] != [x["id"] for x in d["items"]]
+        btc_win = json.loads(c.get("/api/trades?q=btc&res=win").get_data(as_text=True))
+        assert btc_win["total"] == 2 and all(x["r"] > 0 for x in btc_win["items"])
+        body = c.get("/api/trades?limit=100").get_data(as_text=True)
+        for bad in ("6226", "LTF", "setup", "123.456", "AAA"):
+            assert bad not in body
+        for q in ("limit=0", "limit=101", "offset=-1", "side=up", "res=x", "tf=2h", "q=a;b"):
+            assert c.get("/api/trades?" + q).status_code == 400, q
+
+
+def test_api_stats_splits_and_daily(fresh_db):
+    from app.webapp import app as flask_app
+    _closed("BTC/USDT:USDT", 2.0, "2026-10-20T05:00:00+00:00")
+    _closed("BTC/USDT:USDT", -1.0, "2026-10-20T09:00:00+00:00")
+    from app import clock
+    with flask_app.test_client() as c:
+        d = json.loads(c.get("/api/stats").get_data(as_text=True))
+    assert d["split_all"]["side"]["LONG"] == {"n": 2, "r": 1.0, "w": 1}
+    assert d["split_all"]["tf"]["1h"]["n"] == 2
+    if clock.utcnow().isoformat() < "2027-10-20":
+        assert {"d": "2026-10-20", "n": 2, "r": 1.0} in d["daily_all"]
+
+
+def test_api_me_sub_referral_and_prefs(fresh_db, webapp_token):
+    """«Моё»: карточка подписки, реф-ссылка, депозит/уведомления; /api/prefs — только
+    платнику, с валидацией."""
+    from app import db, runtime
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(500300, "sub")
+    db.execute("UPDATE users SET tier='paid', paid_until='2099-01-01T00:00:00+00:00' "
+               "WHERE tg_id=500300")
+    payments.register_user(500301, "free")
+    runtime.set_value("bot_username", "testbot")
+    hdr = {"Authorization": "tma " + _init_data("123:TEST", 500300),
+           "Content-Type": "application/json"}
+    with flask_app.test_client() as c:
+        me = json.loads(c.get("/api/me", headers=hdr).get_data(as_text=True))
+        assert me["sub"]["kind"] == "grant" and me["sub"]["days_left"] > 1000
+        assert me["referral"]["link"] == "https://t.me/testbot?start=ref_500300"
+        assert me["depo"] is None and me["notify"]["muted"] is False
+        ok = c.post("/api/prefs", headers=hdr, data=json.dumps({"depo_usd": 2500, "risk_pct": 1.5}))
+        assert ok.status_code == 200 and json.loads(ok.get_data(as_text=True))["depo"] == {
+            "usd": 2500.0, "risk": 1.5}
+        assert c.post("/api/prefs", headers=hdr,
+                      data=json.dumps({"depo_usd": 5, "risk_pct": 1})).status_code == 400
+        assert c.post("/api/prefs", headers=hdr,
+                      data=json.dumps({"quiet_start": 23, "quiet_end": 7})).status_code == 200
+        assert c.post("/api/prefs", headers=hdr,
+                      data=json.dumps({"quiet_start": 24, "quiet_end": 7})).status_code == 400
+        muted = json.dumps({"muted": True})
+        assert c.post("/api/prefs", headers=hdr, data=muted).status_code == 200
+        free = {"Authorization": "tma " + _init_data("123:TEST", 500301),
+                "Content-Type": "application/json"}
+        assert c.post("/api/prefs", headers=free, data=muted).status_code == 403
+        assert c.post("/api/prefs", data=muted).status_code == 401
+    assert payments.notify_prefs(500300) == {"muted": True, "quiet_start": 23, "quiet_end": 7}
+
+
+def test_admin_v6_endpoints_auth_and_no_secrets(fresh_db, admin_env):
+    """Новые админ-ручки: 403 не-админу; карточка юзера без api-ключей; журнал без тегов
+    сетапов; executor и расширенное здоровье отдаются."""
+    from app import db
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(700100, "alice")
+    db.execute("UPDATE users SET api_key_enc='SECRETKEY', api_secret_enc='SECRETSEC', "
+               "acquisition_source='chres' WHERE tg_id=700100")
+    _mk_open_with_setup()
+    adm = {"Authorization": "tma " + _init_data("123:TEST", 900500)}
+    usr = {"Authorization": "tma " + _init_data("123:TEST", 700100)}
+    paths = ("/api/admin/users", "/api/admin/user?id=700100", "/api/admin/signals",
+             "/api/admin/executor")
+    with flask_app.test_client() as c:
+        for p in paths:
+            assert c.get(p).status_code == 403, p
+            assert c.get(p, headers=usr).status_code == 403, p
+        lst = json.loads(c.get("/api/admin/users?q=ali", headers=adm).get_data(as_text=True))
+        assert lst["total"] == 1 and lst["items"][0]["status"] == "free"
+        one = c.get("/api/admin/user?id=700100", headers=adm).get_data(as_text=True)
+        assert "SECRET" not in one and json.loads(one)["user"]["src"] == "chres"
+        assert c.get("/api/admin/user?id=1", headers=adm).status_code == 404
+        sig = c.get("/api/admin/signals?view=open", headers=adm).get_data(as_text=True)
+        d = json.loads(sig)
+        assert d["total"] == 1 and d["items"][0]["entry"] == 123.456
+        assert "6226" not in sig and "setup" not in sig
+        assert c.get("/api/admin/signals?view=bad", headers=adm).status_code == 400
+        ex = json.loads(c.get("/api/admin/executor", headers=adm).get_data(as_text=True))
+        assert ex["ok"] and "summary" in ex and "live" in ex
+        full = json.loads(c.get("/api/admin", headers=adm).get_data(as_text=True))
+    assert {"funnel", "daily", "by_method"} <= set(full["money"])
+    assert {"log", "overdue", "power", "offsite_min"} <= set(full["health"])
+    assert set(full["shadow"]) == {"setup_off", "late_entry"}
+
+
+def test_admin_set_symbols_validation(fresh_db, admin_env):
+    from app import runtime
+    from app.webapp import app as flask_app
+    hdr = {"Authorization": "tma " + _init_data("123:TEST", 900500),
+           "Content-Type": "application/json"}
+    with flask_app.test_client() as c:
+        ok = c.post("/api/admin/set", headers=hdr, data=json.dumps(
+            {"key": "symbols", "value": "btc/usdt:usdt, ETH/USDT:USDT,\nBTC/USDT:USDT"}))
+        assert ok.status_code == 200
+        # верхний регистр, без дублей
+        assert runtime.symbols() == ["BTC/USDT:USDT", "ETH/USDT:USDT"]
+        bad = c.post("/api/admin/set", headers=hdr, data=json.dumps(
+            {"key": "symbols", "value": "BTCUSDT"}))
+        assert bad.status_code == 400
+        assert c.post("/api/admin/set", headers=hdr, data=json.dumps(
+            {"key": "min_stop_pct", "value": 11})).status_code == 400
+        assert c.post("/api/admin/set", headers=hdr, data=json.dumps(
+            {"key": "min_stop_pct", "value": 1.3})).status_code == 200

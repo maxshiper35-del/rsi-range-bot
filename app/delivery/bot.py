@@ -23,6 +23,8 @@ from app.brain.risk import calculate_position
 from app.brain.smc_setups import SMCEngine
 from app.core.signal_engine import Signal
 from app.delivery import graphics, templates
+from app.power import battery_alert_text, should_alert_battery
+from app.power import pmset_batt as _pmset_batt
 
 
 # ---------------------------------------------------------------------------
@@ -695,54 +697,6 @@ def result_is_fresh(c: dict, now: datetime, max_age_hours: float = 12.0) -> bool
     if closed.tzinfo is None:
         closed = closed.replace(tzinfo=timezone.utc)
     return (now - closed).total_seconds() <= max_age_hours * 3600
-
-
-def _pmset_batt() -> dict | None:
-    """Статус питания Mac (sync, через to_thread); не macOS / ошибка — None."""
-    import subprocess
-    import sys
-    if sys.platform != "darwin":
-        return None
-    try:
-        out = subprocess.run(["/usr/bin/pmset", "-g", "batt"], capture_output=True,
-                             text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return parse_pmset_batt(out)
-
-
-def parse_pmset_batt(text: str) -> dict | None:
-    """Вывод `pmset -g batt` -> {"on_battery", "pct", "remaining"}; None — не разобрать
-    (не Mac / нет батареи). 09.10.2026 зарядку отключили вечером, сон выключен — Mac
-    молча работал на батарее до 04:00, сел, и бот лежал 3.5 дня."""
-    src = re.search(r"Now drawing from '([^']+)'", text or "")
-    if not src:
-        return None
-    pct = re.search(r"(\d+)%", text)
-    rem = re.search(r"(\d+:\d+) remaining", text)
-    return {"on_battery": "Battery" in src.group(1),
-            "pct": int(pct.group(1)) if pct else None,
-            "remaining": rem.group(1) if rem else None}
-
-
-def should_alert_battery(status: dict | None, last_alert_at: str | None,
-                         now_iso: str) -> bool:
-    """На батарее — алерт раз в час, при заряде <= 20% — раз в 15 минут."""
-    if not status or not status["on_battery"]:
-        return False
-    if last_alert_at is None:
-        return True
-    every_min = 15 if (status["pct"] is not None and status["pct"] <= 20) else 60
-    age = (datetime.fromisoformat(now_iso) - datetime.fromisoformat(last_alert_at))
-    return age.total_seconds() >= every_min * 60
-
-
-def battery_alert_text(status: dict) -> str:
-    pct = f"{status['pct']}%" if status["pct"] is not None else "?"
-    rem = (f", осталось ~{status['remaining']}"
-           if status["remaining"] and status["remaining"] != "0:00" else "")
-    return (f"🔋 Mac работает от батареи: {pct}{rem}. Сон отключён — когда батарея сядет, "
-            "бот выключится и сделки останутся без сопровождения. Подключите зарядку.")
 
 
 def should_remind_pause(paused_since: str | None, last_reminder_at: str | None,
@@ -1739,6 +1693,10 @@ def main() -> None:
             # кнопка «поделиться карточкой» из Mini App: дашборд не умеет слать
             # файлы — deep-link приводит в DM, где бот рисует и отдаёт PNG
             await _send_mycard(m)
+            return
+        elif arg == "sub":
+            # кнопка «Продлить» из Mini App (24.10): сразу экран подписки с тарифами
+            await _subscribe(m)
             return
         elif arg.startswith("xray_") and arg[5:].isdecimal():
             # «Рентген сделки» из канала: показать анатомию ЗАКРЫТОГО сигнала и НЕ

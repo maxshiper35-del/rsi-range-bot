@@ -24,6 +24,9 @@
   --bg:#0b0e11; --panel:#14181d; --panel2:#232a32; --ink:#eaecef; --ink-2:#8a94a1;
   --ink-3:#5c6672; --line:#232a32; --grid:#1e242b; --surface:#14181d;
   --pos:#1f9e6e; --neg:#f6465d; --zero:#3a424c; --acc:#f7a600;
+  /* движение: сильный ease-out для откликов, ease-in-out для перемещений, iOS-кривая шторки */
+  --ease-out:cubic-bezier(.23,1,.32,1); --ease-io:cubic-bezier(.77,0,.175,1);
+  --ease-drawer:cubic-bezier(.32,.72,0,1);
 }
 *{margin:0;box-sizing:border-box}
 html{scroll-behavior:smooth}
@@ -43,13 +46,15 @@ header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;
   margin-left:auto;font-family:"IBM Plex Mono",ui-monospace,monospace}
 .live i{width:6px;height:6px;border-radius:50%;background:var(--acc);
   animation:pulse 2.2s ease-in-out infinite}
+.live{cursor:pointer;-webkit-tap-highlight-color:transparent}
+.live.busy i{animation:pulse .5s ease-in-out infinite}
+.hrow b.trunc{max-width:58%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 
 .tabs{display:inline-flex;background:var(--panel);border:1px solid var(--line);
   border-radius:6px;padding:2px;margin:10px 0 2px}
 .tab{padding:4px 12px;border-radius:4px;font-size:12px;color:var(--ink-2);cursor:pointer;
-  transition:color .15s,background .15s;user-select:none}
-.tab:hover{color:var(--ink)}
+  transition:color .15s ease,background-color .15s ease,transform 160ms var(--ease-out);user-select:none}
 .tab.on{background:var(--panel2);color:var(--ink);font-weight:600}
 
 /* сводка: доминирующий итог + колонка метрик — панель терминала */
@@ -90,14 +95,12 @@ svg{display:block;width:100%}
 .sq i{width:15px;height:15px;border-radius:3px;transition:transform .15s}
 .sq i.w{background:var(--pos)}
 .sq i.l{background:transparent;border:2px solid var(--neg)}   /* минус = контур, не только цвет */
-.sq i:hover{transform:translateY(-2px)}
 .sq .net{margin-left:auto;font-family:"IBM Plex Mono",ui-monospace,monospace;
   font-size:12.5px;color:var(--ink-2)}
 
 .pos-t{width:100%;border-collapse:collapse}
 .pos-t td{padding:7px 2px;border-top:1px solid var(--grid);font-size:12.5px;transition:background .15s}
 .pos-t tr:first-child td{border-top:none}
-.pos-t tr:hover td{background:color-mix(in srgb,var(--panel2) 45%,transparent)}
 .pos-t .sym{font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:600;font-size:12.5px}
 .pos-t .dim{text-align:right;color:var(--ink-3);font-size:11px;
   font-family:"IBM Plex Mono",ui-monospace,monospace}
@@ -120,6 +123,7 @@ tr[data-sid].busy{opacity:.45;pointer-events:none}
 .side-tag.l{color:var(--pos)} .side-tag.s{color:var(--neg)}
 
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:0 18px;align-items:start}
+@media (max-width:480px){.two-col{grid-template-columns:1fr;gap:4px}}
 .foot{font-size:10.5px;color:var(--ink-3);line-height:1.6;padding:12px 2px 0;margin-top:6px}
 .foot a{color:var(--ink-2)}
 .tip{position:fixed;pointer-events:none;background:var(--panel2);color:var(--ink);
@@ -128,13 +132,6 @@ tr[data-sid].busy{opacity:.45;pointer-events:none}
   z-index:9;white-space:nowrap}
 .warn{font-size:11px;color:color-mix(in srgb,var(--acc) 75%,var(--ink-2));margin-top:7px}
 
-.nav{display:flex;gap:2px;background:var(--panel);border:1px solid var(--line);
-  border-radius:6px;padding:2px;margin:10px 0 0;overflow-x:auto}
-.nav b{padding:5px 13px;border-radius:4px;font-size:12px;font-weight:500;color:var(--ink-2);
-  cursor:pointer;white-space:nowrap;user-select:none;transition:background .15s,color .15s}
-.nav b:hover{color:var(--ink)}
-.nav b.on{background:var(--panel2);color:var(--ink);font-weight:600}
-.nav b.adm.on{box-shadow:inset 0 -2px 0 var(--acc)}
 .tgl{position:relative;width:36px;height:20px;border-radius:10px;background:var(--panel2);
   cursor:pointer;transition:background .2s;flex:0 0 auto}
 .tgl::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;
@@ -150,22 +147,22 @@ tr[data-sid].busy{opacity:.45;pointer-events:none}
 .inp.wide{width:100%}
 .inp:focus{outline:none;border-color:var(--acc)}
 select.inp{width:auto}
-.btn{background:var(--panel2);border:1px solid var(--line);border-radius:5px;
-  color:var(--ink);font-size:12px;font-weight:600;padding:6px 14px;cursor:pointer;
-  transition:border-color .15s}
-.btn:hover{border-color:var(--acc)}
-.btn.danger:hover{border-color:var(--neg);color:var(--neg)}
+.btn{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
+  color:var(--ink);font-size:12px;font-weight:600;padding:7px 14px;cursor:pointer;
+  transition:border-color .15s ease,color .15s ease,transform 160ms var(--ease-out)}
+.btn:disabled{opacity:.5;cursor:default}
 .hrow{display:flex;justify-content:space-between;align-items:center;gap:10px;
   padding:8px 0;border-top:1px solid var(--grid);font-size:12.5px}
 .hrow:first-of-type{border-top:none}
 .hrow b{font-family:"IBM Plex Mono",ui-monospace,monospace}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px}
 .dot.ok{background:var(--pos)} .dot.bad{background:var(--neg)} .dot.na{background:var(--zero)}
-.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:20;
-  background:var(--panel2);border:1px solid var(--line);color:var(--ink);font-size:12.5px;
-  padding:8px 16px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
-.toast.show{opacity:1}
-.fx{opacity:0;transform:translateY(8px);animation:in .4s cubic-bezier(.2,.7,.3,1) forwards}
+.toast{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));z-index:70;
+  transform:translate(-50%,8px);background:var(--panel2);border:1px solid var(--line);color:var(--ink);
+  font-size:12.5px;padding:9px 16px;border-radius:10px;opacity:0;pointer-events:none;max-width:92vw;
+  box-shadow:0 8px 24px rgba(0,0,0,.35);transition:opacity 150ms ease,transform 150ms ease}
+.toast.show{opacity:1;transform:translate(-50%,0);transition:opacity 200ms ease,transform 220ms var(--ease-out)}
+.fx{opacity:0;transform:translateY(8px);animation:in 320ms var(--ease-out) forwards}
 @keyframes in{to{opacity:1;transform:none}}
 /* скелетоны («синабоны», фидбэк 31.08): призрак реального лейаута с шиммером,
    а не безликие полоски — юзер сразу видит, ЧТО грузится */
@@ -187,7 +184,12 @@ select.inp{width:auto}
 .skel-grid{display:flex;gap:8px;margin-top:8px}
 .skel-grid .skel{flex:1;margin-top:0;height:58px}
 @keyframes sh{to{background-position:-220% 0}}
-@media (prefers-reduced-motion: reduce){.fx,.live i,.skel::after{animation:none;opacity:1;transform:none}}
+@media (prefers-reduced-motion: reduce){
+  .fx,.live i,.skel::after,#app.swap{animation:none;opacity:1;transform:none}
+  .sheet-box,.sheet.show .sheet-box,#chartModal .cm-box,.toast,.toast.show,.tb-ind{transition:opacity .15s ease;transform:none}
+  .toast{transform:translate(-50%,0)}
+  .btn:active,.chip:active,.pill:active,.tab:active,.tb:active,.tgl:active{transform:none}
+}
 
 /* --- бэктест по месяцам (тепловая сетка) --- */
 .bt-wrap{overflow-x:auto;scrollbar-width:none}
@@ -223,8 +225,8 @@ select.inp{width:auto}
 /* --- симулятор депозита --- */
 .chip{display:inline-block;padding:2px 10px;margin-left:5px;border:1px solid rgba(139,147,167,.25);
   border-radius:20px;cursor:pointer;font-size:10.5px;color:var(--ink-2);
-  font-family:"IBM Plex Mono",ui-monospace,monospace;transition:all .15s}
-.chip:active{transform:scale(.94)}
+  font-family:"IBM Plex Mono",ui-monospace,monospace;
+  transition:background-color .15s ease,border-color .15s ease,color .15s ease,transform 160ms var(--ease-out)}
 .chip.on{background:var(--acc);border-color:var(--acc);color:#0b0e14;font-weight:700}
 .sim-hero{display:flex;align-items:baseline;gap:10px;margin:2px 0 4px;flex-wrap:wrap}
 .sim-start{font-size:15px;color:var(--ink-2);font-family:"IBM Plex Mono",ui-monospace,monospace}
@@ -245,8 +247,12 @@ select.inp{width:auto}
 tr[data-chart]{cursor:pointer}
 tr[data-chart]:active{background:rgba(139,147,167,.08)}
 .pos-t .chb{width:26px;text-align:right;cursor:pointer;font-size:12px;opacity:.75}
-#chartModal{display:none;position:fixed;inset:0;background:rgba(5,7,12,.88);z-index:100;
-  align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+#chartModal{display:flex;position:fixed;inset:0;background:rgba(5,7,12,.88);z-index:100;
+  align-items:center;justify-content:center;opacity:0;visibility:hidden;
+  transition:opacity 160ms ease,visibility 0s linear 180ms}
+#chartModal.show{opacity:1;visibility:visible;transition:opacity 220ms ease}
+#chartModal .cm-box{transform:scale(.96);transition:transform 160ms ease}
+#chartModal.show .cm-box{transform:none;transition:transform 240ms var(--ease-out)}
 .cm-box{position:relative;width:min(96vw,860px);height:min(74vh,560px);
   background:var(--bg,#0b0e14);border:1px solid rgba(139,147,167,.2);border-radius:10px;
   display:flex;flex-direction:column;overflow:hidden}
@@ -256,6 +262,121 @@ tr[data-chart]:active{background:rgba(139,147,167,.08)}
 .cm-body{flex:1;min-height:0;position:relative}
 .cm-x{position:absolute;top:5px;right:8px;background:none;border:0;color:var(--ink-2);
   font-size:22px;cursor:pointer;line-height:1;padding:4px}
+
+/* ---- v6: нижняя панель вкладок (Mini App), подвкладки админки, новые блоки ---- */
+/* нажатие: мгновенный отклик (scale 0.97) — интерфейс «слышит» палец */
+.btn:active,.chip:active,.pill:active,.tab:active,.tb:active,.tgl:active,.lnk:active{transform:scale(.97)}
+tr[data-chart],tr[data-user],.pc{transition:background-color .15s ease}
+tr[data-chart]:active td,tr[data-user]:active td,.pc:active{background:color-mix(in srgb,var(--panel2) 55%,transparent)}
+@media (hover:hover) and (pointer:fine){
+  .tab:hover,.tb:hover,.pill:hover{color:var(--ink)}
+  .btn:hover{border-color:var(--acc)}
+  .btn.danger:hover{border-color:var(--neg);color:var(--neg)}
+  .pos-t tr:hover td{background:color-mix(in srgb,var(--panel2) 45%,transparent)}
+  .pc:hover{background:color-mix(in srgb,var(--panel2) 30%,transparent)}
+  .chip:hover{border-color:color-mix(in srgb,var(--acc) 50%,var(--line))}
+}
+/* смена вкладки — короткая подача содержимого, а не каскад секций */
+#app.swap{animation:swap 200ms var(--ease-out)}
+@keyframes swap{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+body{padding-bottom:calc(76px + env(safe-area-inset-bottom))}
+.tabbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;justify-content:center;
+  background:color-mix(in srgb,var(--panel) 94%,transparent);backdrop-filter:blur(10px);
+  border-top:1px solid var(--line);padding:6px 6px calc(6px + env(safe-area-inset-bottom))}
+.tabbar-in{display:flex;width:100%;max-width:680px}
+.tb{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 0 4px;
+  background:none;border:0;color:var(--ink-3);font:500 10.5px Inter,system-ui,sans-serif;
+  cursor:pointer;border-radius:8px;transition:color .15s,background .15s}
+.tb svg{width:21px;height:21px;stroke:currentColor;fill:none;stroke-width:1.75;
+  stroke-linecap:round;stroke-linejoin:round}
+.tb{position:relative;z-index:1;transition:color .2s ease,transform 160ms var(--ease-out)}
+.tb svg{transition:stroke .2s ease}
+.tb.on{color:var(--ink)}
+.tb.on svg{stroke:var(--acc)}
+.tabbar-in{position:relative}
+.tb-ind{position:absolute;top:2px;bottom:2px;left:0;border-radius:12px;background:var(--panel2);
+  transition:transform 260ms var(--ease-io),opacity .2s ease;pointer-events:none}
+.tb:focus-visible,.btn:focus-visible,.chip:focus-visible,.pill:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.subnav{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;margin:10px 0 2px;padding-bottom:2px}
+.subnav::-webkit-scrollbar{display:none}
+.pill{flex:0 0 auto;padding:6px 12px;border-radius:16px;border:1px solid var(--line);background:var(--panel);
+  color:var(--ink-2);font:500 12px Inter,system-ui,sans-serif;cursor:pointer;white-space:nowrap;
+  transition:background-color .15s ease,border-color .15s ease,color .15s ease,transform 160ms var(--ease-out)}
+.pill.on{background:var(--panel2);color:var(--ink);border-color:color-mix(in srgb,var(--acc) 55%,var(--line))}
+.pill .cnt{margin-left:6px;font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:var(--ink-3)}
+.row-f{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 8px}
+.row-f .chip{margin-left:0}
+.search{flex:1;min-width:120px;background:var(--bg);border:1px solid var(--line);border-radius:6px;
+  color:var(--ink);font:12.5px Inter,system-ui,sans-serif;padding:7px 10px}
+.search:focus{outline:none;border-color:var(--acc)}
+.more{display:block;width:100%;margin-top:8px;text-align:center}
+.badge{display:inline-block;padding:1px 7px;border-radius:4px;font:600 10px "IBM Plex Mono",monospace;
+  letter-spacing:.03em;border:1px solid var(--line);color:var(--ink-2);white-space:nowrap}
+.badge.pos{color:var(--pos);border-color:color-mix(in srgb,var(--pos) 45%,var(--line))}
+.badge.neg{color:var(--neg);border-color:color-mix(in srgb,var(--neg) 45%,var(--line))}
+.badge.acc{color:var(--acc);border-color:color-mix(in srgb,var(--acc) 45%,var(--line))}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:12px;margin:2px 0 4px}
+.kv span{color:var(--ink-3)} .kv b{font-family:"IBM Plex Mono",monospace;font-weight:500;text-align:right}
+.bar{height:6px;border-radius:3px;background:var(--panel2);overflow:hidden;margin:8px 0 4px}
+.bar i{display:block;height:100%;background:var(--acc);border-radius:3px}
+.cards{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.card .t{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
+.card .v{font:600 18px "IBM Plex Mono",monospace;margin-top:3px}
+.card .s{font-size:10.5px;color:var(--ink-3);margin-top:2px}
+.funnel .fr{display:grid;grid-template-columns:110px 1fr 70px;gap:8px;align-items:center;
+  font-size:11.5px;padding:4px 0}
+.funnel .fb{height:14px;border-radius:3px;background:color-mix(in srgb,var(--acc) 70%,transparent)}
+.funnel .fn{font-family:"IBM Plex Mono",monospace;text-align:right;color:var(--ink-2)}
+.cal{display:block;width:100%}
+.cal-leg{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--ink-3);margin-top:6px}
+.cal-leg i{width:10px;height:10px;border-radius:2px;display:inline-block}
+.pos-t tr.szr td{border-top:none;padding-top:0}
+html,body{overflow-x:clip}   /* clip, не hidden: hidden делает body контейнером прокрутки и ломает sticky-шапку */
+.pc{padding:9px 2px 8px;border-top:1px solid var(--grid);cursor:pointer;-webkit-tap-highlight-color:transparent}
+.pc:first-child{border-top:none}
+.pc.pend .sym,.pc.pend .side-tag{opacity:.55}
+.pc.busy{opacity:.45;pointer-events:none}
+.pc-top{display:flex;align-items:center;gap:7px;min-width:0}
+.pc-top .ck{font:14px "IBM Plex Mono",monospace;color:var(--ink-3);user-select:none}
+.pc-top .meta{font:11px "IBM Plex Mono",monospace;color:var(--ink-3);white-space:nowrap}
+.pc-r{margin-left:auto;font:600 12.5px "IBM Plex Mono",monospace;white-space:nowrap}
+.pc .chb{width:auto;padding-left:4px}
+.pc-lv{font:11px "IBM Plex Mono",monospace;color:var(--ink-3);margin:3px 0 0 27px;line-height:1.55}
+.pc-lv b{color:var(--ink-2);font-weight:500}
+.pc .sz{padding:1px 0 0 27px}
+.calc{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:6px 8px;align-items:center}
+.calc .inp{width:100%}
+.calc .lnk{grid-column:1/-1;justify-self:start;text-align:left;font-size:11px}
+.pc-r .st{font:500 10.5px "IBM Plex Mono",monospace;color:var(--ink-3);letter-spacing:.03em}
+.sz{font:11px "IBM Plex Mono",monospace;color:var(--ink-3);padding:0 0 7px 2px}
+.sz b{color:var(--ink-2);font-weight:500}
+.sz .warnx{color:var(--neg)}
+.calc{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11.5px;color:var(--ink-3);margin:0 0 8px}
+.calc .inp{width:92px}
+.sheet{position:fixed;inset:0;z-index:60;background:rgba(5,7,12,.7);display:flex;align-items:flex-end;
+  justify-content:center;opacity:0;visibility:hidden;
+  transition:opacity 200ms ease,visibility 0s linear 220ms}
+.sheet.show{opacity:1;visibility:visible;transition:opacity 260ms ease}
+.sheet-box{width:100%;max-width:680px;max-height:86vh;overflow:auto;background:var(--bg);
+  border:1px solid var(--line);border-bottom:0;border-radius:16px 16px 0 0;
+  padding:8px 14px calc(18px + env(safe-area-inset-bottom));
+  transform:translateY(100%);transition:transform 220ms var(--ease-out)}
+.sheet.show .sheet-box{transform:none;transition:transform 400ms var(--ease-drawer)}
+.sheet-box.drag{transition:none}
+.grab{width:36px;height:4px;border-radius:2px;background:var(--panel2);margin:0 auto 10px;touch-action:none}
+.sheet-h{display:flex;align-items:center;gap:8px;margin-bottom:10px;touch-action:none}
+.sheet-h b{font:600 15px "IBM Plex Mono",monospace}
+.sheet-x{margin-left:auto;background:none;border:0;color:var(--ink-2);font-size:24px;cursor:pointer;line-height:1}
+.log{font:10.5px/1.45 "IBM Plex Mono",monospace;color:var(--ink-2);max-height:340px;overflow:auto;
+  white-space:pre-wrap;word-break:break-word}
+.log div{padding:4px 0;border-top:1px solid var(--grid)}
+.log div.e{color:var(--neg)}
+textarea.inp{width:100%;min-height:72px;resize:vertical;font-size:11.5px}
+.empty{padding:22px 8px;text-align:center;color:var(--ink-3);font-size:12px}
+.lnk{color:var(--acc);text-decoration:none;cursor:pointer;background:none;border:0;font:inherit;padding:0}
+@media (max-width:420px){.funnel .fr{grid-template-columns:92px 1fr 62px}}
 </style>
 </head>
 <body>
@@ -264,7 +385,7 @@ tr[data-chart]:active{background:rgba(139,147,167,.08)}
   <div class="wordmark">RSI&thinsp;RANGE</div>
   <div class="live"><i></i><span id="upd">подключение…</span></div>
 </header>
-<div class="nav" id="nav" style="display:none"></div>
+<div class="subnav" id="subnav" style="display:none"></div>
 <div class="tabs" id="scope">
   <div class="tab on" data-s="epoch">текущая стратегия</div>
   <div class="tab" data-s="all">вся история</div>
@@ -291,6 +412,17 @@ if (inTg) { tg.ready(); tg.expand();
   if (tg.setBackgroundColor) try { tg.setBackgroundColor("#0b0e11"); } catch (e) {} }
 
 let DATA = null, ME = null, ADM = null, SCOPE = "epoch", NAV = "over", BT = null;
+// виброотклик Telegram: выбор (вкладки, чипы), касание (действия), итог (успех/ошибка)
+const hap = t => { try { const h = tg && tg.HapticFeedback; if (!h) return;
+  if (t === "sel") h.selectionChanged(); else if (t === "ok") h.notificationOccurred("success");
+  else if (t === "err") h.notificationOccurred("error"); else h.impactOccurred(t || "light"); } catch (e) {} };
+const REDUCED = !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
+let SWAP = false;
+// localStorage — только удобства зрителя (вкладка, период, калькулятор); недоступен — дефолты
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("rsi." + k); return v == null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem("rsi." + k, v); } catch (e) {} },
+};
 let CLOSED_FILTER = "all";
 let toastT = 0;
 function toast(t) {
@@ -343,46 +475,288 @@ function pick() {
            hold: useEpoch ? DATA.hold_epoch : DATA.hold_all,
            rs: useEpoch ? (DATA.r_epoch || []) : (DATA.r_all || []),
            sp: useEpoch ? (DATA.sp_epoch || []) : (DATA.sp_all || []),
-           hh: useEpoch ? (DATA.h_epoch || []) : (DATA.h_all || []) };
+           hh: useEpoch ? (DATA.h_epoch || []) : (DATA.h_all || []),
+           daily: useEpoch ? (DATA.daily_epoch || []) : (DATA.daily_all || []),
+           split: useEpoch ? DATA.split_epoch : DATA.split_all };
 }
 
+// период эквити: точки с даты отсечки, кривая пересчитана от нуля на её начале
+let EQP = store.get("eqp", "all"), EQ_SHOWN = [];
+function eqSlice(eq, p) {
+  if (p === "all" || !eq.length) return eq;
+  const cut = new Date(Date.now() - (+p) * 864e5).toISOString().slice(0, 10);
+  let base = 0;
+  const out = [];
+  for (const x of eq) { if (x.t < cut) base = x.r; else out.push({t: x.t, r: +(x.r - base).toFixed(2)}); }
+  return out.length >= 2 ? [{t: cut, r: 0}, ...out] : eq;
+}
+
+// календарь: 26 недель × 7 дней, итог дня в R (как contribution-график)
+function calSVG(daily) {
+  const map = new Map(daily.map(x => [x.d, x]));
+  const C = 11, G = 2, L = 18, T = 14, WEEKS = 26;
+  const now = new Date(), end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const start = new Date(end); start.setUTCDate(end.getUTCDate() - ((end.getUTCDay() + 6) % 7) - (WEEKS - 1) * 7);
+  const vmax = Math.max(1, ...daily.map(x => Math.abs(x.r)));
+  const MN = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+  let g = "", lastM = -1;
+  ["пн", "", "ср", "", "пт", "", ""].forEach((t, i) => {
+    if (t) g += `<text x="0" y="${T + i * (C + G) + 9}" font-size="8" fill="var(--ink-3)" font-family="IBM Plex Mono,monospace">${t}</text>`;
+  });
+  for (let w = 0; w < WEEKS; w++) {
+    for (let d = 0; d < 7; d++) {
+      const day = new Date(start); day.setUTCDate(start.getUTCDate() + w * 7 + d);
+      if (day > end) continue;
+      const k = day.toISOString().slice(0, 10), v = map.get(k);
+      if (d === 0 && day.getUTCMonth() !== lastM) {
+        lastM = day.getUTCMonth();
+        g += `<text x="${L + w * (C + G)}" y="9" font-size="8" fill="var(--ink-3)" font-family="IBM Plex Mono,monospace">${MN[lastM]}</text>`;
+      }
+      let fill = "var(--panel2)", op = .45;
+      if (v) {
+        op = .3 + .7 * Math.min(1, Math.abs(v.r) / vmax);
+        fill = v.r > 0 ? "var(--pos)" : v.r < 0 ? "var(--neg)" : "var(--zero)";
+        if (!v.r) op = 1;
+      }
+      const tt = `${k.slice(8, 10)}.${k.slice(5, 7)} · ${v ? fmtR(v.r, 2) + " · " + v.n + " сд." : "сделок нет"}`;
+      g += `<rect x="${L + w * (C + G)}" y="${T + d * (C + G)}" width="${C}" height="${C}" rx="2" fill="${fill}" opacity="${op}" data-tt="${tt}"/>`;
+    }
+  }
+  return `<svg class="cal" viewBox="0 0 ${L + WEEKS * (C + G)} ${T + 7 * (C + G)}">${g}</svg>`;
+}
+
+function splitTable(obj, order, label) {
+  const keys = order.filter(k => obj && obj[k]).concat(Object.keys(obj || {}).filter(k => !order.includes(k)));
+  if (!keys.length) return "";
+  return `<table class="pos-t">${keys.map(k => {
+    const v = obj[k];
+    return `<tr><td>${label(k)}</td><td class="dim">${v.n} сд.</td>
+      <td class="dim">WR ${v.n ? Math.round(v.w / v.n * 100) : 0}%</td>
+      <td class="urc"><b class="${v.r >= 0 ? "up" : "dn"}">${fmtR(v.r)}</b></td></tr>`;
+  }).join("")}</table>`;
+}
+
+const ICONS = {
+  over: '<svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg>',
+  trades: '<svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>',
+  mine: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>',
+  admin: '<svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>',
+};
+const ADMIN_TABS = [["users", "Юзеры"], ["money", "Деньги"], ["signals", "Сигналы"],
+                    ["exec", "Executor"], ["settings", "Настройки"], ["system", "Система"]];
+let ANAV = "users";
+NAV = store.get("nav", "over"); ANAV = store.get("anav", "users");
+{ const sp = inTg && tg.initDataUnsafe && tg.initDataUnsafe.start_param;   // t.me/bot/app?startapp=trades
+  if (["over", "trades", "mine", "admin"].includes(sp)) NAV = sp; }
+
 function navItems() {
-  const out = [["over", "Обзор"]];
+  const out = [["over", "Обзор"], ["trades", "Сделки"]];
   if (ME && ME.private) out.push(["mine", "Моё"]);
-  if (ME && ME.admin) out.push(["users", "Юзеры"], ["settings", "Настройки"], ["system", "Система"]);
+  if (ME && ME.admin) out.push(["admin", "Админ"]);
   return out;
 }
 
+// сохранённая вкладка («Админ») ждёт прихода прав, а не сбрасывается навсегда
+const curNav = () => navItems().some(([k]) => k === NAV) ? NAV : "over";
+
+let NAV_KEYS = "";
 function renderNav() {
-  const items = navItems();
-  const nav = $("#nav");
-  if (items.length < 2) { nav.style.display = "none"; return; }
-  nav.style.display = "";
-  nav.innerHTML = items.map(([k, t]) =>
-    `<b data-nav="${k}" class="${k === NAV ? "on" : ""} ${["users", "settings", "system"].includes(k) ? "adm" : ""}">${t}</b>`).join("");
+  const items = navItems(), cur = curNav(), keys = items.map(x => x[0]).join(",");
+  const box = $("#tabbarIn");
+  if (keys !== NAV_KEYS) {                  // состав вкладок сменился (пришли права) — пересобрать
+    NAV_KEYS = keys;
+    box.innerHTML = `<i class="tb-ind" style="opacity:0"></i>` + items.map(([k, t]) =>
+      `<button class="tb" data-nav="${k}" aria-label="${t}">${ICONS[k]}<span>${t}</span></button>`).join("");
+  }
+  box.querySelectorAll(".tb").forEach(b => {
+    const on = b.dataset.nav === cur;
+    b.classList.toggle("on", on);
+    if (on) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+  });
+  const act = box.querySelector(`.tb[data-nav="${cur}"]`), ind = box.querySelector(".tb-ind");
+  if (act && ind) {
+    const first = ind.style.opacity === "0";
+    if (first) ind.style.transition = "none";
+    ind.style.width = (act.offsetWidth - 10) + "px";
+    ind.style.transform = `translateX(${act.offsetLeft + 5}px)`;
+    if (first) { void ind.offsetWidth; ind.style.transition = ""; ind.style.opacity = "1"; }
+  }
+  const sn = $("#subnav");
+  if (cur === "admin") {
+    sn.style.display = "";
+    const cnt = {signals: ADM && ADM.open_signals ? ADM.open_signals.length : null,
+                 exec: null};
+    sn.innerHTML = ADMIN_TABS.map(([k, t]) =>
+      `<button class="pill ${k === ANAV ? "on" : ""}" data-anav="${k}">${t}${cnt[k] != null ? `<span class="cnt">${cnt[k]}</span>` : ""}</button>`).join("");
+  } else sn.style.display = "none";
 }
 
 function render(noAnim) {
+  const ae = document.activeElement;
+  const fid = ae && ae.id && ae.closest && ae.closest("#app") ? ae.id : null;
+  let caret = null;
+  try { caret = fid ? ae.selectionStart : null; } catch (e) {}
+  renderTab(noAnim);
+  if (SWAP) {
+    SWAP = false;
+    const a = $("#app"); a.classList.remove("swap"); void a.offsetWidth; a.classList.add("swap");
+  }
+  if (fid) {
+    const el = document.getElementById(fid);
+    if (el) { el.focus(); try { if (caret != null) el.setSelectionRange(caret, caret); } catch (e) {} }
+  }
+}
+
+function renderTab(noAnim) {
   $("#tip").style.opacity = 0;
   renderNav();
-  $("#scope").style.display = (NAV === "over" && DATA && DATA.epoch) ? "" : "none";
-  if (NAV === "mine") return renderMine(noAnim);
-  if (NAV === "users") return renderUsers();
-  if (NAV === "settings") return renderSettings();
-  if (NAV === "system") return renderSystem();
+  const nav = curNav();
+  $("#scope").style.display = (nav === "over" && DATA && DATA.epoch) ? "" : "none";
+  if (nav === "trades") return renderTrades();
+  if (nav === "mine") return renderMine(noAnim);
+  if (nav === "admin") {
+    if (ANAV === "money") return renderMoney();
+    if (ANAV === "signals") return renderSignals();
+    if (ANAV === "exec") return renderExec();
+    if (ANAV === "settings") return renderSettings();
+    if (ANAV === "system") return renderSystem();
+    return renderUsers();
+  }
   return renderOverview(noAnim);
+}
+
+// ---- вкладка «Сделки»: публичная история закрытых с фильтрами и подгрузкой ----
+const TR = {side: "", res: "", tf: "", q: "", items: [], total: null, sum: 0, wins: 0,
+            loading: false, seq: 0};
+function trQuery(offset) {
+  const p = new URLSearchParams({offset, limit: 40});
+  for (const k of ["side", "res", "tf", "q"]) if (TR[k]) p.set(k, TR[k]);
+  return "api/trades?" + p.toString();
+}
+function trLoad(reset) {
+  const seq = ++TR.seq;
+  if (reset) { TR.items = []; TR.total = null; }
+  TR.loading = true;
+  if (curNav() === "trades") render(true);
+  fetch(trQuery(reset ? 0 : TR.items.length)).then(r => r.ok ? r.json() : null).then(d => {
+    if (seq !== TR.seq) return;                       // ответ на устаревший фильтр
+    TR.loading = false;
+    if (d && d.ok) {
+      TR.items = reset ? d.items : TR.items.concat(d.items);
+      TR.total = d.total; TR.sum = d.sum_r; TR.wins = d.wins;
+    } else if (reset) TR.total = 0;
+    if (curNav() === "trades") render(true);
+  }).catch(() => { if (seq === TR.seq) { TR.loading = false; if (curNav() === "trades") render(true); } });
+}
+function renderTrades() {
+  if (TR.total === null && !TR.loading) { trLoad(true); return; }   // trLoad сам перерисует
+  const chips = (key, defs) => defs.map(([v, t]) =>
+    `<b class="chip${TR[key] === v ? " on" : ""}" data-trf="${key}" data-v="${v}">${t}</b>`).join("");
+  const tfs = DATA && DATA.split_all ? Object.keys(DATA.split_all.tf || {}).sort() : ["1h", "4h"];
+  let h = `<section><div class="sec-h"><h2>ИСТОРИЯ СДЕЛОК</h2>
+      <span class="note">все закрытые · тап — график</span></div>
+    <div class="row-f">${chips("side", [["", "все"], ["long", "▲"], ["short", "▼"]])}
+      ${chips("res", [["", "±"], ["win", "+"], ["loss", "−"]])}
+      ${chips("tf", [["", "все ТФ"], ...tfs.map(t => [t, t])])}</div>
+    <div class="row-f"><input class="search" id="trq" placeholder="монета: BTC, ETH…" value="${esc(TR.q)}"
+      autocomplete="off" autocapitalize="characters" maxlength="15"></div>`;
+  if (TR.total === null) {
+    h += `<div class="sk w85"></div><div class="sk w60"></div><div class="sk w85"></div>`;
+  } else if (!TR.total) {
+    h += `<div class="empty">по фильтру сделок нет</div>`;
+  } else {
+    const wr = TR.total ? Math.round(TR.wins / TR.total * 100) : 0;
+    h += `<div class="mystat">${TR.total} сд. · итог <b class="${TR.sum >= 0 ? "up" : "dn"}">${fmtR(TR.sum)}</b> · winrate <b>${wr}%</b> · на сделку <b>${fmtR(TR.sum / TR.total, 2)}</b></div>
+      <table class="pos-t">${TR.items.map(o =>
+        `<tr data-chart="${o.id}"><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.s)}</span></td>
+         <td class="dim">${esc(o.tf)}</td><td class="dim">${esc(o.d.slice(5))}</td>
+         <td class="dim">${o.h != null ? (o.h >= 48 ? Math.round(o.h / 24) + "д" : Math.round(o.h) + "ч") : ""}</td>
+         <td class="urc"><b class="${o.r >= 0 ? "up" : "dn"}">${fmtR(o.r, 2)}</b></td></tr>`).join("")}</table>
+      ${TR.items.length < TR.total ? `<button class="btn more" data-trmore="1"${TR.loading ? " disabled" : ""}>${TR.loading ? "загрузка…" : `показать ещё · ${TR.total - TR.items.length}`}</button>` : ""}`;
+  }
+  h += `</section><div class="foot">Это та же история, что в /trackrecord у бота (CSV + SHA-256). Сделки без входа (лимитка не исполнилась) не считаются. ⚠ Не финансовый совет.</div>`;
+  const focused = document.activeElement && document.activeElement.id === "trq";
+  const caret = focused ? document.activeElement.selectionStart : null;
+  $("#app").innerHTML = h;
+  if (focused) { const el = $("#trq"); el.focus(); try { el.setSelectionRange(caret, caret); } catch (e) {} }
+}
+
+// калькулятор объёма: депозит и риск — из /depo бота (сервер), иначе локальные дефолты
+let CALC = null;
+function calcState() {
+  if (!CALC) {
+    const d = ME && ME.depo;
+    CALC = {usd: d ? d.usd : +store.get("calc.usd", 1000), risk: d ? d.risk : +store.get("calc.risk", 1)};
+  }
+  return CALC;
+}
+const fmtQty = q => q >= 1000 ? Math.round(q).toLocaleString("en-US") : q >= 100 ? q.toFixed(0)
+  : q >= 1 ? q.toFixed(2) : q.toPrecision(3);
+function sizing(o) {
+  const c = calcState(), per = Math.abs(o.entry - o.stop);
+  if (!per || !(c.usd > 0) || !(c.risk > 0)) return "";
+  const riskUsd = c.usd * c.risk / 100, qty = riskUsd / per, notional = qty * o.entry;
+  const lev = notional / c.usd;
+  return `<div class="sz">объём <b>${fmtQty(qty)}</b> · номинал <b>$${Math.round(notional).toLocaleString("en-US")}</b> · плечо <b class="${lev > 20 ? "warnx" : ""}">×${lev.toFixed(1)}</b> · риск <b>$${riskUsd.toFixed(riskUsd >= 100 ? 0 : 2)}</b>${lev > 20 ? ' <span class="warnx">— выше ×20, уменьши риск</span>' : ""}</div>`;
+}
+
+function subCard() {
+  const sb = ME.sub;
+  if (!sb) return "";
+  const active = sb.days_left != null && sb.days_left > 0;
+  if (!active && ME.admin) {
+    return `<section><div class="sec-h"><h2>ДОСТУП</h2><span class="note"><span class="badge acc">админ</span></span></div>
+      <div class="mystat">Полный доступ по правам админа — подписка не нужна.</div></section>`;
+  }
+  const kind = {paid: "подписка", trial: "триал", grant: "доступ от админа", free: "нет подписки"}[sb.kind] || sb.kind;
+  const left = !active ? "истекла"
+    : sb.days_left >= 1 ? `${Math.floor(sb.days_left)} дн.` : `${Math.max(1, Math.round(sb.days_left * 24))} ч`;
+  const pct = active ? Math.min(100, sb.days_left / Math.max(1, sb.sub_days) * 100) : 0;
+  return `<section><div class="sec-h"><h2>ПОДПИСКА</h2>
+      <span class="note"><span class="badge ${active ? "pos" : "neg"}">${esc(kind)}</span></span></div>
+    <div class="kv"><span>${active ? "активна до" : "закончилась"}</span><b>${esc(sb.until || "—")}</b>
+      <span>осталось</span><b class="${active ? "" : "dn"}">${left}</b>
+      <span>цена</span><b>${sb.price_stars}⭐ / ${sb.sub_days >= 1 ? Math.round(sb.sub_days) + " дн." : Math.round(sb.sub_days * 24) + " ч"}</b></div>
+    ${active ? `<div class="bar"><i style="width:${pct.toFixed(0)}%"></i></div>` : ""}
+    ${ME.bot ? `<button class="btn" data-open="sub" style="margin-top:6px">${active ? "Продлить" : "Оформить"} подписку</button>` : ""}
+    </section>`;
+}
+
+function refCard() {
+  const rf = ME.referral;
+  if (!rf || !rf.link) return "";
+  return `<section><div class="sec-h"><h2>ПРИГЛАСИ ДРУГА</h2>
+      <span class="note">+${rf.reward_days} дн. за каждого оплатившего</span></div>
+    <div class="row-f"><input class="search mono" readonly value="${esc(rf.link)}" id="reflink" style="font-size:11px">
+      <button class="btn" data-ref="copy">Копировать</button>
+      ${inTg ? `<button class="btn" data-ref="share">Поделиться</button>` : ""}</div>
+    <div class="mystat">приглашено <b>${rf.invited}</b> · оплатили <b>${rf.rewarded}</b> · начислено <b>${rf.rewarded * rf.reward_days}</b> дн.</div>
+    </section>`;
+}
+
+function notifyCard() {
+  const n = ME.notify;
+  if (!n) return "";
+  const hours = (sel, v) => `<select class="inp" data-pref="${sel}"><option value="">—</option>${
+    Array.from({length: 24}, (_, i) => `<option value="${i}" ${v === i ? "selected" : ""}>${String(i).padStart(2, "0")}:00</option>`).join("")}</select>`;
+  return `<section><div class="sec-h"><h2>УВЕДОМЛЕНИЯ</h2><span class="note">личка с ботом</span></div>
+    <div class="set-row"><div class="lbl">Присылать сигналы в личку</div>
+      <div class="tgl ${n.muted ? "" : "on"}" data-pref="muted"></div></div>
+    <div class="set-row"><div class="lbl">Тихие часы (UTC)<br><span class="key">сигналы в это время не будят</span></div>
+      ${hours("quiet_start", n.quiet_start)}<span class="dim">→</span>${hours("quiet_end", n.quiet_end)}</div>
+    </section>`;
 }
 
 function renderMine(noAnim) {
   let fx = 0;
   const sec = inner => noAnim ? `<div>${inner}</div>`
-    : `<div class="fx" style="animation-delay:${(fx++) * 70}ms">${inner}</div>`;
+    : `<div class="fx" style="animation-delay:${Math.min(fx++, 8) * 45}ms">${inner}</div>`;
   let h = "";
   if (!(ME && ME.private)) {
     $("#app").innerHTML = `<div class="warn" style="padding:30px 0;text-align:center">Раздел для подписчиков</div>`;
     return;
   }
-
+    h += sec(subCard());
     const ss = ME.since_stats, pos = ME.positions || [], tk = ME.taken || [];
     const fmtP = v => String(+v);
     const ckb = id => `<td class="ck">${tk.includes(id) ? "▣" : "▢"}</td>`;
@@ -396,16 +770,26 @@ function renderMine(noAnim) {
     }
     const rcls = (o, pend) => [pend ? "pend" : "", PENDING.has(o.id) ? "busy" : ""]
       .filter(Boolean).join(" ");
-    const rows = pos.map(o =>
-      `<tr data-sid="${o.id}" class="${rcls(o, o.in_pos === false)}">${ckb(o.id)}<td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span></td>
-       <td class="dim">${esc(o.tf)}</td><td class="lv">${fmtP(o.entry)} → ${fmtP(o.stop)}${o.tp1 ? `<span class="dim"> · цель ${fmtP(o.tp1)}</span>` : ""}</td>
-       <td class="urc">${o.in_pos === false ? `<span class="st">ждёт входа</span>` : o.ur != null ? `<b class="${o.ur >= 0 ? "up" : "dn"}">${fmtR(o.ur, 2)}</b>` : `<span class="dim">—</span>`}</td>
-       <td class="dim">${o.age_h != null ? Math.round(o.age_h) + "ч" : ""}</td>
-       <td class="chb" data-chart="${o.id}">📈</td></tr>`).join("");
+    const c = calcState();
+    const rows = pos.map(o => {
+      const res = o.in_pos === false ? `<span class="st">ждёт входа</span>`
+        : o.ur != null ? `<span class="${o.ur >= 0 ? "up" : "dn"}">${fmtR(o.ur, 2)}</span>` : `<span class="dim">—</span>`;
+      return `<div class="pc ${rcls(o, o.in_pos === false)}" data-sid="${o.id}">
+        <div class="pc-top"><span class="ck">${tk.includes(o.id) ? "▣" : "▢"}</span>
+          <span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol)}</span>
+          <span class="meta">${esc(o.tf)}${o.age_h != null ? " · " + Math.round(o.age_h) + "ч" : ""}</span>
+          <span class="pc-r">${res}</span><span class="chb" data-chart="${o.id}">📈</span></div>
+        <div class="pc-lv">вход <b>${fmtP(o.entry)}</b> · стоп <b>${fmtP(o.stop)}</b>${o.tp1 ? ` · цель <b>${fmtP(o.tp1)}</b>` : ""}</div>
+        ${sizing(o)}</div>`;
+    }).join("");
     h += sec(`<section><div class="sec-h"><h2>МОИ ПОЗИЦИИ</h2>
       <span class="note">видно только тебе</span></div>
       <div class="mystat">${stat}</div>
-      ${pos.length ? `<table class="pos-t">${rows}</table>`
+      ${pos.length ? `<div class="calc"><span>депозит $</span><input class="inp" id="calcUsd" inputmode="decimal" value="${c.usd}">
+        <span>риск %</span><input class="inp" id="calcRisk" inputmode="decimal" value="${c.risk}">
+        <button class="lnk" data-calcsave="1">запомнить в боте — личные сигналы посчитают объём так же</button></div>
+        <div>${rows}</div>
+        <div class="mystat" style="margin-top:6px;color:var(--ink-3)">тап по строке — отметить «я в сделке» · объём = риск $ ÷ ход до стопа</div>`
         : `<div class="warn" style="padding:8px 0">открытых сигналов нет</div>`}</section>`);
     const ms = ME.my_stats || {trades: 0}, rc = ME.recent_closed || [];
     const myline = ms.trades
@@ -430,6 +814,8 @@ function renderMine(noAnim) {
       <div class="mystat">${myline}</div>${myEq}${vs}${sq}${share}
       ${rc.length ? `<div class="mystat" style="margin-top:10px">закрытые недавно — отметь свои:</div>
       <table class="pos-t">${rcRows}</table>` : ""}</section>`);
+    h += sec(refCard());
+    h += sec(notifyCard());
     $("#app").innerHTML = h;
 }
 
@@ -444,11 +830,11 @@ function renderOverview(noAnim) {
   const tot = st.total_r || 0, exp = st.expectancy_r || 0;
   let fx = 0;
   const sec = inner => noAnim ? `<div>${inner}</div>`
-    : `<div class="fx" style="animation-delay:${(fx++) * 70}ms">${inner}</div>`;
+    : `<div class="fx" style="animation-delay:${Math.min(fx++, 8) * 45}ms">${inner}</div>`;
   let h = "";
   h += sec(`<div class="hero">
     <div class="hero-main">
-      <div class="hero-num mono ${tot >= 0 ? "up" : "dn"}">${fmtR(tot)}</div>
+      <div class="hero-num mono ${tot >= 0 ? "up" : "dn"}" id="heroNum">${fmtR(tot)}</div>
       <div class="hero-sub">итог${SCOPE === "epoch" && DATA.epoch_since ? " с " + DATA.epoch_since : " за всю историю"} · ${st.trades || 0} закрытых</div>
     </div>
     <div class="hero-side">
@@ -502,12 +888,29 @@ function renderOverview(noAnim) {
          <b>${fmtPx(c.px)}</b>${c.pct != null ? `<span class="${c.pct >= 0 ? "up" : "dn"}">${c.pct >= 0 ? "+" : ""}${c.pct.toFixed(1)}%</span>` : ""}</div>`).join("")}
       </div></section>`);
   }
+  EQ_SHOWN = eqSlice(eq, EQP);
   h += sec(`<section><div class="sec-h"><h2>ЭКВИТИ · R</h2>
-    <span class="note">по закрытиям</span></div>
-    <div class="plot">${equitySVG(eq)}</div>
-    <div class="plot" style="margin-top:2px">${ddSVG(eq)}</div>
+    <span class="note">${[["30", "30д"], ["90", "90д"], ["all", "всё"]].map(([k, t]) =>
+      `<b class="chip${EQP === k ? " on" : ""}" data-eqp="${k}">${t}</b>`).join("")}</span></div>
+    <div class="plot">${equitySVG(EQ_SHOWN)}</div>
+    <div class="plot" style="margin-top:2px">${ddSVG(EQ_SHOWN)}</div>
     ${(st.trades || 0) < 100 ? `<div class="warn">⚠ выборка мала (n=${st.trades}) — цифры шумят</div>` : ""}
     </section>`);
+  const pk2 = pick();
+  if ((pk2.daily || []).length) {
+    h += sec(`<section><div class="sec-h"><h2>КАЛЕНДАРЬ</h2>
+      <span class="note">итог дня · 26 недель</span></div>
+      <div class="plot">${calSVG(pk2.daily)}</div>
+      <div class="cal-leg">меньше <i style="background:var(--neg)"></i><i style="background:var(--neg);opacity:.45"></i><i style="background:var(--panel2)"></i><i style="background:var(--pos);opacity:.45"></i><i style="background:var(--pos)"></i> больше · тап — итог дня</div>
+      </section>`);
+  }
+  if (pk2.split) {
+    h += sec(`<section><div class="sec-h"><h2>РАЗБИВКА</h2>
+      <span class="note">сторона · таймфрейм</span></div>
+      <div class="two-col">${splitTable(pk2.split.side, ["LONG", "SHORT"],
+        k => `<span class="side-tag ${k === "LONG" ? "l" : "s"}">${k === "LONG" ? "▲" : "▼"}</span><span class="sym">${k === "LONG" ? "лонг" : "шорт"}</span>`)}
+      ${splitTable(pk2.split.tf, ["1h", "4h"], k => `<span class="sym">${esc(k)}</span>`)}</div></section>`);
+  }
   h += sec(`<section><div class="sec-h"><h2>R ПО НЕДЕЛЯМ</h2>
     <span class="note">пн — начало недели</span></div>
     <div class="plot">${weeksSVG(d.weeks)}</div></section>`);
@@ -637,6 +1040,25 @@ function renderOverview(noAnim) {
     не определяют будущие. 18+</div>`);
   $("#app").innerHTML = h;
   wireTip();
+  if (!noAnim && !REDUCED && !INTRO_DONE) { INTRO_DONE = true; intro(tot); }
+}
+
+// первый показ (редкое событие — можно дать «вкусность»): итог досчитывается, кривая рисуется
+let INTRO_DONE = false;
+function intro(total) {
+  const el = $("#heroNum"), t0 = performance.now(), dur = 750;
+  const step = now => {
+    const p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 3);
+    if (el && el.isConnected) el.textContent = p < 1 ? fmtR(total * e) : fmtR(total);
+    if (p < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+  const line = $("#eq .eqline");
+  if (line && line.getTotalLength && line.animate) {
+    const L = line.getTotalLength();
+    line.animate([{strokeDasharray: `${L}`, strokeDashoffset: L}, {strokeDasharray: `${L}`, strokeDashoffset: 0}],
+                 {duration: 1000, easing: "cubic-bezier(.23,1,.32,1)", delay: 150});
+  }
 }
 
 const SKEL_TABLE = `<div class="skel"><div class="sk t"></div><div class="sk w85"></div>
@@ -661,24 +1083,43 @@ function needAdm() {
   return false;
 }
 
+// ---- админ: юзеры (поиск, фильтр, карточка) ----
+const AU = {q: "", st: "", items: null, total: 0, seq: 0, timer: 0};
+const ST_LABEL = {paying: ["платит", "pos"], trial: ["триал", "acc"], grant: ["грант", "acc"],
+                  lapsed: ["истекла", "neg"], free: ["free", ""]};
+function auLoad() {
+  const seq = ++AU.seq;
+  const p = new URLSearchParams();
+  if (AU.q) p.set("q", AU.q);
+  if (AU.st) p.set("st", AU.st);
+  fetch("api/admin/users?" + p, {headers: authHdr()}).then(r => r.ok ? r.json() : null).then(d => {
+    if (seq !== AU.seq) return;
+    AU.items = d && d.ok ? d.items : []; AU.total = d && d.ok ? d.total : 0;
+    if (curNav() === "admin" && ANAV === "users") render(true);
+  }).catch(() => {});
+}
+function userBadge(st) {
+  const [t, c] = ST_LABEL[st] || [st, ""];
+  return `<span class="badge ${c}">${t}</span>`;
+}
 function renderUsers() {
   if (needAdm()) return;
-  const u = ADM.users, m = ADM.money;
+  if (AU.items === null) auLoad();
+  const u = ADM.users;
   const acq = Object.entries(u.acquisition || {}).map(([k, v]) =>
     `<tr><td><span class="sym">${esc(k)}</span></td><td class="dim">${v.total} всего</td>
      <td class="urc"><b class="${v.paid ? "up" : ""}">${v.paid} платили</b></td></tr>`).join("");
-  const recent = (u.recent || []).map(r => {
-    const paid = r.paid_until && r.paid_until > new Date().toISOString();
-    return `<tr><td><span class="sym">${esc(String(r.tg_id))}</span></td>
-      <td class="dim">${esc(r.username || "—")}</td>
-      <td class="st">${paid ? "платит до " + esc((r.paid_until || "").slice(0, 10)) : esc(r.tier || "free")}</td>
-      <td class="dim">${esc((r.joined_at || "").slice(5, 10))}</td></tr>`;
-  }).join("");
-  const pays = (m.last || []).map(r =>
-    `<tr><td><span class="sym">${esc(String(r.tg_id))}</span></td>
-     <td class="dim">${esc(r.method)}</td>
-     <td class="urc"><b class="up">${r.amount} ${esc(r.currency)}</b></td>
-     <td class="dim">${r.days}д · ${esc((r.paid_at || "").slice(5, 10))}</td></tr>`).join("");
+  const stDefs = [["", "все"], ["paying", "платят"], ["trial", "триал"], ["grant", "грант"],
+                  ["lapsed", "истекли"], ["free", "free"]];
+  const list = AU.items === null ? `<div class="sk w85"></div><div class="sk w60"></div>`
+    : !AU.items.length ? `<div class="empty">никого не нашлось</div>`
+    : `<table class="pos-t">${AU.items.map(r =>
+      `<tr data-user="${r.tg_id}" style="cursor:pointer"><td><span class="sym">${esc(r.username ? "@" + r.username : String(r.tg_id))}</span>
+        ${r.username ? `<br><span class="dim" style="text-align:left">${r.tg_id}</span>` : ""}</td>
+       <td>${userBadge(r.status)}${r.blocked ? ' <span class="badge neg">блок</span>' : ""}</td>
+       <td class="dim">${r.paid_until ? "до " + esc(r.paid_until.slice(5)) : esc(r.joined.slice(5))}</td>
+       <td class="dim">${r.pays_n ? r.pays_n + "💳" : ""}${r.taken_n ? " " + r.taken_n + "▣" : ""}</td></tr>`).join("")}</table>
+      ${AU.total > AU.items.length ? `<div class="mystat">показаны ${AU.items.length} из ${AU.total} — уточни поиск</div>` : ""}`;
   $("#app").innerHTML = `
   <div class="strip">
     <div class="cell"><b>${u.counts.total ?? 0}</b><span>юзеров</span></div>
@@ -686,35 +1127,275 @@ function renderUsers() {
     <div class="cell"><b>${u.trial_now ?? "—"}</b><span>триал</span></div>
     <div class="cell"><b>${u.granted_now ?? "—"}</b><span>гранты</span></div>
     <div class="cell"><b class="${u.lapsed ? "dn" : ""}">${u.lapsed}</b><span>истекли</span></div>
-    <div class="cell"><b>${m.payments_n}</b><span>платежей</span></div>
   </div>
+  <section><div class="sec-h"><h2>ЮЗЕРЫ</h2><span class="note">тап — карточка</span></div>
+    <div class="row-f"><input class="search" id="auq" placeholder="tg_id или @username" value="${esc(AU.q)}" autocomplete="off"></div>
+    <div class="row-f">${stDefs.map(([v, t]) => `<b class="chip${AU.st === v ? " on" : ""}" data-aust="${v}">${t}</b>`).join("")}</div>
+    ${list}</section>
   <section><div class="sec-h"><h2>ВЫДАТЬ / СНЯТЬ ПОДПИСКУ</h2></div>
     <div class="set-row"><input class="inp" id="g-id" placeholder="tg_id" inputmode="numeric">
       <input class="inp" id="g-days" value="30" style="width:64px" inputmode="numeric">
       <button class="btn" data-act="grant">Выдать</button>
       <button class="btn danger" data-act="revoke">Снять</button></div></section>
-  <section><div class="sec-h"><h2>ИСТОЧНИКИ</h2></div><table class="pos-t">${acq || ""}</table></section>
-  <section><div class="sec-h"><h2>ПОСЛЕДНИЕ ЮЗЕРЫ</h2></div><table class="pos-t">${recent}</table></section>
-  <section><div class="sec-h"><h2>ПОСЛЕДНИЕ ПЛАТЕЖИ</h2>
-    <span class="note">всего ${Object.entries(m.payments_by_cur || {}).map(([c, v]) => `${v} ${c === "XTR" ? "⭐" : esc(c)}`).join(" · ") || "0"}</span></div><table class="pos-t">${pays || ""}</table></section>`;
+  <section><div class="sec-h"><h2>ИСТОЧНИКИ</h2><span class="note">/start src_…</span></div><table class="pos-t">${acq || ""}</table></section>`;
+  const el = $("#auq");
+  if (AU.focus) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); AU.focus = false; }
+}
+function openUser(id) {
+  openSheet(`юзер ${id}`, `<div class="sk w85"></div><div class="sk w60"></div>`);
+  fetch("api/admin/user?id=" + id, {headers: authHdr()}).then(r => r.ok ? r.json() : null).then(d => {
+    if (!d || !d.ok) { $("#sheetBody").innerHTML = `<div class="empty">${esc((d && d.err) || "не загрузилось")}</div>`; return; }
+    const u = d.user, tk = d.taken || {};
+    const pays = d.payments.map(p => `<tr><td class="dim">${esc((p.paid_at || p.created_at || "").slice(0, 10))}</td>
+      <td class="dim">${esc(p.method)}</td><td><span class="badge ${p.status === "paid" ? "pos" : p.status === "refunded" ? "neg" : ""}">${esc(p.status)}</span></td>
+      <td class="urc"><b>${p.amount} ${p.currency === "XTR" ? "⭐" : esc(p.currency)}</b> <span class="dim">${p.days}д</span></td></tr>`).join("");
+    const inv = d.invited.map(x => `<tr><td><span class="sym">${esc(x.username ? "@" + x.username : String(x.tg_id))}</span></td>
+      <td class="dim">${esc(x.joined)}</td><td class="urc">${x.rewarded ? '<span class="badge pos">оплатил</span>' : '<span class="badge">нет</span>'}</td></tr>`).join("");
+    $("#sheetTitle").textContent = u.username ? "@" + u.username : String(u.tg_id);
+    $("#sheetBody").innerHTML = `
+      <div class="kv"><span>tg_id</span><b>${u.tg_id}</b><span>статус</span><b>${userBadge(u.status)}</b>
+        <span>подписка до</span><b>${esc(u.paid_until || "—")}</b><span>с нами с</span><b>${esc(u.joined)}</b>
+        <span>источник</span><b>${esc(u.src || "—")}</b><span>пригласил</span><b>${u.invited_by || "—"}</b>
+        <span>доставлено сигналов</span><b>${(d.deliveries.full || 0) + (d.deliveries.unlock || 0)} полных · ${d.deliveries.teaser || 0} тизеров</b>
+        <span>отметил сделок</span><b>${tk.trades || 0}${tk.trades ? ` · <span class="${tk.total_r >= 0 ? "up" : "dn"}">${fmtR(tk.total_r)}</span>` : ""}</b>
+        <span>уведомления</span><b>${d.notify && d.notify.muted ? "выкл" : "вкл"}${u.blocked ? " · бот заблокирован" : ""}</b></div>
+      <div class="set-row" style="margin-top:8px"><input class="inp" id="s-days" value="30" style="width:64px" inputmode="numeric">
+        <button class="btn" data-uact="grant" data-uid="${u.tg_id}">Выдать дни</button>
+        <button class="btn danger" data-uact="revoke" data-uid="${u.tg_id}">Снять</button></div>
+      <section><div class="sec-h"><h2>ПЛАТЕЖИ</h2><span class="note">${d.payments.length}</span></div>
+        ${pays ? `<table class="pos-t">${pays}</table>` : `<div class="empty">платежей нет</div>`}</section>
+      ${inv ? `<section><div class="sec-h"><h2>ПРИГЛАСИЛ</h2><span class="note">${d.invited.length}</span></div><table class="pos-t">${inv}</table></section>` : ""}`;
+  }).catch(() => { $("#sheetBody").innerHTML = `<div class="empty">сеть недоступна</div>`; });
+}
+function openSheet(title, body) {
+  $("#sheetTitle").textContent = title; $("#sheetBody").innerHTML = body;
+  $("#sheet").classList.add("show"); hap("light"); syncBack();
+}
+function closeSheet() {
+  const box = $(".sheet-box"); box.classList.remove("drag"); box.style.transform = "";
+  $("#sheet").classList.remove("show"); syncBack();
+}
+// свайп вниз по шапке шторки: порог 90px ИЛИ быстрый флик (скорость > 0.5 px/мс)
+(() => {
+  let y0 = 0, t0 = 0, dy = 0, drag = false;
+  const box = () => $(".sheet-box");
+  document.addEventListener("pointerdown", e => {
+    if (!e.target.closest(".sheet-h,.grab") || e.target.closest("button")) return;
+    drag = true; y0 = e.clientY; t0 = performance.now(); dy = 0;
+    box().classList.add("drag");
+    try { e.target.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  document.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const raw = e.clientY - y0;
+    dy = raw >= 0 ? raw : raw * 0.2;                  // вверх — с трением, не в стену
+    box().style.transform = `translateY(${dy}px)`;
+  });
+  const end = () => {
+    if (!drag) return;
+    drag = false;
+    const v = dy / Math.max(1, performance.now() - t0);
+    box().classList.remove("drag");
+    if (dy > 90 || v > 0.5) closeSheet(); else box().style.transform = "";
+  };
+  document.addEventListener("pointerup", end);
+  document.addEventListener("pointercancel", end);
+})();
+function syncBack() {
+  if (!(inTg && tg.BackButton)) return;
+  const open = $("#sheet").classList.contains("show") || $("#chartModal").classList.contains("show");
+  try { if (open) tg.BackButton.show(); else tg.BackButton.hide(); } catch (e) {}
+}
+if (inTg && tg.BackButton) try { tg.BackButton.onClick(() => { closeSheet(); closeChart(); }); } catch (e) {}
+function userAction(id, action, days, after) {
+  const doIt = () => fetch("api/admin/user", {method: "POST", headers: authHdr(),
+    body: JSON.stringify({tg_id: id, action, days})})
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      toast(d && d.ok ? (action === "grant" ? `Выдано ${days}д для ${id}` : `Снято у ${id}`) : "Отклонено");
+      hap(d && d.ok ? "ok" : "err");
+      admFetch().then(() => { AU.items = null; render(true); if (after) after(); });
+    }).catch(() => toast("Сеть недоступна"));
+  if (action === "revoke") {
+    const q = `Снять подписку у ${id}?`;
+    if (tg && tg.showConfirm) tg.showConfirm(q, ok => { if (ok) doIt(); });
+    else if (window.confirm(q)) doIt();
+  } else doIt();
 }
 
+// ---- админ: деньги ----
+let MCUR = "XTR";
+function revenueSVG(daily, cur) {
+  const days = 90, now = Date.now(), pts = [];
+  const map = new Map(daily.filter(x => x.cur === cur).map(x => [x.d, x.s]));
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now - i * 864e5).toISOString().slice(0, 10);
+    pts.push([d, map.get(d) || 0]);
+  }
+  const W = 640, H = 220, P = {l: 6, r: 6, t: 18, b: 22};
+  const vmax = Math.max(1, ...pts.map(p => p[1])), bw = (W - P.l - P.r) / days;
+  let g = `<line x1="${P.l}" x2="${W - P.r}" y1="${H - P.b}" y2="${H - P.b}" stroke="var(--grid)"/>`;
+  pts.forEach(([d, v], i) => {
+    if (!v) return;
+    const h = Math.max(2, v / vmax * (H - P.t - P.b));
+    g += `<rect x="${P.l + i * bw + .5}" y="${H - P.b - h}" width="${Math.max(1.5, bw - 1.5)}" height="${h}" rx="1.5" fill="var(--acc)" data-tt="${d.slice(8, 10)}.${d.slice(5, 7)} · ${v} ${cur === "XTR" ? "⭐" : esc(cur)}"/>`;
+  });
+  g += `<text x="${P.l}" y="${H - 4}" font-size="9" font-family="IBM Plex Mono,monospace" fill="var(--ink-3)">${pts[0][0].slice(5)}</text>
+        <text x="${W - P.r}" y="${H - 4}" text-anchor="end" font-size="9" font-family="IBM Plex Mono,monospace" fill="var(--ink-3)">сегодня</text>
+        <text x="${W - P.r}" y="11" text-anchor="end" font-size="9.5" font-family="IBM Plex Mono,monospace" fill="var(--ink-3)">макс/день ${vmax}</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}">${g}</svg>`;
+}
+function renderMoney() {
+  if (needAdm()) return;
+  const m = ADM.money, f = m.funnel || {};
+  const curs = Object.keys(m.payments_by_cur || {});
+  if (curs.length && !curs.includes(MCUR)) MCUR = curs[0];
+  const sum90 = (m.daily || []).filter(x => x.cur === MCUR).reduce((a, x) => a + x.s, 0);
+  const cards = curs.map(c => `<div class="card"><div class="t">всего ${c === "XTR" ? "Stars" : esc(c)}</div>
+    <div class="v">${m.payments_by_cur[c]}${c === "XTR" ? "⭐" : ""}</div>
+    <div class="s">${(m.by_method || []).filter(x => x.cur === c).reduce((a, x) => a + x.n, 0)} платежей</div></div>`).join("");
+  const fr = (lbl, n, base) => `<div class="fr"><span>${lbl}</span>
+    <div><div class="fb" style="width:${base ? Math.max(2, n / base * 100) : 0}%"></div></div>
+    <span class="fn">${n}${base && lbl !== "регистрации" ? ` · ${Math.round(n / base * 100)}%` : ""}</span></div>`;
+  const pays = (m.last || []).map(r =>
+    `<tr data-user="${r.tg_id}" style="cursor:pointer"><td><span class="sym">${esc(String(r.tg_id))}</span></td>
+     <td class="dim">${esc(r.method)}</td>
+     <td class="urc"><b class="up">${r.amount} ${r.currency === "XTR" ? "⭐" : esc(r.currency)}</b></td>
+     <td class="dim">${r.days}д · ${esc((r.paid_at || "").slice(5, 10))}</td></tr>`).join("");
+  const meth = (m.by_method || []).map(x => `<tr><td><span class="sym">${esc(x.method)}</span></td>
+     <td class="dim">${x.n} шт.</td><td class="urc"><b>${x.s} ${x.cur === "XTR" ? "⭐" : esc(x.cur)}</b></td></tr>`).join("");
+  $("#app").innerHTML = `
+  <div class="cards">${cards || `<div class="card"><div class="t">выручка</div><div class="v">0</div></div>`}
+    <div class="card"><div class="t">платят сейчас</div><div class="v up">${f.paying_now ?? 0}</div>
+      <div class="s">возвратов: ${m.refunds || 0}</div></div></div>
+  <section><div class="sec-h"><h2>ВЫРУЧКА · 90 ДНЕЙ</h2>
+    <span class="note">${curs.map(c => `<b class="chip${MCUR === c ? " on" : ""}" data-mcur="${esc(c)}">${c === "XTR" ? "⭐" : esc(c)}</b>`).join("")}</span></div>
+    <div class="mystat">за 90 дней: <b>${Math.round(sum90 * 100) / 100} ${MCUR === "XTR" ? "⭐" : esc(MCUR)}</b></div>
+    <div class="plot">${revenueSVG(m.daily || [], MCUR)}</div></section>
+  <section class="funnel"><div class="sec-h"><h2>ВОРОНКА</h2><span class="note">от регистраций, за всё время</span></div>
+    ${fr("регистрации", f.joined || 0, f.joined || 0)}${fr("взяли триал", f.trial_ever || 0, f.joined || 0)}
+    ${fr("платили", f.paid_ever || 0, f.joined || 0)}${fr("продлевали", f.renewed || 0, f.joined || 0)}
+    ${fr("платят сейчас", f.paying_now || 0, f.joined || 0)}</section>
+  ${meth ? `<section><div class="sec-h"><h2>СПОСОБЫ ОПЛАТЫ</h2></div><table class="pos-t">${meth}</table></section>` : ""}
+  <section><div class="sec-h"><h2>ПОСЛЕДНИЕ ПЛАТЕЖИ</h2><span class="note">тап — карточка юзера</span></div>
+    ${pays ? `<table class="pos-t">${pays}</table>` : `<div class="empty">платежей пока нет</div>`}</section>`;
+}
+
+// ---- админ: сигналы (журнал с уровнями + тени) ----
+const AS = {view: "open", q: "", items: null, total: 0, seq: 0, loading: false};
+function asLoad(reset) {
+  const seq = ++AS.seq;
+  if (reset) AS.items = null;
+  AS.loading = true;
+  const p = new URLSearchParams({view: AS.view, offset: reset ? 0 : (AS.items || []).length});
+  if (AS.q) p.set("q", AS.q);
+  fetch("api/admin/signals?" + p, {headers: authHdr()}).then(r => r.ok ? r.json() : null).then(d => {
+    if (seq !== AS.seq) return;
+    AS.loading = false;
+    if (d && d.ok) { AS.items = reset || !AS.items ? d.items : AS.items.concat(d.items); AS.total = d.total; }
+    else AS.items = AS.items || [];
+    if (curNav() === "admin" && ANAV === "signals") render(true);
+  }).catch(() => { AS.loading = false; });
+}
+function sigState(o) {
+  if (o.shadow) return `<span class="badge acc">тень · ${esc(o.shadow)}</span>${o.r != null ? ` <b class="${o.r >= 0 ? "up" : "dn"}">${fmtR(o.r, 2)}</b>` : ""}`;
+  if (o.status === "open") return o.filled ? `<span class="badge pos">в позиции</span>` : `<span class="badge">ждёт входа</span>`;
+  if (o.r != null) return `<b class="${o.r >= 0 ? "up" : "dn"}">${fmtR(o.r, 2)}</b>`;
+  return `<span class="badge">${esc(o.status)}</span>`;
+}
+function renderSignals() {
+  if (needAdm()) return;
+  if (AS.items === null && !AS.loading) asLoad(true);
+  const sh = ADM.shadow || {};
+  const shCard = k => { const v = sh[k]; if (!v) return "";
+    return `<div class="card"><div class="t">тень · ${esc(v.label)}</div>
+      <div class="v ${v.sum >= 0 ? "up" : "dn"}">${fmtR(v.sum)}</div>
+      <div class="s">${v.n} закрыто${v.exp != null ? ` · ${fmtR(v.exp, 2)}/сд.` : ""} · ${v.open} ждут</div></div>`; };
+  const views = [["open", "открытые"], ["closed", "закрытые"], ["shadow", "тени"], ["all", "все"]];
+  const fmtP = v => v == null ? "—" : String(+v);
+  const rows = AS.items === null ? `<div class="sk w85"></div><div class="sk w60"></div>`
+    : !AS.items.length ? `<div class="empty">пусто</div>`
+    : `<table class="pos-t">${AS.items.map(o =>
+      `<tr${o.status !== "rejected" ? ` data-chart="${o.id}"` : ""}><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.s)}</span>
+         <br><span class="dim" style="text-align:left">#${o.id} · ${esc(o.tf)} · ${esc(o.created.slice(5).replace("T", " "))}</span></td>
+       <td class="lv">${fmtP(o.entry)} → ${fmtP(o.stop)}${o.trail ? `<br><span class="dim">трейл ${fmtP(o.trail)}</span>` : ""}</td>
+       <td class="urc">${sigState(o)}</td></tr>`).join("")}</table>
+      ${AS.items.length < AS.total ? `<button class="btn more" data-asmore="1">${AS.loading ? "загрузка…" : `ещё · ${AS.total - AS.items.length}`}</button>` : ""}`;
+  $("#app").innerHTML = `
+  <div class="cards">${shCard("late_entry")}${shCard("setup_off")}</div>
+  <section><div class="sec-h"><h2>ЖУРНАЛ СИГНАЛОВ</h2><span class="note">${AS.total} · с уровнями</span></div>
+    <div class="row-f">${views.map(([v, t]) => `<b class="chip${AS.view === v ? " on" : ""}" data-asv="${v}">${t}</b>`).join("")}</div>
+    <div class="row-f"><input class="search" id="asq" placeholder="монета" value="${esc(AS.q)}" autocomplete="off" autocapitalize="characters" maxlength="15"></div>
+    ${rows}</section>
+  <div class="foot">Тени — сигналы, которые бот нашёл, но не опубликовал (сетап на проверке или гейт «вход уже пройден»); их исход судится так же, как у живых, — это проверка решений вперёд.</div>`;
+  const el = $("#asq");
+  if (AS.focus) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); AS.focus = false; }
+}
+
+// ---- админ: executor (демо BingX) ----
+let AX = null, AX_LOADING = false;
+function axLoad() {
+  AX_LOADING = true;
+  fetch("api/admin/executor", {headers: authHdr()}).then(r => r.ok ? r.json() : null).then(d => {
+    AX_LOADING = false; AX = d && d.ok ? d : {err: true};
+    if (curNav() === "admin" && ANAV === "exec") render(true);
+  }).catch(() => { AX_LOADING = false; AX = {err: true}; });
+}
+function renderExec() {
+  if (needAdm()) return;
+  if (!AX && !AX_LOADING) axLoad();
+  if (!AX) { $("#app").innerHTML = SKEL_PAGE; return; }
+  if (AX.err) { $("#app").innerHTML = `<div class="empty">executor недоступен</div>`; return; }
+  const st = AX.status || {}, sm = AX.summary || {};
+  const vst = typeof st.vst === "number" ? st.vst.toLocaleString("en-US", {maximumFractionDigits: 0}) + " VST" : esc(st.vst || "—");
+  const live = (AX.live || []).map(o => `<tr><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol.split("/")[0])}</span>
+      <br><span class="dim" style="text-align:left">#${o.signal_id}</span></td>
+    <td><span class="badge ${o.state === "filled" ? "pos" : ""}">${o.state === "filled" ? "в позиции" : o.state === "placed" ? "триггер" : esc(o.state)}</span></td>
+    <td class="lv">${String(+o.entry_px)} → ${String(+(o.trail_px || o.stop_px))}${o.trail_px ? ' <span class="badge acc">трейл</span>' : ""}</td>
+    <td class="dim">${+o.qty}</td></tr>`).join("");
+  const closed = (AX.closed || []).slice(0, 30).map(o => {
+    const gap = o.real - (o.journal || 0);
+    return `<tr><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.s)}</span></td>
+      <td class="dim">${esc(o.d.slice(5))}</td><td class="dim">журн ${fmtR(o.journal || 0, 2)}</td>
+      <td class="urc"><b class="${o.real >= 0 ? "up" : "dn"}">${fmtR(o.real, 2)}</b><br><span class="dim ${gap < -0.3 ? "dn" : ""}">${gap >= 0 ? "+" : ""}${gap.toFixed(2)}</span></td></tr>`; }).join("");
+  const errs = (AX.errors || []).map(e => `<div>#${e.signal_id} ${esc(e.symbol.split("/")[0])} · ${esc((e.created_at || "").slice(5, 16).replace("T", " "))}<br>${esc(e.note || "")}</div>`).join("");
+  $("#app").innerHTML = `
+  <div class="cards">
+    <div class="card"><div class="t">эквити демо</div><div class="v">${vst}</div>
+      <div class="s">${st.enabled ? '<span class="up">вкл</span>' : "выкл"} · риск ${st.risk_pct ?? "—"}%${st.halted_today ? ' · <span class="dn">стоп-кран</span>' : ""}</div></div>
+    <div class="card"><div class="t">реально vs журнал</div>
+      <div class="v ${sm.real >= 0 ? "up" : "dn"}">${fmtR(sm.real || 0)}</div>
+      <div class="s">журнал ${fmtR(sm.journal || 0)} · ${sm.n || 0} сд.${sm.slip != null ? ` · вход ${fmtR(sm.slip, 3)}` : ""}</div></div>
+  </div>
+  <section><div class="sec-h"><h2>НА БИРЖЕ</h2><span class="note">${(AX.live || []).length} · <button class="lnk" data-axrefresh="1">обновить</button></span></div>
+    ${live ? `<table class="pos-t">${live}</table>` : `<div class="empty">позиций и триггеров нет</div>`}</section>
+  <section><div class="sec-h"><h2>ЗАКРЫТЫЕ</h2><span class="note">реальный R · ниже — отрыв от журнала</span></div>
+    ${closed ? `<table class="pos-t">${closed}</table>` : `<div class="empty">пока пусто</div>`}</section>
+  ${errs ? `<section><div class="sec-h"><h2>НЕ ПОСТАВЛЕНЫ</h2><span class="note">последние ${(AX.errors || []).length}</span></div><div class="log">${errs}</div></section>` : ""}
+  <div class="foot">Демо-счёт BingX (VST), реальные деньги не торгуются. Цены исполнения — из трейдов биржи после постановки (исправлено 24.10).</div>`;
+}
+
+const SET_GROUPS = ["Сигналы", "Стратегия", "Вотчлист", "Канал", "Подписка", "Executor (демо)", "Прочее"];
 function renderSettings() {
   if (needAdm()) return;
   const groups = {};
   for (const st of ADM.settings) (groups[st.group] = groups[st.group] || []).push(st);
+  const order = SET_GROUPS.filter(g => groups[g]).concat(Object.keys(groups).filter(g => !SET_GROUPS.includes(g)));
   const ctl = st => {
     if (st.t === "bool") return `<div class="tgl ${st.value ? "on" : ""}" data-set="${st.key}" data-t="bool"></div>`;
     if (st.t === "choice") return `<select class="inp" data-set="${st.key}" data-t="choice">${st.choices.map(c =>
       `<option ${c === st.value ? "selected" : ""}>${c}</option>`).join("")}</select>`;
     if (st.t === "url") return `<input class="inp wide" data-set="${st.key}" data-t="url" value="${esc(st.value || "")}" placeholder="https://…">`;
+    if (st.t === "symbols") return "";
     return `<input class="inp" data-set="${st.key}" data-t="${st.t}" value="${st.value}" inputmode="decimal">`;
   };
-  $("#app").innerHTML = Object.entries(groups).map(([g, items]) =>
-    `<section><div class="sec-h"><h2>${esc(g.toUpperCase())}</h2></div>${items.map(st =>
-      `<div class="set-row"><div class="lbl">${esc(st.label)}<br><span class="key">${st.key}</span></div>${ctl(st)}</div>`
-    ).join("")}</section>`).join("") +
-    `<div class="foot">Изменения применяются сразу и действуют на живого бота. Белый список ключей с валидацией на сервере.</div>`;
+  const row = st => st.t === "symbols"
+    ? `<div class="set-row" style="flex-direction:column;align-items:stretch"><div class="lbl">${esc(st.label)} <span class="key">${st.key}</span></div>
+       <textarea class="inp" data-set="${st.key}" data-t="symbols" spellcheck="false">${esc((st.value || "").split(",").filter(Boolean).join(", "))}</textarea></div>`
+    : `<div class="set-row"><div class="lbl">${esc(st.label)}<br><span class="key">${st.key}</span></div>${ctl(st)}</div>`;
+  $("#app").innerHTML = order.map(g =>
+    `<section><div class="sec-h"><h2>${esc(g.toUpperCase())}</h2></div>${groups[g].map(row).join("")}</section>`).join("") +
+    `<div class="foot">Изменения применяются сразу и действуют на живого бота (поллер читает настройки каждый такт). Белый список ключей с валидацией на сервере. Параметры стратегии меняются по замерам — значения по умолчанию подписаны.</div>`;
 }
 
 function renderSystem() {
@@ -722,22 +1403,28 @@ function renderSystem() {
   const h = ADM.health;
   const dot = (mins, warn) => mins == null ? `<i class="dot na"></i>`
     : `<i class="dot ${mins < warn ? "ok" : "bad"}"></i>`;
-  const fmtAge = m => m == null ? "нет данных" : m < 90 ? `${Math.round(m)} мин назад` : `${(m / 60).toFixed(1)} ч назад`;
-  const opens = (ADM.open_signals || []).map(o =>
-    `<tr><td><span class="side-tag ${o.side === "LONG" ? "l" : "s"}">${o.side === "LONG" ? "▲" : "▼"}</span><span class="sym">${esc(o.symbol.split("/")[0])}</span></td>
-     <td class="dim">${esc(o.timeframe)}</td><td class="lv">${String(+o.entry)} → ${String(+o.stop)}</td>
-     <td class="st">${o.filled_at ? "в позиции" : "ждёт"}</td></tr>`).join("");
+  const fmtAge = m => m == null ? "нет данных" : m < 90 ? `${Math.round(m)} мин назад` : m < 2880 ? `${(m / 60).toFixed(1)} ч назад` : `${(m / 1440).toFixed(1)} дн назад`;
+  const pw = h.power;
+  const pwRow = pw ? `<div class="hrow"><span><i class="dot ${pw.on_battery ? "bad" : "ok"}"></i>Питание Mac</span>
+    <b>${pw.on_battery ? `БАТАРЕЯ ${pw.pct ?? "?"}%${pw.remaining && pw.remaining !== "0:00" ? " · ~" + esc(pw.remaining) : ""}` : `зарядка · ${pw.pct ?? "?"}%`}</b></div>` : "";
+  const log = (h.log || []).map(l => `<div class="${l.includes(" ERROR ") ? "e" : ""}">${esc(l)}</div>`).join("");
   $("#app").innerHTML = `
+  <section><div class="sec-h"><h2>СИГНАЛЫ</h2><span class="note">${h.paused ? '<span class="badge neg">на паузе</span>' : '<span class="badge pos">работают</span>'}</span></div>
+    <div class="mystat">${h.paused ? "Новые сигналы не ищутся, открытые сделки ведутся до конца." : "Бот ищет и публикует новые сигналы каждый час."}</div>
+    <button class="btn ${h.paused ? "" : "danger"}" data-pause="${h.paused ? "0" : "1"}">${h.paused ? "Возобновить сигналы" : "Поставить на паузу"}</button></section>
   <section><div class="sec-h"><h2>ЗДОРОВЬЕ</h2></div>
     <div class="hrow"><span>${dot(h.poller_tick_min, 90)}Поллер, последний такт</span><b>${fmtAge(h.poller_tick_min)}</b></div>
-    <div class="hrow"><span>${dot(h.backup_min, 26 * 60)}Бэкап базы</span><b>${fmtAge(h.backup_min)}</b></div>
     <div class="hrow"><span><i class="dot ${h.paused ? "bad" : "ok"}"></i>Сигналы</span><b>${h.paused ? "НА ПАУЗЕ" : "работают"}</b></div>
+    ${pwRow}
+    <div class="hrow"><span>${dot(h.backup_min, 26 * 60)}Бэкап базы</span><b>${fmtAge(h.backup_min)}</b></div>
+    <div class="hrow"><span>${dot(h.offsite_min, 50 * 60)}Копия в iCloud</span><b>${fmtAge(h.offsite_min)}</b></div>
+    <div class="hrow"><span><i class="dot ${h.overdue ? "bad" : "ok"}"></i>Зависшие сигналы (не судятся)</span><b>${h.overdue}</b></div>
     <div class="hrow"><span><i class="dot ${h.executor_enabled ? "ok" : "na"}"></i>Executor (демо)</span><b>${h.executor_enabled ? "вкл" : "выкл"}</b></div>
-    <div class="hrow"><span><i class="dot ${h.webapp_url ? "ok" : "na"}"></i>Туннель</span><b style="font-size:10.5px">${esc((h.webapp_url || "—").replace("https://", "").replace(/\/$/, ""))}</b></div>
+    <div class="hrow"><span><i class="dot ${h.webapp_url ? "ok" : "na"}"></i>Туннель</span><b class="trunc" style="font-size:10.5px">${esc((h.webapp_url || "—").replace("https://", "").replace(/\/$/, ""))}</b></div>
+    <div class="hrow"><span><i class="dot na"></i>Сегодня (UTC)</span><b>${h.today_pub} опубл. · ${h.today_shadow} в тени</b></div>
   </section>
-  <section><div class="sec-h"><h2>ОТКРЫТЫЕ (ПОЛНЫЕ УРОВНИ)</h2>
-    <span class="note">${opens ? "" : "нет открытых"}</span></div>
-    <table class="pos-t">${opens}</table></section>`;
+  <section><div class="sec-h"><h2>ЛОГ</h2><span class="note">WARNING / ERROR · новые сверху</span></div>
+    ${log ? `<div class="log">${log}</div>` : `<div class="empty">чисто</div>`}</section>`;
 }
 
 const authHdr = () => ({"Authorization": "tma " + tg.initData, "Content-Type": "application/json"});
@@ -758,8 +1445,12 @@ function admSet(key, value, el) {
     body: JSON.stringify({key, value})})
     .then(r => r.ok ? r.json() : null)
     .then(d => {
-      if (d && d.ok) { ADM_SEQ++; ADM.settings = d.settings; toast("Сохранено: " + key); }
-      else toast(d === null ? "Подпись устарела? Переоткрой дашборд" : "Отклонено сервером");
+      if (d && d.ok) {
+        ADM_SEQ++; ADM.settings = d.settings; hap("ok");
+        if (key === "paused") { ADM.health.paused = !!value; toast(value ? "Сигналы на паузе" : "Сигналы возобновлены"); }
+        else toast("Сохранено: " + key);
+      }
+      else { toast(d === null ? "Подпись устарела? Переоткрой дашборд" : "Отклонено сервером"); hap("err"); }
       render(true);
     })
     .catch(() => { toast("Сеть недоступна"); render(true); });
@@ -785,7 +1476,7 @@ function equitySVG(eq, H = 250, id = "eq") {
   const path = "M" + pts.join("L");
   const base = Y(yMin);
   g += `<path d="${path}L${X(eq.length - 1)} ${base}L${X(0)} ${base}Z" fill="url(#${gid})"/>`;
-  g += `<path d="${path}" fill="none" stroke="var(--pos)" stroke-width="2" stroke-linejoin="round"/>`;
+  g += `<path d="${path}" fill="none" stroke="var(--pos)" stroke-width="2" stroke-linejoin="round"${id === "eq" ? ' class="eqline"' : ""}/>`;
   const last = eq[eq.length - 1];
   g += `<circle cx="${X(eq.length - 1)}" cy="${Y(last.r)}" r="3.5" fill="var(--pos)"/>
         <text x="${X(eq.length - 1) + 7}" y="${Y(last.r) + 4}" font-size="12" font-weight="700" font-family="IBM Plex Mono,monospace" fill="var(--ink)">${fmtR(last.r)}</text>`;
@@ -859,7 +1550,7 @@ function histSVG(tr) {
 function wireTip() {
   const svg = $("#eq"), tip = $("#tip");
   if (!svg) return;
-  const { eq } = pick(), n = eq.length;
+  const eq = EQ_SHOWN.length ? EQ_SHOWN : pick().eq, n = eq.length;
   const move = ev => {
     const r = svg.getBoundingClientRect();
     const fx2 = (ev.clientX - r.left) / r.width * 640;
@@ -921,8 +1612,9 @@ function meFetch() {
     .catch(() => {});
 }
 
-setInterval(() => {
-  fetch("api/stats").then(r => r.json()).then(d => {
+function refreshAll(manual) {
+  if (manual) $(".live").classList.add("busy");
+  return fetch("api/stats").then(r => r.json()).then(d => {
     DATA = d;
     const t = (d.generated_at || "").slice(11, 16);
     $("#upd").textContent = t ? `live · ${t} UTC` : "live";
@@ -936,11 +1628,22 @@ setInterval(() => {
       const ae = document.activeElement;
       const editing = ae && ae.closest && ae.closest("#app")
         && ["INPUT", "SELECT", "TEXTAREA"].includes(ae.tagName);
-      const formTab = ["users", "settings"].includes(NAV);
+      const formTab = curNav() === "admin" && ["users", "settings"].includes(ANAV);
+      if (curNav() === "admin" && ANAV === "exec") axLoad();
       if (!editing && (!formTab || (!hadAdm && ADM))) render(true);
+      if (manual) { $(".live").classList.remove("busy"); hap("ok"); }
     });
-  }).catch(() => {});
-}, 60000);
+  }).catch(() => { if (manual) { $(".live").classList.remove("busy"); toast("Сеть недоступна"); hap("err"); } });
+}
+setInterval(() => { if (!document.hidden) refreshAll(false); }, 60000);
+// вернулись в приложение после паузы — данные сразу свежие, а не через минуту
+let HIDDEN_AT = 0;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) HIDDEN_AT = Date.now();
+  else if (HIDDEN_AT && Date.now() - HIDDEN_AT > 30000) refreshAll(false);
+});
+document.addEventListener("click", e => { if (e.target.closest(".live")) refreshAll(true); });
+window.addEventListener("resize", () => renderNav());
 
 // --- симулятор депозита: сложный процент по закрытым сделкам журнала ---
 let SIM_RISK = 2, SIM_COSTS = true;
@@ -1020,13 +1723,14 @@ function loadLWC() {
 function pxPrec(p) { return p >= 1000 ? 1 : p >= 100 ? 2 : p >= 1 ? 3 : p >= 0.01 ? 5 : 7; }
 function openChart(id) {
   const m = $("#chartModal");
-  m.style.display = "flex";
+  clearTimeout(CHART_CLR);
+  m.classList.add("show"); hap("light"); syncBack();
   $("#chartHead").innerHTML = `<span class="dim">сделка #${id}…</span>`;
   $("#chartBody").innerHTML = `<div class="skel" style="padding:16px"><div class="sk t"></div><div class="sk big"></div><div class="sk w60"></div></div>`;
   Promise.all([fetch("api/trade_chart?id=" + id, ME ? {headers: authHdr()} : {})
                  .then(r => r.json()).catch(() => null), loadLWC()])
     .then(([d]) => {
-      if ($("#chartModal").style.display === "none") return;   // успели закрыть
+      if (!$("#chartModal").classList.contains("show")) return;   // успели закрыть
       if (!d || !d.ok) {
         $("#chartBody").innerHTML = `<div class="warn" style="padding:24px;text-align:center">${esc((d && d.err) || "график недоступен")}</div>`;
         return;
@@ -1091,10 +1795,16 @@ function renderTradeChart(d) {
   sr.setMarkers(mk);
   chart.timeScale().fitContent();
 }
+let CHART_CLR = 0;
 function closeChart() {
-  $("#chartModal").style.display = "none";
-  if (CHART) { try { CHART.remove(); } catch (_) {} CHART = null; }
-  $("#chartBody").innerHTML = "";
+  const m = $("#chartModal");
+  if (!m.classList.contains("show")) return;
+  m.classList.remove("show"); syncBack();
+  clearTimeout(CHART_CLR);
+  CHART_CLR = setTimeout(() => {                         // чистим ПОСЛЕ угасания — без пустой вспышки
+    if (CHART) { try { CHART.remove(); } catch (_) {} CHART = null; }
+    $("#chartBody").innerHTML = "";
+  }, 200);
 }
 document.addEventListener("click", e => {
   if (e.target.closest("#chartClose") || e.target === $("#chartModal")) closeChart();
@@ -1105,12 +1815,82 @@ document.addEventListener("click", e => {
   const ch = e.target.closest("[data-chart]");
   if (ch) { openChart(ch.dataset.chart); return; }
   const rk = e.target.closest("[data-risk]");
-  if (rk) { SIM_RISK = +rk.dataset.risk; render(true); return; }
+  if (rk) { hap("sel"); SIM_RISK = +rk.dataset.risk; render(true); return; }
   const cf = e.target.closest("[data-cf]");
-  if (cf) { CLOSED_FILTER = cf.dataset.cf; render(true); return; }
+  if (cf) { hap("sel"); CLOSED_FILTER = cf.dataset.cf; render(true); return; }
   if (e.target.closest("[data-costs]")) { SIM_COSTS = !SIM_COSTS; render(true); return; }
   const nb = e.target.closest("[data-nav]");
-  if (nb) { NAV = nb.dataset.nav; render(true); return; }
+  if (nb) {
+    if (nb.dataset.nav !== curNav()) { NAV = nb.dataset.nav; store.set("nav", NAV); SWAP = true; hap("sel"); render(true); }
+    window.scrollTo({top: 0, behavior: REDUCED ? "auto" : "smooth"});
+    return;
+  }
+  const an = e.target.closest("[data-anav]");
+  if (an) {
+    if (an.dataset.anav !== ANAV) { ANAV = an.dataset.anav; store.set("anav", ANAV); SWAP = true; hap("sel"); render(true); }
+    an.scrollIntoView({block: "nearest", inline: "center", behavior: REDUCED ? "auto" : "smooth"});
+    return;
+  }
+  const ep = e.target.closest("[data-eqp]");
+  if (ep) { hap("sel"); EQP = ep.dataset.eqp; store.set("eqp", EQP); render(true); return; }
+  const trf = e.target.closest("[data-trf]");
+  if (trf) { hap("sel"); TR[trf.dataset.trf] = trf.dataset.v; trLoad(true); return; }
+  if (e.target.closest("[data-trmore]")) { trLoad(false); return; }
+  const ust = e.target.closest("[data-aust]");
+  if (ust) { hap("sel"); AU.st = ust.dataset.aust; AU.items = null; auLoad(); render(true); return; }
+  const usr = e.target.closest("[data-user]");
+  if (usr && ME && ME.admin) { openUser(+usr.dataset.user); return; }
+  const ua = e.target.closest("[data-uact]");
+  if (ua && ME && ME.admin) {
+    const id = +ua.dataset.uid, days = Math.trunc(Number(String(($("#s-days") || {}).value || "30").replace(",", "."))) || 30;
+    userAction(id, ua.dataset.uact, days, () => openUser(id));
+    return;
+  }
+  const asv = e.target.closest("[data-asv]");
+  if (asv) { hap("sel"); AS.view = asv.dataset.asv; asLoad(true); render(true); return; }
+  if (e.target.closest("[data-asmore]")) { asLoad(false); render(true); return; }
+  if (e.target.closest("[data-axrefresh]")) { axLoad(); toast("обновляю…"); return; }
+  const mc = e.target.closest("[data-mcur]");
+  if (mc) { hap("sel"); MCUR = mc.dataset.mcur; render(true); return; }
+  if (e.target.closest("#sheetClose") || e.target === $("#sheet")) { closeSheet(); return; }
+  const op = e.target.closest("[data-open]");
+  if (op && ME && ME.bot) {
+    const url = `https://t.me/${ME.bot}?start=${op.dataset.open}`;
+    if (inTg && tg.openTelegramLink) tg.openTelegramLink(url); else window.open(url, "_blank");
+    return;
+  }
+  const rf = e.target.closest("[data-ref]");
+  if (rf && ME && ME.referral) {
+    const link = ME.referral.link;
+    if (rf.dataset.ref === "copy") {
+      (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject())
+        .then(() => { toast("Ссылка скопирована"); hap("ok"); })
+        .catch(() => { const el = $("#reflink"); el.select(); toast("Выделено — скопируй"); });
+    } else if (inTg && tg.openTelegramLink) {
+      tg.openTelegramLink("https://t.me/share/url?url=" + encodeURIComponent(link)
+        + "&text=" + encodeURIComponent("Сигналы RSI Range — открытый трек-рекорд, каждая сделка в журнале"));
+    }
+    return;
+  }
+  const pz = e.target.closest("[data-pause]");
+  if (pz && ME && ME.admin) {
+    const on = pz.dataset.pause === "1";
+    const q = on ? "Поставить сигналы на паузу? Открытые сделки продолжат вестись." : "Возобновить поиск сигналов?";
+    const go = () => admSet("paused", on, pz);
+    if (tg && tg.showConfirm) tg.showConfirm(q, ok => { if (ok) go(); }); else if (window.confirm(q)) go();
+    return;
+  }
+  if (e.target.closest("[data-calcsave]")) {
+    const c = calcState();
+    prefsPost({depo_usd: c.usd, risk_pct: c.risk}, "Сохранено — личные сигналы бота посчитают объём");
+    return;
+  }
+  const pm = e.target.closest(".tgl[data-pref]");
+  if (pm && ME && ME.notify) {
+    const muted = pm.classList.contains("on");          // было «вкл» -> выключаем пуши
+    prefsPost({muted}, muted ? "Пуши сигналов выключены" : "Пуши сигналов включены");
+    return;
+  }
   const tglEl = e.target.closest(".tgl[data-set]");
   if (tglEl && ME && ME.admin) {
     admSet(tglEl.dataset.set, !tglEl.classList.contains("on"), tglEl);
@@ -1141,6 +1921,50 @@ document.addEventListener("click", e => {
   }
 });
 
+let inputT = 0;
+document.addEventListener("input", e => {
+  const id = e.target.id;
+  const clean = v => v.replace(/[^A-Za-z0-9]/g, "").slice(0, 15);
+  if (id === "trq") { clearTimeout(inputT); inputT = setTimeout(() => { TR.q = clean(e.target.value); trLoad(true); }, 350); }
+  else if (id === "auq") { clearTimeout(inputT); inputT = setTimeout(() => { AU.q = e.target.value.trim().slice(0, 40); AU.items = null; auLoad(); }, 350); }
+  else if (id === "asq") { clearTimeout(inputT); inputT = setTimeout(() => { AS.q = clean(e.target.value); asLoad(true); }, 350); }
+  else if (id === "calcUsd" || id === "calcRisk") {
+    const c = calcState(), v = Number(String(e.target.value).replace(",", "."));
+    if (isFinite(v) && v > 0) {
+      if (id === "calcUsd") { c.usd = v; store.set("calc.usd", v); } else { c.risk = Math.min(v, 10); store.set("calc.risk", c.risk); }
+      clearTimeout(inputT); inputT = setTimeout(() => render(true), 250);
+    }
+  }
+});
+document.addEventListener("change", e => {
+  const el = e.target.closest("select[data-pref]");
+  if (!el || !(ME && ME.notify)) return;
+  const qs = ($('select[data-pref="quiet_start"]') || {}).value, qe = ($('select[data-pref="quiet_end"]') || {}).value;
+  if ((qs === "") !== (qe === "")) return;              // ждём вторую границу
+  prefsPost(qs === "" ? {quiet_start: null, quiet_end: null} : {quiet_start: +qs, quiet_end: +qe},
+            qs === "" ? "Тихие часы выключены" : `Тихие часы ${qs}:00–${qe}:00 UTC`);
+});
+function prefsPost(body, okMsg) {
+  fetch("api/prefs", {method: "POST", headers: authHdr(), body: JSON.stringify(body)})
+    .then(r => r.json().catch(() => null).then(d => [r.ok, d]))
+    .then(([ok, d]) => {
+      if (ok && d && d.ok) { ME.depo = d.depo; ME.notify = d.notify; toast(okMsg); hap("ok"); }
+      else { toast((d && d.err) || "Не сохранилось — переоткрой дашборд"); hap("err"); }
+      render(true);
+    }).catch(() => toast("Сеть недоступна"));
+}
+// подсказки [data-tt] (календарь, выручка): наведение мышью и тап пальцем
+function ttShow(ev) {
+  const c = ev.target.closest && ev.target.closest("[data-tt]"), tip = $("#tip");
+  if (!c) { if (!(ev.target.closest && ev.target.closest("#eq"))) tip.style.opacity = "0"; return; }
+  tip.textContent = c.dataset.tt;
+  tip.style.left = Math.min(ev.clientX + 12, innerWidth - 160) + "px";
+  tip.style.top = (ev.clientY - 36) + "px"; tip.style.opacity = "1";
+}
+document.addEventListener("pointermove", e => { if (e.target.closest && e.target.closest("[data-tt]")) ttShow(e); });
+document.addEventListener("pointerdown", ttShow);
+document.addEventListener("keydown", e => { if (e.key === "Escape") { closeSheet(); closeChart(); } });
+
 // числа/выбор/URL в настройках — сохранение на change
 document.addEventListener("change", e => {
   const el = e.target.closest("[data-set]");
@@ -1165,7 +1989,7 @@ document.addEventListener("click", e => {
     return;
   }
   if (e.target.closest("[data-chart]")) return;     // тап по графику — не отметка
-  const tr = e.target.closest("tr[data-sid]");
+  const tr = e.target.closest("[data-sid]");
   if (!tr || !(ME && ME.private) || !inTg) return;
   const sid = +tr.dataset.sid;
   if (PENDING.has(sid)) return;
@@ -1180,7 +2004,7 @@ document.addEventListener("click", e => {
     .then(d => {
       PENDING.delete(sid);
       if (d && d.ok) {
-        if (gen === takeGen) { ME.taken = d.taken; ME.my_stats = d.my_stats; }
+        if (gen === takeGen) { ME.taken = d.taken; ME.my_stats = d.my_stats; hap("light"); }
       } else if (tg && tg.showAlert) {
         try { tg.showAlert("Отметка не сохранилась — переоткрой дашборд"); } catch (e2) {}
       }
@@ -1189,6 +2013,12 @@ document.addEventListener("click", e => {
     .catch(() => { PENDING.delete(sid); render(true); });
 });
 </script>
+<nav class="tabbar" id="tabbar" aria-label="Разделы"><div class="tabbar-in" id="tabbarIn"></div></nav>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true">
+  <div class="sheet-box"><div class="grab"></div><div class="sheet-h"><b id="sheetTitle"></b>
+    <button class="sheet-x" id="sheetClose" aria-label="закрыть">&times;</button></div>
+    <div id="sheetBody"></div></div>
+</div>
 <div id="chartModal">
   <div class="cm-box">
     <div class="cm-head" id="chartHead"></div>
