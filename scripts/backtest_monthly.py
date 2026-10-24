@@ -3,7 +3,7 @@
 
   .venv/bin/python -m scripts.backtest_monthly --out app/backtest_monthly.json
 
-Живые правила (runtime прода): сетапы 6226+LTF, min_stop_pct 1.3, трейлинг 1.5/0.2
+Живые правила (runtime прода): сетапы 6226+LTF, min_stop_pct 2.0 (с 20.10), трейлинг 1.5/0.2
 без тейка, cap 6 на сторону, тормоз 3 стопа / 6ч, дедуп, 1h+4h, 9 эталонных символов.
 Издержки — ТЕКУЩАЯ модель входа (маркет по касанию, замер 31.08): тейкер 0.055%/сторона,
 слип 0.02%, фандинг 0.125 bps за 1h. Паритет-чек перед публикацией: by_setup должен
@@ -20,6 +20,8 @@ sig_parity терял ~40% сигналов прода. На sig_prod: n=6675, +
 (TRAIN +2.2R, OOS +57.1R); с реальным слипом демо (−0.08R/сделку) — минус на обеих половинах.
 С 07.10.2026 прод — с гейтом «вход уже пройден» (late_entry_gate=entry, замер 06.10):
 снимок sig_prod_late_entry, n=5819, +358.1R, exp +0.061 (TRAIN +251.8R, OOS +106.3R).
+С 20.10.2026 — min_stop 2.0% (реалистичные издержки): sig_prod_late_entry_stop20,
+n=3284, +150.6R, exp +0.046 при M0; при слипе 0.25%/круг TRAIN −115R, OOS −13R.
 """
 from __future__ import annotations
 
@@ -39,9 +41,12 @@ SYMS = ("BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,1000PEPE/USDT:U
 # конфига движка (dump_signals --prod, 06.10.2026)
 # прод с 07.10.2026 — гейт «вход уже пройден» (late_entry_gate=entry): снимок
 # sig_prod_late_entry; sig_prod — тот же прод-конфиг без гейта (база замера 06.10)
-SIG_DIR = os.environ.get("SIG_DIR", "data/cache5y/sig_prod_late_entry")
+SIG_DIR = os.environ.get("SIG_DIR", "data/cache5y/sig_prod_late_entry_stop20")
+# min_stop снимка: гейт движка до выбора кандидата — должен совпадать с тем, каким снят кэш
+MIN_STOP = float(os.environ.get("MIN_STOP", "2.0" if SIG_DIR.endswith("_stop20") else "1.3"))
 # эталон базы (M0, 1h+4h, весь период) по кэшу: сверка, что замер мерит то же, что бэктест
-_BASELINES = {"sig_prod_late_entry": (5819, 358.1), "sig_prod": (6675, 59.3),
+_BASELINES = {"sig_prod_late_entry_stop20": (3284, 150.6),
+              "sig_prod_late_entry": (5819, 358.1), "sig_prod": (6675, 59.3),
               "sig_parity": (5309, 73.3)}
 
 
@@ -56,7 +61,7 @@ def check_baseline(n: int, total: float) -> str:
 def run(fee: float) -> dict:
     args = parse_args(["--symbols", SYMS, "--tfs", "1h,4h",
                        "--cache", "data/cache5y", "--signals", SIG_DIR,
-                       "--setups", "6226,LTF", "--min-stop-pct", "1.3",
+                       "--setups", "6226,LTF", "--min-stop-pct", str(MIN_STOP),
                        "--trail-activate", "1.5", "--trail-dist", "0.2",
                        "--fee", str(fee), "--slip", "0.02", "--funding", "0.125",
                        "--entry-fill", "touch"])

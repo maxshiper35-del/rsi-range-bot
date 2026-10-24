@@ -529,8 +529,8 @@ def test_api_backtest_static_json(fresh_db):
     assert r.status_code == 200
     d = r.get_json()
     # паритет с живым судьёй (05.10), снимок с гейтами движка прода (06.10) и гейт «вход
-    # уже пройден» (07.10): 5819 сделок, +358.1R
-    assert len(d["months"]) == 60 and d["totals"]["trades"] == 5819
+    # уже пройден» (07.10), min_stop 2.0 (20.10): 3284 сделки, +150.6R
+    assert len(d["months"]) == 60 and d["totals"]["trades"] == 3284
     assert "by_setup" not in d
     body = r.get_data(as_text=True)
     for token in ("6226", "LTF", "1:1", "open-SMC", "bias", "sweep", "confl"):
