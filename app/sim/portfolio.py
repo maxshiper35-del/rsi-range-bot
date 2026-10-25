@@ -156,7 +156,8 @@ def simulate_portfolio(bars: dict, signals: list, *,
                        max_hold_hours: float = 168.0,
                        extra_cost_r: float = 0.0,
                        symbol_cooldown_hours: float = 0.0,
-                       gap_open: bool = False) -> PortfolioReport:
+                       gap_open: bool = False,
+                       dedup_scope: str = "setup") -> PortfolioReport:
     """bars: {(symbol, tf): df} — те же кэш-бары, по которым считались сигналы.
     signals: список словарей из scripts.dump_signals (symbol, tf, bar_index, side, ...).
 
@@ -220,8 +221,12 @@ def simulate_portfolio(bars: dict, signals: list, *,
         return False
 
     def duplicate_active(sig: dict, now: pd.Timestamp) -> bool:
-        return any(a["symbol"] == sig["symbol"] and a["tf"] == sig["tf"]
-                   and a["side"] == sig["side"] and a["setup"] == sig["setup"]
+        """dedup_scope="setup" — как прод (journal.find_duplicate_setup: монета, ТФ, сторона,
+        сетап); "symbol_side" — одна активная позиция на монету+сторону (замер 25.10)."""
+        same_setup = dedup_scope != "symbol_side"
+        return any(a["symbol"] == sig["symbol"] and a["side"] == sig["side"]
+                   and (not same_setup or (a["tf"] == sig["tf"]
+                                           and a["setup"] == sig["setup"]))
                    and a["signal_dt"] <= now < a["closed_dt"]
                    for a in active)
 

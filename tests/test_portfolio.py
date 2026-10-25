@@ -40,6 +40,22 @@ def test_portfolio_dedup_blocks_same_setup_while_active():
     assert off.skipped_dedup == 0 and off.signals_taken == 2
 
 
+def test_portfolio_dedup_scope_symbol_side():
+    """dedup_scope="symbol_side": другой ТФ/сетап по той же монете и стороне — тоже дубль;
+    противоположная сторона и другая монета — нет. Дефолт — как прод (по сетапу)."""
+    bars = {("A/USDT:USDT", "1h"): _bars(), ("A/USDT:USDT", "4h"): _bars(tf_hours=4),
+            ("B/USDT:USDT", "1h"): _bars()}
+    # все в один момент: первый A-LONG активен (ждёт филла), остальные решаются при нём
+    sigs = [_sig("A/USDT:USDT", 10), _sig("A/USDT:USDT", 10, setup="LTF-BB"),
+            _sig("A/USDT:USDT", 2, tf="4h", dt=pd.Timestamp("2026-01-01 10:00", tz="UTC")),
+            _sig("A/USDT:USDT", 10, side="SHORT", entry=100.0, stop=101.0, tp=98.0),
+            _sig("B/USDT:USDT", 10)]
+    kw = {"max_open_per_side": 0, "cooldown_stops": 0}
+    assert simulate_portfolio(bars, sigs, **kw).skipped_dedup == 0
+    rep = simulate_portfolio(bars, sigs, dedup_scope="symbol_side", **kw)
+    assert rep.skipped_dedup == 2 and rep.signals_taken == 3
+
+
 def test_portfolio_side_cap_counts_across_symbols():
     """Лимит стороны — ПОРТФЕЛЬНЫЙ: считает позиции по всем символам сразу
     (посимвольный бэктест этого эффекта не видит в принципе)."""
