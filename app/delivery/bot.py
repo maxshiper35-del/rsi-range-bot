@@ -2972,6 +2972,43 @@ def main() -> None:
         txt = await asyncio.to_thread(forward_check.report, datetime.now(timezone.utc))
         await m.answer(txt, parse_mode="HTML")
 
+    @dp.message(Command("video"))
+    async def _video_cmd(m):
+        # вертикальное видео-повтор закрытой сделки (Reels/Shorts/TikTok): /video [id];
+        # без id — последняя закрытая исполненная. Только админ (контент — его решение).
+        if not _is_admin(m):
+            return
+        from aiogram.types import BufferedInputFile
+
+        from app.delivery import replay
+        arg = (m.text or "").split(maxsplit=1)[1:]
+        if arg and not arg[0].strip().lstrip("#").isdigit():
+            await m.answer("Формат: /video или /video 690")
+            return
+        q = ("SELECT * FROM signals WHERE status IN ('tp1','tp2','tp3','stopped') "
+             "AND filled_at IS NOT NULL AND closed_at IS NOT NULL AND result_r IS NOT NULL")
+        rows = await asyncio.to_thread(
+            db.query, q + (" AND id=?" if arg else " ORDER BY closed_at DESC LIMIT 1"),
+            (int(arg[0].strip().lstrip("#")),) if arg else ())
+        if not rows:
+            await m.answer("Нет такой закрытой исполненной сделки (истёкшие без входа "
+                           "и открытые не подходят).")
+            return
+        row = dict(rows[0])
+        await m.answer(f"🎬 Рендерю повтор #{row['id']} — ~30 с…")
+        try:
+            mp4 = await asyncio.to_thread(replay.render_replay_mp4, row)
+        except Exception as e:                          # noqa: BLE001 — сеть/браузер/ffmpeg
+            log.exception("video #%s", row["id"])
+            await m.answer(f"Не вышло отрендерить: {templates.esc(str(e))[:300]}")
+            return
+        base = row["symbol"].split("/")[0]
+        await m.answer_video(
+            BufferedInputFile(mp4, filename=f"rsirange_{row['id']}_{base}.mp4"),
+            width=replay.W, height=replay.H, supports_streaming=True,
+            caption=(f"#{row['id']} {base} {row['side']} · {row['result_r']:+.2f}R "
+                     "(до комиссий). Для Reels/Shorts/TikTok — сохраните файл."))
+
     @dp.message(Command("shadow"))
     async def _shadow_cmd(m):
         # теневой режим сетапов: итог контрфакта (не публикуется) — к решению по
