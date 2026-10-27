@@ -1023,6 +1023,8 @@ def api_me() -> Response:
         dp = payments.depo_prefs(uid)
         payload["depo"] = {"usd": dp[0], "risk": dp[1]} if dp else None
         payload["notify"] = payments.notify_prefs(uid)
+        aff = runtime.affiliate_url()
+        payload["affiliate"] = aff if aff.startswith("https://") else None
     return _no_store(payload)
 
 

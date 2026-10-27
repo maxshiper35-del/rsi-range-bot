@@ -763,3 +763,19 @@ def test_admin_set_symbols_validation(fresh_db, admin_env):
             {"key": "min_stop_pct", "value": 11})).status_code == 400
         assert c.post("/api/admin/set", headers=hdr, data=json.dumps(
             {"key": "min_stop_pct", "value": 1.3})).status_code == 200
+
+
+def test_api_me_affiliate_link_for_subscriber(fresh_db, webapp_token):
+    """Партнёрская ссылка в «Моё»: только https, нет ссылки — null."""
+    from app import db, runtime
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(500300, "payer")
+    db.execute("UPDATE users SET tier='paid', paid_until='2099-01-01T00:00:00+00:00' "
+               "WHERE tg_id=500300")
+    hdr = {"Authorization": "tma " + _init_data("123:TEST", 500300)}
+    with flask_app.test_client() as c:
+        assert c.get("/api/me", headers=hdr).get_json()["affiliate"] is None
+        runtime.set_value("affiliate_url", "https://partner.bybit.com/b/RSIRANGE")
+        assert c.get("/api/me", headers=hdr).get_json()["affiliate"] == \
+            "https://partner.bybit.com/b/RSIRANGE"

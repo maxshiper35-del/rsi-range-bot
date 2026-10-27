@@ -509,6 +509,30 @@ def _affiliate_block() -> str:
             f"поддерживает проект (реферальная): {url}")
 
 
+def format_bybit_guide(affiliate_url: str = "") -> str:
+    """/bybit — как вручную открыть сигнал на Bybit: ордер, стоп, нативный трейлинг.
+    Трейлинг ордером на бирже, а не руками раз в час: часовая перестановка стоила
+    ~0.27R на выход по трейлу (замер 24.10). Реф-ссылка — только если задана."""
+    ref = (f"\n\n🟡 Регистрация по нашей ссылке (реферальная — поддерживает проект, "
+           f"комиссии для вас не выше): {affiliate_url}"
+           if affiliate_url.startswith("https://") else "")
+    return (
+        "🟡 <b>Как торговать сигнал на Bybit</b>\n\n"
+        "1. <b>Деривативы → USDT-перпетуалы</b> → монета из сигнала (ETH → ETHUSDT).\n"
+        "2. <b>Лимитный ордер</b> по цене «Вход»: LONG — Buy, SHORT — Sell. Вход — уровень "
+        "отката, цена обычно должна к нему прийти.\n"
+        "3. <b>Сразу стоп-лосс</b> = «Стоп» из сигнала (TP/SL при создании ордера). Объём — "
+        "чтобы стоп стоил 1–2% депозита: кнопка «🧮 Риск» под сигналом или /depo.\n"
+        "4. <b>Трейлинг-стоп ордером на бирже</b>: позиция → TP/SL → Trailing Stop. "
+        "Расстояние = «отступ» из сигнала (в цене), активация = цена «активация». Дальше "
+        "стоп за ценой ведёт сама биржа.\n"
+        "5. Тейк-профит не ставим: выход — по трейлингу или стопу.\n\n"
+        "Не двигайте стоп руками раз в час — по замеру это стоит ~0.27R на сделку: "
+        "откат внутри часа закрывает позицию хуже, чем трейлинг биржи.\n"
+        "⚠️ Не финансовый совет. Риск на сделку 1–2%."
+        f"{ref}")
+
+
 def format_terms() -> str:
     """/terms — условия использования: консолидация того, что уже разбросано по /about,
     /subscribe, ANTISCAM_LINE, в один документ. Добросовестный черновик, НЕ юридическая
@@ -1000,7 +1024,24 @@ def healthcheck_ping(url: str | None, poller_fresh_seconds: float = 2 * 3600) ->
     return True
 
 
-def channel_cta_markup(bot_username: str | None, src: str):
+def affiliate_label(url: str) -> str:
+    """Текст кнопки партнёрки: биржа по домену + честная пометка «реф.»."""
+    u = url.lower()
+    name = ("Bybit" if "bybit" in u else "BingX" if "bingx" in u else "Binance"
+            if "binance" in u else "OKX" if "okx" in u else "биржа")
+    return f"🟡 Торговать на {name} — реф. ссылка"
+
+
+def affiliate_row(url: str) -> list:
+    """Строка инлайн-клавиатуры с партнёрской ссылкой ([] — ссылка не задана). Пометка
+    «реф.» прямо в кнопке: тот же стандарт прозрачности, что в /about."""
+    if not url.startswith("https://"):
+        return []
+    from aiogram.types import InlineKeyboardButton  # ленивый импорт
+    return [[InlineKeyboardButton(text=affiliate_label(url), url=url)]]
+
+
+def channel_cta_markup(bot_username: str | None, src: str, affiliate_url: str = ""):
     """Инлайн-CTA под постом КАНАЛА: единственная кнопка-ссылка в бота с deep-link
     атрибуцией (/start src_<src> -> payments.set_acquisition_source, first-touch).
 
@@ -1016,10 +1057,10 @@ def channel_cta_markup(bot_username: str | None, src: str):
 
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
         text="⚡ Получать сигналы в личку",
-        url=f"https://t.me/{bot_username}?start=src_{src}")]])
+        url=f"https://t.me/{bot_username}?start=src_{src}")]] + affiliate_row(affiliate_url))
 
 
-def xray_channel_markup(bot_username: str | None, sid: int):
+def xray_channel_markup(bot_username: str | None, sid: int, affiliate_url: str = ""):
     """Кнопки под постом РЕЗУЛЬТАТА в канале: «Рентген сделки» (deep-link xray_<sid> ->
     анатомия в личке: суб-скоры, путь трейлинга) + стандартный CTA. Рентген — двойной
     агент: уникальный трест-артефакт И вход в воронку (юзер попадает в бота)."""
@@ -1032,7 +1073,7 @@ def xray_channel_markup(bot_username: str | None, sid: int):
                               url=f"https://t.me/{bot_username}?start=xray_{sid}")],
         [InlineKeyboardButton(text="⚡ Получать сигналы в личку",
                               url=f"https://t.me/{bot_username}?start=src_chres")],
-    ])
+    ] + affiliate_row(affiliate_url))
 
 
 _TRACKRECORD_COLS = ("id", "symbol", "side", "timeframe", "entry", "stop", "tp1", "tp2", "tp3",
@@ -1175,6 +1216,7 @@ USER_COMMANDS = [
     ("trackrecord", "полный CSV-журнал сигналов + sha256 (проверяемый трек-рекорд)"),
     ("dashboard", "визуальный дашборд: эквити-кривая, разбивки, вехи"),
     ("calc", "калькулятор позиции: /calc <деп> <риск%> <вход> <стоп>"),
+    ("bybit", "как торговать сигнал на Bybit: ордер, стоп, трейлинг"),
     ("subscribe", "подписка — все сигналы"),
     ("promo", "применить промокод: /promo <код>"),
     ("referral", "пригласить друга и получить дни подписки"),
@@ -1530,7 +1572,7 @@ def main() -> None:
         """CTA-кнопка для поста канала либо None (выключено/username ещё неизвестен)."""
         if not runtime.channel_cta_enabled():
             return None
-        return channel_cta_markup(bot_info["username"], src)
+        return channel_cta_markup(bot_info["username"], src, runtime.affiliate_url())
 
     async def _reward_referrer(tg_id: int, paid_days: float) -> None:
         """Реф-награда за РЕАЛЬНЫЙ платёж приглашённого + уведомление реферера. Best-effort:
@@ -1730,11 +1772,20 @@ def main() -> None:
             "Меню внизу экрана — всё в один тап; команды тоже работают (/help).\n"
             f"{ANTISCAM_LINE}\n"
             "⚠️ Не финансовый совет. Риск на сделку 1–2%.\n\n"
-            "📣 Понравится — поделитесь: t.me/rsirange_bot?start=src_share")
+            "📣 Понравится — поделитесь: t.me/rsirange_bot?start=src_share"
+            f"{_affiliate_block()}")
         if applied:
             text = (f"🎁 <b>Открыт полный доступ на {trial_days} дн.</b> — "
                     f"все сигналы без ограничений.\n\n" + text)
         await m.answer(text, reply_markup=_main_menu_kb(_is_admin(m)), parse_mode="HTML")
+
+    @dp.message(Command("bybit"))
+    async def _bybit(m):
+        aff = runtime.affiliate_url()
+        kb = InlineKeyboardMarkup(inline_keyboard=affiliate_row(aff)) if affiliate_row(aff) \
+            else None
+        await m.answer(format_bybit_guide(aff), parse_mode="HTML", reply_markup=kb,
+                       disable_web_page_preview=True)
 
     @dp.message(Command("about"))
     @dp.message(F.text == "ℹ️ О боте")
@@ -2081,7 +2132,7 @@ def main() -> None:
         return InlineKeyboardMarkup(inline_keyboard=[[
             b(text="📈 График", callback_data=f"sigchart:{sid}"),
             b(text="🧮 Риск", callback_data=f"sigcalc:{sid}"),
-        ]])
+        ]] + affiliate_row(runtime.affiliate_url()))
 
     async def _load_signal_for_action(cq):
         """Общая часть sigchart/sigcalc: распарсить sid, достать сигнал, ПРОВЕРИТЬ ПРАВО.
@@ -3147,8 +3198,9 @@ def main() -> None:
             await m.answer("Ссылка должна начинаться с https://")
             return
         await asyncio.to_thread(runtime.set_value, "affiliate_url", arg)
-        await m.answer("✅ Реф-ссылка задана: покажется в /about и закрепе-табло "
-                       "(обновится в течение часа)")
+        await m.answer("✅ Реф-ссылка задана: кнопка под постами канала и личными "
+                       "сигналами, /start, /about, /bybit, мини-приложение и закреп-табло "
+                       "(табло обновится в течение часа)")
 
     @dp.message(Command("addpromo"))
     async def _addpromo(m):
@@ -3467,7 +3519,7 @@ def main() -> None:
             txt = (f"{head}: {templates.esc(row['symbol'].split('/')[0])} "
                    f"{row['side']} · {templates.esc(row['timeframe'])} — "
                    f"<b>{row['result_r']:+.2f}R</b>\n{note}")
-            kb = xray_channel_markup(bot_info["username"], row["id"])
+            kb = xray_channel_markup(bot_info["username"], row["id"], runtime.affiliate_url())
             try:
                 png = await _render_png(_review_chart_png, row)
                 await bot.send_photo(
@@ -4266,7 +4318,8 @@ def main() -> None:
                     want_chart = lifecycle_chart_wanted(
                         runtime.lifecycle_chart_enabled(), runtime.channel_mode())
                     # под результатом — «Рентген сделки» (анатомия по deep-link) + CTA
-                    xray_kb = (xray_channel_markup(bot_info["username"], c["id"])
+                    xray_kb = (xray_channel_markup(bot_info["username"], c["id"],
+                                                   runtime.affiliate_url())
                                if runtime.channel_cta_enabled() else None)
                     msg = await _send_lifecycle_post(
                         channel, c["id"],

@@ -734,6 +734,18 @@ function refCard() {
     </section>`;
 }
 
+function affCard() {
+  const url = ME.affiliate;
+  if (!url) return "";
+  const ex = /bybit/i.test(url) ? "Bybit" : /bingx/i.test(url) ? "BingX" : "бирже";
+  return `<section><div class="sec-h"><h2>БИРЖА</h2><span class="note">реферальная ссылка</span></div>
+    <div class="mystat">Торгуйте сигналы на ${esc(ex)}: регистрация по нашей ссылке поддерживает
+      проект, комиссии для вас не выше. Стоп ставьте сразу, трейлинг — ордером на бирже
+      (параметры в каждом сигнале).</div>
+    <button class="btn" data-aff="1" style="margin-top:10px">Открыть ${esc(ex)}</button>
+    </section>`;
+}
+
 function notifyCard() {
   const n = ME.notify;
   if (!n) return "";
@@ -814,6 +826,7 @@ function renderMine(noAnim) {
       <div class="mystat">${myline}</div>${myEq}${vs}${sq}${share}
       ${rc.length ? `<div class="mystat" style="margin-top:10px">закрытые недавно — отметь свои:</div>
       <table class="pos-t">${rcRows}</table>` : ""}</section>`);
+    h += sec(affCard());
     h += sec(refCard());
     h += sec(notifyCard());
     $("#app").innerHTML = h;
@@ -1853,6 +1866,11 @@ document.addEventListener("click", e => {
   const mc = e.target.closest("[data-mcur]");
   if (mc) { hap("sel"); MCUR = mc.dataset.mcur; render(true); return; }
   if (e.target.closest("#sheetClose") || e.target === $("#sheet")) { closeSheet(); return; }
+  if (e.target.closest("[data-aff]") && ME && ME.affiliate) {
+    hap("sel");
+    if (inTg && tg.openLink) tg.openLink(ME.affiliate); else window.open(ME.affiliate, "_blank");
+    return;
+  }
   const op = e.target.closest("[data-open]");
   if (op && ME && ME.bot) {
     const url = `https://t.me/${ME.bot}?start=${op.dataset.open}`;

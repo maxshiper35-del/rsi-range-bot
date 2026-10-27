@@ -1263,3 +1263,24 @@ def test_battery_alert_parse_and_throttle():
     low = {**batt, "pct": 15}
     assert bot.should_alert_battery(low, "2026-10-09T01:44:00+00:00", now) is True
     assert "87%" in bot.battery_alert_text(batt) and "5:12" in bot.battery_alert_text(batt)
+
+
+def test_affiliate_row_and_channel_cta():
+    """Партнёрка: кнопка с честной пометкой «реф.» под постами; без ссылки — нет кнопки."""
+    url = "https://partner.bybit.com/b/RSIRANGE"
+    assert bot.affiliate_row("") == [] and bot.affiliate_row("http://x") == []
+    btn = bot.affiliate_row(url)[0][0]
+    assert btn.url == url and "Bybit" in btn.text and "реф" in btn.text
+    kb = bot.channel_cta_markup("rsirange_bot", "chsig", url)
+    assert len(kb.inline_keyboard) == 2 and kb.inline_keyboard[1][0].url == url
+    assert len(bot.channel_cta_markup("rsirange_bot", "chsig").inline_keyboard) == 1
+    assert bot.xray_channel_markup("rsirange_bot", 5, url).inline_keyboard[-1][0].url == url
+
+
+def test_bybit_guide():
+    plain = bot.format_bybit_guide()
+    assert "Trailing Stop" in plain and "стоп-лосс" in plain and "реферальная" not in plain
+    withref = bot.format_bybit_guide("https://partner.bybit.com/b/RSIRANGE")
+    assert "реферальная" in withref and "partner.bybit.com/b/RSIRANGE" in withref
+    for leak in ("6226", "LTF", "SMC"):
+        assert leak not in withref
