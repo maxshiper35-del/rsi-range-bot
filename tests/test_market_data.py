@@ -202,6 +202,11 @@ def test_top_liquid_symbols_filters_and_sorts():
     top = top_liquid_symbols(10, blacklist=("DOGE/USDT:USDT",), exchange=_StubEx())
     assert top == ["BTC/USDT:USDT", "ETH/USDT:USDT"]         # фильтры + сортировка по объёму
     assert top_liquid_symbols(1, exchange=_StubEx()) == ["BTC/USDT:USDT"]
+    # площадка исполнения (BingX): недоступная монета выпадает ДО отсечения топ-N и не
+    # занимает место в списке
+    allowed = {"ETH/USDT:USDT", "DOGE/USDT:USDT"}
+    assert top_liquid_symbols(1, exchange=_StubEx(), allowed=allowed) == ["ETH/USDT:USDT"]
+    assert top_liquid_symbols(10, exchange=_StubEx(), allowed=set()) == []
 
 
 def test_poll_once_paused_scores_open_but_finds_no_new(fresh_db):

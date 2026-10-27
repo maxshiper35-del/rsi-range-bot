@@ -296,3 +296,13 @@ def test_week_tier_default_and_override(fresh_db):
     runtime.set_value("week_price_stars", "0")
     assert runtime.week_price_stars() == 0
     assert runtime.effective()["week_price_stars"] == 0
+
+
+def test_watchlist_venue_default_bingx(fresh_db):
+    """27.10: авто-watchlist — только монеты площадки исполнения (демо BingX)."""
+    from app import runtime
+    assert runtime.watchlist_venue() == "bingx"
+    runtime.set_value("watchlist_venue", "off")
+    assert runtime.watchlist_venue() == ""
+    runtime.set_value("watchlist_venue", "BingX ")
+    assert runtime.watchlist_venue() == "bingx"

@@ -327,13 +327,45 @@ def fetch_history(symbol: str, timeframe: str, target_bars: int,
     return df.iloc[:-1].tail(target_bars).reset_index(drop=True)  # закрытые, не больше цели
 
 
+_VENUE_CACHE: dict = {}
+
+
+def venue_symbols(venue: str, sandbox: bool = True, ttl_sec: float = 6 * 3600) -> set[str]:
+    """Линейные USDT-свопы площадки исполнения ('bingx') — авто-watchlist берёт только их.
+
+    Решение владельца 27.10.2026: сигналы — только по монетам, которые реально торгуются
+    там, где стоит исполнение (демо BingX); иначе журнал копит сделки, которые executor
+    повторить не может (plan() пропускает их как «нет на BingX»). sandbox=True — тот же
+    список контрактов, что видит демо-executor (VST). Публичный эндпоинт, ключи не нужны;
+    кеш на ttl_sec — список контрактов меняется редко."""
+    import time as _time
+
+    import ccxt
+
+    key = (venue, sandbox)
+    hit = _VENUE_CACHE.get(key)
+    if hit is not None and _time.monotonic() - hit[0] < ttl_sec:
+        return hit[1]
+    ex = getattr(ccxt, venue)({"timeout": 20000, "options": {"defaultType": "swap"}})
+    if sandbox:
+        ex.set_sandbox_mode(True)
+    ex.load_markets()
+    syms = {s for s, m in ex.markets.items()
+            if m.get("swap") and m.get("linear") and s.endswith("/USDT:USDT")
+            and m.get("active", True) is not False}
+    _VENUE_CACHE[key] = (_time.monotonic(), syms)
+    return syms
+
+
 def top_liquid_symbols(n: int, blacklist: tuple = (), exchange_id: str | None = None,
                        min_quote_volume: float = 10_000_000.0,
-                       exchange=None) -> list[str]:
+                       exchange=None, allowed: set | None = None) -> list[str]:
     """Топ-N ликвидных USDT-перпетуалов по суточному объёму (авто-watchlist, мега-план MAX).
 
     Фильтры: только linear-свопы "*/USDT:USDT", объём 24ч не ниже min_quote_volume USD,
-    не из blacklist. exchange= — инъекция для тестов. Сортировка по quoteVolume убыв."""
+    не из blacklist, и (allowed не None) есть на площадке исполнения — фильтр ДО отсечения
+    топ-N, чтобы недоступная монета не занимала место в списке. exchange= — инъекция для
+    тестов. Сортировка по quoteVolume убыв."""
     if exchange is None:
         if exchange_id is None:
             from app.config import get_settings
@@ -344,6 +376,8 @@ def top_liquid_symbols(n: int, blacklist: tuple = (), exchange_id: str | None = 
     ranked = []
     for sym, t in tickers.items():
         if not sym.endswith("/USDT:USDT") or sym in blacklist:
+            continue
+        if allowed is not None and sym not in allowed:
             continue
         vol = t.get("quoteVolume")
         if vol is None or vol < min_quote_volume:

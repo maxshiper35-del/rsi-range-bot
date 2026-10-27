@@ -4311,11 +4311,15 @@ def main() -> None:
         if (runtime.watchlist_auto_enabled()
                 and should_refresh_board(runtime.last_watchlist_refresh_at(), now_iso)):
             try:
-                from app.data.market_data import top_liquid_symbols
+                from app.data.market_data import top_liquid_symbols, venue_symbols
                 current = await asyncio.to_thread(runtime.symbols)
+                # только монеты площадки исполнения; сбой загрузки её контрактов роняет
+                # ротацию целиком (повтор завтра) — без списка нельзя знать, что торгуемо
+                venue = runtime.watchlist_venue()
+                allowed = await asyncio.to_thread(venue_symbols, venue) if venue else None
                 top = await asyncio.to_thread(
                     top_liquid_symbols, runtime.watchlist_size(),
-                    runtime.watchlist_blacklist())
+                    runtime.watchlist_blacklist(), allowed=allowed)
                 gate: dict = {}
                 for sym in top:
                     if sym in current:

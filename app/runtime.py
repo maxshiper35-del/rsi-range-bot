@@ -419,6 +419,14 @@ def watchlist_auto_enabled() -> bool:
     return (_raw("watchlist_auto_enabled") or "0").lower() in _TRUE
 
 
+def watchlist_venue() -> str:
+    """Площадка исполнения, чьи контракты ограничивают авто-watchlist ('bingx'; ''/'off' —
+    без ограничения). Дефолт bingx — решение владельца 27.10.2026: демо-executor стоит на
+    BingX, сигналы по монетам вне BingX в исполнение не попадают."""
+    v = (_raw("watchlist_venue") or "bingx").strip().lower()
+    return "" if v == "off" else v
+
+
 def watchlist_size() -> int:
     return _num("watchlist_size", int, 15)
 
