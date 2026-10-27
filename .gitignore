@@ -38,3 +38,4 @@ graphify-out/
 data/backups-server/
 data/*.bak
 data/og.png
+data/content/
