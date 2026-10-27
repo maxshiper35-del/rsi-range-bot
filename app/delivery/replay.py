@@ -287,6 +287,21 @@ def fetch_trade_bars(row: dict) -> pd.DataFrame:
     return df[df["dt"] + pd.Timedelta(hours=1) <= now].reset_index(drop=True)
 
 
+def _ffmpeg() -> str:
+    """Путь к ffmpeg: под launchd PATH урезан до системного (/usr/bin:/bin) и Homebrew
+    не виден — голое "ffmpeg" падало FileNotFoundError в проде (27.10)."""
+    import shutil
+    from pathlib import Path
+
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    for cand in ("/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"):
+        if Path(cand).exists():
+            return cand
+    raise FileNotFoundError("ffmpeg не найден (brew install ffmpeg)")
+
+
 def frames_to_mp4(frames: list[tuple[str, float]], seed: int = 0,
                   cues: list | None = None, music: bool = True) -> bytes:
     """[(HTML кадра 1080×1920, длительность с)] -> MP4 (H.264, 30 fps, faststart) со
@@ -297,6 +312,8 @@ def frames_to_mp4(frames: list[tuple[str, float]], seed: int = 0,
     from pathlib import Path
 
     from playwright.sync_api import sync_playwright
+
+    ffmpeg = _ffmpeg()
 
     with tempfile.TemporaryDirectory() as td, sync_playwright() as p:
         browser = p.chromium.launch()
@@ -314,7 +331,7 @@ def frames_to_mp4(frames: list[tuple[str, float]], seed: int = 0,
         (Path(td) / "list.txt").write_text("\n".join(lines))
         out = Path(td) / "video.mp4"
         subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+            [ffmpeg, "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
              "-i", "list.txt", "-vf", "fps=30,format=yuv420p", "-c:v", "libx264",
              "-preset", "medium", "-crf", "20", "-movflags", "+faststart", out.name],
             cwd=td, check=True)
@@ -327,11 +344,11 @@ def frames_to_mp4(frames: list[tuple[str, float]], seed: int = 0,
         # громкость ~−16 LUFS (владелец 27.10: «чуть тише») — ОТДЕЛЬНЫМ шагом: loudnorm
         # в одной команде с -shortest съедал хвост ~2.6 с (окно анализа) — пропадал итог
         subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", "audio.wav",
+            [ffmpeg, "-y", "-loglevel", "error", "-i", "audio.wav",
              "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "44100", "norm.wav"],
             cwd=td, check=True)
         subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", out.name, "-i", "norm.wav",
+            [ffmpeg, "-y", "-loglevel", "error", "-i", out.name, "-i", "norm.wav",
              "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
              "-t", f"{total:.3f}", "-movflags", "+faststart", final.name],
             cwd=td, check=True)

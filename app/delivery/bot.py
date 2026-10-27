@@ -3133,10 +3133,15 @@ def main() -> None:
         period = f"{day:%d.%m.%Y}"
         trades = await asyncio.to_thread(journal.trades_for_period, start.isoformat(),
                                          end.isoformat())
-        if not trades:
+        async def note(text: str) -> None:
             for cid in chat_ids:
-                await bot.send_message(cid, f"🏭 За {period} закрытых сделок нет — "
-                                            "пака не будет.")
+                try:
+                    await bot.send_message(cid, text)
+                except Exception as e:                  # noqa: BLE001 — админ без /start
+                    log.warning("контент-пак -> %s: %s", cid, e)
+
+        if not trades:
+            await note(f"🏭 За {period} закрытых сделок нет — пака не будет.")
             return
         caps = content_pack.captions(period, trades)
         try:
@@ -3146,9 +3151,8 @@ def main() -> None:
             story = await _render_png(content_pack.render_story, period, trades)
         except Exception as e:                          # noqa: BLE001 — браузер/ffmpeg
             log.exception("контент-пак %s", period)
-            for cid in chat_ids:
-                await bot.send_message(cid, f"Не вышло собрать контент-пак за {period}: "
-                                            f"{templates.esc(str(e))[:300]}")
+            await note(f"Не вышло собрать контент-пак за {period}: "
+                       f"{templates.esc(str(e))[:300]}")
             return
         # повторы — все исполненные сделки дня по порядку (не лучшие), до MAX_REPLAYS
         rows = await asyncio.to_thread(

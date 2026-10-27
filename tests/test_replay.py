@@ -82,3 +82,13 @@ def test_frame_html_no_setup_taxonomy_and_honest_labels():
     loss = dict(row, result_r=-1.0)
     lplan = replay.replay_plan(loss, bars)
     assert "−1.00R" in replay.build_frame_html(loss, lplan, lplan["frames"][-1], outro=1.0)
+
+
+def test_ffmpeg_found_without_homebrew_in_path(monkeypatch):
+    # launchd даёт PATH=/usr/bin:/bin — which() не видит Homebrew, путь ищем сами
+    import shutil
+    from pathlib import Path
+
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    monkeypatch.setattr(Path, "exists", lambda self: str(self) == "/opt/homebrew/bin/ffmpeg")
+    assert replay._ffmpeg() == "/opt/homebrew/bin/ffmpeg"
