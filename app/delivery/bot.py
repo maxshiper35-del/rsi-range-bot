@@ -11,7 +11,7 @@ import asyncio
 import logging
 import re
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic as _monotonic
 
@@ -1265,6 +1265,9 @@ ADMIN_COMMANDS = USER_COMMANDS + [
     ("revoke", "снять подписку: /revoke <tg_id>"),
     ("users", "счётчики юзеров"),
     ("review", "разбор недели в канал сейчас (не ждать понедельника)"),
+    ("video", "видео-повтор сделки 9:16: /video [id]"),
+    ("weekvideo", "видео-итог недели 9:16: /weekvideo [now]"),
+    ("pack", "контент-пак дня (видео, карусель, сторис): /pack [ГГГГ-ММ-ДД]"),
     ("announce", "объявление в канал + подписчикам"),
     ("confirm", "подтвердить кандидата (semiauto): /confirm <id>"),
     ("reject", "отклонить кандидата (semiauto): /reject <id>"),
@@ -3103,6 +3106,96 @@ def main() -> None:
             caption=(f"🎬 Итог недели {period}: {len(trades)} сделок · {total:+.2f}R "
                      "(до комиссий). Для Reels/Shorts/TikTok — сохраните файл."))
 
+    @dp.message(Command("pack"))
+    async def _pack_cmd(m):
+        # контент-пак за день (по умолчанию вчера, UTC): /pack или /pack 2026-10-26
+        if not _is_admin(m):
+            return
+        arg = (m.text or "").split()[1:2]
+        try:
+            day = (date.fromisoformat(arg[0]) if arg
+                   else datetime.now(timezone.utc).date() - timedelta(days=1))
+        except ValueError:
+            await m.answer("Формат: /pack или /pack 2026-10-26")
+            return
+        await m.answer(f"🏭 Собираю контент-пак за {day:%d.%m.%Y} — пара минут…")
+        task = asyncio.create_task(_send_content_pack([m.chat.id], day))
+        _BG_TASKS.add(task)
+        task.add_done_callback(_BG_TASKS.discard)
+
+    async def _send_content_pack(chat_ids: list[int], day: date) -> None:
+        """Пак за UTC-день: видео «Итог дня», карусель, сторис, повторы сделок и подписи —
+        в личку админам (публикация в соцсети — их решение). Рендер один на всех."""
+        from aiogram.types import BufferedInputFile, InputMediaPhoto
+
+        from app.delivery import content_pack, replay, weekly_video
+        start, end = content_pack.day_period(day)
+        period = f"{day:%d.%m.%Y}"
+        trades = await asyncio.to_thread(journal.trades_for_period, start.isoformat(),
+                                         end.isoformat())
+        if not trades:
+            for cid in chat_ids:
+                await bot.send_message(cid, f"🏭 За {period} закрытых сделок нет — "
+                                            "пака не будет.")
+            return
+        caps = content_pack.captions(period, trades)
+        try:
+            video = await _render_png(weekly_video.render_week_mp4, period, trades,
+                                      "@rsi_range", "day")
+            slides = await _render_png(content_pack.render_carousel, period, trades)
+            story = await _render_png(content_pack.render_story, period, trades)
+        except Exception as e:                          # noqa: BLE001 — браузер/ffmpeg
+            log.exception("контент-пак %s", period)
+            for cid in chat_ids:
+                await bot.send_message(cid, f"Не вышло собрать контент-пак за {period}: "
+                                            f"{templates.esc(str(e))[:300]}")
+            return
+        # повторы — все исполненные сделки дня по порядку (не лучшие), до MAX_REPLAYS
+        rows = await asyncio.to_thread(
+            db.query, "SELECT * FROM signals WHERE status IN ('tp1','tp2','tp3','stopped') "
+            "AND filled_at IS NOT NULL AND result_r IS NOT NULL "
+            "AND closed_at >= ? AND closed_at < ? ORDER BY closed_at",
+            (start.isoformat(), end.isoformat()))
+        replays = []
+        for row in [dict(r) for r in rows[:content_pack.MAX_REPLAYS]]:
+            try:
+                replays.append((row, await _render_png(replay.render_replay_mp4, row)))
+            except Exception as e:                      # noqa: BLE001 — сеть/браузер
+                log.warning("контент-пак: повтор #%s: %s", row["id"], e)
+        total = sum(float(t["result_r"]) for t in trades)
+        head = (f"🏭 Контент-пак за {period}: {weekly_video.n_trades(len(trades))}, "
+                f"{total:+.2f}R до комиссий.\n\n"
+                "• Итог дня (видео) → TikTok, Reels, Shorts\n"
+                "• Карусель → Instagram-пост и фото-режим TikTok\n"
+                "• Сторис → Instagram/TikTok, добавьте стикер-ссылку на t.me/rsi_range\n"
+                "• Повторы сделок → по одному между итогами\n\n"
+                "Подпись — под каждым файлом, копируйте как есть. Минусовые дни "
+                "публикуем так же, как плюсовые.")
+        if len(rows) > len(replays):
+            head += (f"\n\nПовторов: {len(replays)} из {len(rows)} — остальные через "
+                     "/video <id>.")
+        for cid in chat_ids:
+            try:
+                await bot.send_message(cid, head)
+                await bot.send_video(
+                    cid, BufferedInputFile(video, filename=f"rsirange_day_{day:%Y%m%d}.mp4"),
+                    width=weekly_video.W, height=weekly_video.H, supports_streaming=True,
+                    caption=caps["video"])
+                await bot.send_media_group(cid, [
+                    InputMediaPhoto(media=BufferedInputFile(png, filename=f"slide{i}.png"),
+                                    caption=caps["carousel"] if i == 1 else None)
+                    for i, png in enumerate(slides[:10], 1)])
+                await bot.send_photo(cid, BufferedInputFile(story, filename="story.png"),
+                                     caption="Сторис дня (1080×1920)")
+                for row, mp4 in replays:
+                    base = row["symbol"].split("/")[0]
+                    await bot.send_video(
+                        cid, BufferedInputFile(mp4, filename=f"rsirange_{row['id']}_{base}.mp4"),
+                        width=replay.W, height=replay.H, supports_streaming=True,
+                        caption=content_pack.replay_caption(row))
+            except Exception as e:                      # noqa: BLE001 — один админ не валит всех
+                log.warning("контент-пак -> %s: %s", cid, e)
+
     @dp.message(Command("shadow"))
     async def _shadow_cmd(m):
         # теневой режим сетапов: итог контрфакта (не публикуется) — к решению по
@@ -4172,6 +4265,17 @@ def main() -> None:
                                               week_end.isoformat())
                 except Exception as e:                      # noqa: BLE001
                     log.warning("разбор недели: %s", e)
+        # контент-пак за вчера — админам в личку, раз в сутки после 05:00 UTC (день закрыт,
+        # к обеду есть что выложить). Маркер — ДО рендера: сбой не зациклит пак каждый такт,
+        # повторить вручную — /pack. Фоновой задачей: рендер — минуты.
+        p_now = datetime.now(timezone.utc)
+        p_day = (p_now - timedelta(days=1)).date().isoformat()
+        if p_now.hour >= 5 and cfg.admin_ids and runtime.content_pack_last_day() != p_day:
+            await asyncio.to_thread(runtime.set_content_pack_last_day, p_day)
+            task = asyncio.create_task(_send_content_pack(
+                list(cfg.admin_ids), date.fromisoformat(p_day)))
+            _BG_TASKS.add(task)
+            task.add_done_callback(_BG_TASKS.discard)
         # недельный ЛИЧНЫЙ дайджест подписчикам (ретеншн) — ВНЕ гейта канала: выключение
         # канала не должно молча убивать подписческую фичу (аудит-2 UX [4]). Отдельный
         # маркер от карточки; маркер ставим ДО рассылки: краш посреди рассылки не должен

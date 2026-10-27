@@ -24,10 +24,15 @@ from app.delivery.replay import (
     frames_to_mp4,
 )
 
-__all__ = ["H", "W", "build_week_frame_html", "equity_svg", "render_week_mp4", "week_stats"]
+__all__ = ["H", "W", "build_week_frame_html", "equity_svg", "n_trades", "render_week_mp4",
+           "week_stats"]
 
 EQ_W, EQ_H = 960, 470
 MAX_TILES = 40
+# подписи по масштабу периода: (заголовок, герой, монеты, призыв)
+_SCOPE = {"week": ("Итог недели", "Результат недели", "Монеты недели",
+                   "Следующая неделя — в"),
+          "day": ("Итог дня", "Результат дня", "Монеты дня", "Новые сделки — в")}
 
 _WEEK_CSS = """
 .hero{margin-top:46px}
@@ -53,6 +58,14 @@ _WEEK_CSS = """
 .bf{position:absolute;top:0;bottom:0;border-radius:8px}
 .bv{text-align:right;font-variant-numeric:tabular-nums}
 """
+
+
+def n_trades(n: int) -> str:
+    """«1 сделка», «3 сделки», «5 сделок»."""
+    m10, m100 = n % 10, n % 100
+    word = ("сделка" if m10 == 1 and m100 != 11
+            else "сделки" if 2 <= m10 <= 4 and not 12 <= m100 <= 14 else "сделок")
+    return f"{n} {word}"
 
 
 def week_stats(trades: list[dict]) -> dict:
@@ -122,8 +135,8 @@ def _tiles(trades: list[dict], k: int) -> str:
             f"{''.join(cells)}</div>{more}")
 
 
-def _by_symbol(trades: list[dict], top: int = 6) -> str:
-    """Монеты недели по сумме R (до top штук: сильнейшие и слабейшие) — полосы от нуля."""
+def _by_symbol(trades: list[dict], top: int = 6, scope: str = "week") -> str:
+    """Монеты периода по сумме R (до top штук: сильнейшие и слабейшие) — полосы от нуля."""
     agg: dict[str, float] = {}
     for t in trades:
         b = t["symbol"].split("/")[0]
@@ -141,19 +154,21 @@ def _by_symbol(trades: list[dict], top: int = 6) -> str:
         rows.append(f"<div class='bl'><div>{_esc(b)}</div><div class='bt'>"
                     f"<div class='bf' style='left:{left:.1f}%;width:{w:.1f}%;"
                     f"background:{col}'></div></div><div class='bv {cls}'>{tx}</div></div>")
-    return ("<div class='sl' style='margin-top:34px'>Монеты недели</div>"
+    return (f"<div class='sl' style='margin-top:34px'>{_SCOPE[scope][2]}</div>"
             f"<div class='bars'>{''.join(rows)}</div>")
 
 
 def build_week_frame_html(period: str, trades: list[dict], k: int, *, summary: bool = False,
-                          outro: float | None = None, channel: str = "@rsi_range") -> str:
-    """Кадр: первые k сделок недели; summary — блок лучшая/худшая/средняя вместо плиток;
-    outro — доля счётчика итога (0..1) на финальной заставке."""
+                          outro: float | None = None, channel: str = "@rsi_range",
+                          scope: str = "week") -> str:
+    """Кадр: первые k сделок периода (scope: week|day); summary — блок
+    лучшая/худшая/средняя вместо плиток; outro — доля счётчика итога (0..1) на заставке."""
+    title, hero, _coins, cta = _SCOPE[scope]
     st = week_stats(trades)
     part = week_stats(trades[:k])
     val, cls = _r_text(part["total"]) if k else ("0R", "neu")
     sub = (f"{k} из {st['n']} сделок · {part['wins']} в плюс / {part['losses']} в минус"
-           if not summary else f"{st['n']} сделок · {st['wins']} в плюс / "
+           if not summary else f"{n_trades(st['n'])} · {st['wins']} в плюс / "
                                f"{st['losses']} в минус")
     body = _tiles(trades, k)
     if summary and st["n"]:
@@ -169,47 +184,47 @@ def build_week_frame_html(period: str, trades: list[dict], k: int, *, summary: b
                 + card("Лучшая", st["best"]["result_r"],
                        _esc(st["best"]["symbol"].split("/")[0]))
                 + card("Худшая", worst["result_r"], worst_note)
-                + card("В среднем", st["exp"], "на сделку") + "</div>" + _by_symbol(trades))
+                + card("В среднем", st["exp"], "на сделку") + "</div>"
+                + _by_symbol(trades, scope=scope))
     over = ""
     if outro is not None:
         big, bcls = _r_text(st["total"] * outro)
         wr = round(st["wins"] / st["n"] * 100) if st["n"] else 0
-        over = (f"<div class='outro'><div class='olbl'>Итог недели · {_esc(period)}</div>"
+        over = (f"<div class='outro'><div class='olbl'>{title} · {_esc(period)}</div>"
                 f"<div class='big {bcls}'>{big}</div>"
-                f"<div class='oline'>{st['n']} сделок · винрейт {wr}%<br>"
+                f"<div class='oline'>{n_trades(st['n'])} · винрейт {wr}%<br>"
                 f"все закрытые сделки, без отбора</div>"
-                f"<div class='cta'>Следующая неделя — в {_esc(channel)}</div>"
+                f"<div class='cta'>{cta} {_esc(channel)}</div>"
                 f"<div class='note'>R — в долях риска, до комиссий · не финансовый совет"
                 f"</div></div>")
     return (
         f"<style>{_CSS}{_WEEK_CSS}</style><div class='page'>"
         f"<div class='top'><div class='brand'><div class='mark'>R</div><div>"
         f"<div class='name'>RSI Range</div><div class='handle'>{_esc(channel)}</div></div></div>"
-        f"<div class='eyebrow'>Итог недели<br>{_esc(period)}</div></div>"
-        f"<div class='hero'><div class='hl'>Результат недели</div>"
+        f"<div class='eyebrow'>{title}<br>{_esc(period)}</div></div>"
+        f"<div class='hero'><div class='hl'>{hero}</div>"
         f"<div class='hv {cls}'>{val}</div><div class='hs'>{sub}</div></div>"
         f"<div class='eq'>{equity_svg(st['cum'], k)}</div>{body}"
         f"<div class='foot'><div>R — в долях риска, до комиссий</div>"
         f"<div>не финансовый совет</div></div>{over}</div>")
 
 
-def render_week_mp4(period: str, trades: list[dict], channel: str = "@rsi_range") -> bytes:
+def render_week_mp4(period: str, trades: list[dict], channel: str = "@rsi_range",
+                    scope: str = "week") -> bytes:
     """Интро 1.2с · сделки по одной (всего ≈ 7с) · сводка 2.4с · счётчик итога 1.2с + 2.8с."""
     n = len(trades)
     if not n:
         raise ValueError("за период нет закрытых сделок")
     step = min(0.45, max(0.18, 7.0 / n))
-    frames = [(build_week_frame_html(period, trades, 0, channel=channel), 1.2)]
-    frames += [(build_week_frame_html(period, trades, k, channel=channel), step)
-               for k in range(1, n + 1)]
+
+    def fr(k: int, **kw) -> str:
+        return build_week_frame_html(period, trades, k, channel=channel, scope=scope, **kw)
+
+    frames = [(fr(0), 1.2)] + [(fr(k), step) for k in range(1, n + 1)]
     frames[-1] = (frames[-1][0], 1.0)
-    frames.append((build_week_frame_html(period, trades, n, summary=True, channel=channel),
-                   2.4))
-    frames += [(build_week_frame_html(period, trades, n, summary=True,
-                                      outro=(i + 1) / 12, channel=channel), 0.1)
-               for i in range(12)]
-    frames.append((build_week_frame_html(period, trades, n, summary=True, outro=1.0,
-                                         channel=channel), 2.8))
+    frames.append((fr(n, summary=True), 2.4))
+    frames += [(fr(n, summary=True, outro=(i + 1) / 12), 0.1) for i in range(12)]
+    frames.append((fr(n, summary=True, outro=1.0), 2.8))
     # акценты: по звуку на каждую сделку (выше — плюс, ниже — минус) и аккорд итога недели
     cues, t = [], 1.2
     for tr in trades:
