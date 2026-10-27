@@ -163,12 +163,15 @@ _STAGE = {"wait": ("⏳", "Ждём вход по уровню"), "open": ("✅"
 
 _CSS = """
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{width:1080px;height:1920px;background:#0B0D11;overflow:hidden;
+html,body{width:1080px;height:1920px;overflow:hidden;
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-  -webkit-font-smoothing:antialiased;color:#EDEFF3}
-.page{position:relative;width:1080px;height:1920px;padding:72px 40px 56px;
+  -webkit-font-smoothing:antialiased;color:#EDEFF3;
   background:radial-gradient(900px 620px at 50% -6%,rgba(90,110,150,.20),transparent 62%),
   linear-gradient(180deg,#0E1016,#0B0D11 55%,#090B0F)}
+/* безопасная зона Reels/Shorts/TikTok: сверху шапка, справа кнопки, снизу подпись и ник —
+   макет 1080×1920 уменьшен до 76% и сдвинут влево-вверх, фон остаётся на весь экран */
+.page{position:relative;width:1080px;height:1920px;padding:72px 40px 56px;
+  transform:translate(60px,110px) scale(.76);transform-origin:0 0}
 .top{display:flex;justify-content:space-between;align-items:center}
 .brand{display:flex;gap:16px;align-items:center}
 .mark{width:64px;height:64px;border-radius:18px;background:linear-gradient(155deg,#4C6EF5,#7C5CFC);
@@ -196,7 +199,8 @@ html,body{width:1080px;height:1920px;background:#0B0D11;overflow:hidden;
 .pos{color:#4ADE9C}.neg{color:#F16565}.neu{color:#C7CBD4}
 .foot{position:absolute;left:40px;right:40px;bottom:52px;display:flex;justify-content:space-between;
   font-size:20px;color:#5F6571}
-.outro{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;
+.outro{position:absolute;inset:-145px -270px -470px -80px;display:flex;flex-direction:column;
+  justify-content:center;
   align-items:center;text-align:center;background:rgba(9,11,15,.88);padding:0 80px}
 .big{font-size:230px;font-weight:800;letter-spacing:-6px;font-variant-numeric:tabular-nums;line-height:1}
 .olbl{font-size:30px;font-weight:700;letter-spacing:.14em;color:#8A909C;text-transform:uppercase}
@@ -320,11 +324,11 @@ def frames_to_mp4(frames: list[tuple[str, float]], seed: int = 0,
         total = sum(d for _h, d in frames)
         (Path(td) / "audio.wav").write_bytes(soundtrack.build(total, seed, cues))
         final = Path(td) / "final.mp4"
-        # громкость под нормы соцсетей (~−14 LUFS) — ОТДЕЛЬНЫМ шагом: loudnorm в одной
-        # команде с -shortest съедал хвост ~2.6 с (окно анализа) — пропадал финальный итог
+        # громкость ~−16 LUFS (владелец 27.10: «чуть тише») — ОТДЕЛЬНЫМ шагом: loudnorm
+        # в одной команде с -shortest съедал хвост ~2.6 с (окно анализа) — пропадал итог
         subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error", "-i", "audio.wav",
-             "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-ar", "44100", "norm.wav"],
+             "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "44100", "norm.wav"],
             cwd=td, check=True)
         subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error", "-i", out.name, "-i", "norm.wav",

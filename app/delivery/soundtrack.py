@@ -118,10 +118,10 @@ def build(duration: float, seed: int = 0, cues: list | None = None,
             bl = _tone(root, beat * 0.95, harmonics=2, detune=0.0)
             _add(bass, bl * _env(len(bl), 0.01, 0.12), tb, 0.30 if b in (0, 2) else 0.18)
             if b in (0, 2) and i >= 1:
-                _add(drums, _kick(), tb, 0.65)
+                _add(drums, _kick(), tb, 0.50)
         if i >= 2:                                    # хэты и арпеджио со 3-го такта
             for e in range(8):
-                _add(drums, _hat(rng), t_bar + e * beat / 2, 0.10 if e % 2 else 0.05)
+                _add(drums, _hat(rng), t_bar + e * beat / 2, 0.06 if e % 2 else 0.03)
             for s in range(16):
                 note = chord[s % len(chord)] + (24 if (s // 4) % 2 else 12)
                 _add(arp, _pluck(_hz(note), 0.25, bright=3), t_bar + s * beat / 4, 0.07)
