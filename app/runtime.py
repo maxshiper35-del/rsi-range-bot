@@ -273,6 +273,15 @@ def set_content_pack_last_day(day: str) -> None:
     set_value("content_pack_last_day", day)
 
 
+def postmortem_last_day() -> str | None:
+    """YYYY-MM-DD дня, за который разбор сделок уже ушёл админам (раз в сутки)."""
+    return _raw("postmortem_last_day")
+
+
+def set_postmortem_last_day(day: str) -> None:
+    set_value("postmortem_last_day", day)
+
+
 def affiliate_url() -> str:
     """Партнёрская ссылка биржи ('' = блоки скрыты) — /affiliate у админа.
     Монетизация без подписки (пункт PR-кита): реф в /about, /start и закрепе."""

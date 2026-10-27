@@ -1392,6 +1392,7 @@ ADMIN_COMMANDS = USER_COMMANDS + [
     ("price", "stars|usdt|days <N> — цена подписки"),
     ("freeweek", "лимит бесплатных сигналов/нед"),
     ("teasers", "потолок тизеров «по подписке» free-юзеру в сутки: /teasers 1"),
+    ("why", "разбор сделок: почему плюс/минус — /why (сутки) или /why <id>"),
     ("affiliate", "реф-ссылка биржи в /about и закреп: /affiliate <url>|off"),
     ("addpromo", "создать промокод: /addpromo <код> <дней> [лимит]"),
     ("usdtlink", "ссылка на ручной USDT-счёт"),
@@ -3272,6 +3273,44 @@ def main() -> None:
         _BG_TASKS.add(task)
         task.add_done_callback(_BG_TASKS.discard)
 
+    def _postmortem_build(start: datetime, end: datetime) -> tuple[list, list]:
+        """Синхронно (to_thread): разборы сделок, закрытых в [start, end), и за 7 дней до end
+        (кластеры стопов и недельная сводка). Свечи — 1h с биржи, по запросу на символ."""
+        from app.data.market_data import fetch_closed_ohlcv
+        from app.delivery import postmortem
+        week_start = end - timedelta(days=7)
+        rows = journal.postmortem_rows(week_start.isoformat(), end.isoformat())
+        # удержание до 168ч: свечи с запасом 8 суток до начала недели
+        hours = int((datetime.now(timezone.utc) - week_start).total_seconds() // 3600)
+        limit = min(1000, hours + 8 * 24)
+        bars: dict = {}
+        for sym in sorted({r["symbol"] for r in rows} | {"BTC/USDT:USDT"}):
+            try:
+                bars[sym] = fetch_closed_ohlcv(sym, "1h", limit=limit)
+            except Exception as e:                     # noqa: BLE001 — без свечей: MFE «—»
+                log.warning("разбор сделок: свечи %s: %s", sym, e)
+        items = postmortem.analyze(rows, bars, bars.get("BTC/USDT:USDT"))
+        lo = start.isoformat()
+        return [a for a, r in zip(items, rows) if r["closed_at"] >= lo], items
+
+    async def _send_postmortem(chat_ids: list[int], day: date) -> None:
+        """Ежедневный разбор вчерашних сделок админам (запрос владельца 27.10)."""
+        from app.delivery import postmortem
+        start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+        try:
+            day_items, week_items = await asyncio.to_thread(
+                _postmortem_build, start, start + timedelta(days=1))
+            text = postmortem.render_digest(f"Разбор сделок за {day:%d.%m}", day_items,
+                                            week_items)
+        except Exception as e:                         # noqa: BLE001 — разбор не роняет такт
+            log.warning("разбор сделок за %s: %s", day, e)
+            return
+        for cid in chat_ids:
+            try:
+                await bot.send_message(cid, text[:4096], parse_mode="HTML")
+            except Exception as e:                     # noqa: BLE001
+                log.warning("разбор сделок %s: %s", cid, e)
+
     async def _send_content_pack(chat_ids: list[int], day: date) -> None:
         """Пак за UTC-день: видео «Итог дня», карусель, сторис, повторы сделок и подписи —
         в личку админам (публикация в соцсети — их решение). Рендер один на всех."""
@@ -3466,6 +3505,39 @@ def main() -> None:
             await m.answer("Формат: /freeweek 3")
             return
         await _set(m, "free_signals_per_week", parts[1], f"Free-лимит: {parts[1]}/нед")
+
+    @dp.message(Command("why"))
+    async def _why(m):
+        # разбор сделок для владельца: /why — за последние сутки, /why <id> — одна сделка
+        if not _is_admin(m):
+            return
+        from app.delivery import postmortem
+        parts = (m.text or "").split()
+        now = datetime.now(timezone.utc)
+        await m.answer("🔍 Считаю разбор по свечам…")
+        if len(parts) > 1 and parts[1].lstrip("#").isdecimal():
+            sid = int(parts[1].lstrip("#"))
+            closed = await asyncio.to_thread(journal.closed_at_of, sid)
+            if closed is None:
+                await m.answer(f"Сделка #{sid} не найдена или ещё не закрыта.")
+                return
+            end = pd.Timestamp(closed).to_pydatetime() + timedelta(seconds=1)
+            _day, week = await asyncio.to_thread(_postmortem_build, end - timedelta(seconds=2),
+                                                 end)
+            a = next((x for x in week if x["id"] == sid), None)
+            if a is None:
+                await m.answer(f"Не удалось разобрать #{sid}.")
+                return
+            mfe = "—" if a["mfe"] is None else f"{a['mfe']:+.2f}R"
+            mae = "—" if a["mae"] is None else f"{a['mae']:.2f}R"
+            await m.answer(postmortem.trade_line(a) + f"\nЛучший ход в пользу {mfe} · "
+                           f"худший против {mae} · в позиции {a['hours']:.0f}ч · других "
+                           f"стопов той же стороны за ±3ч: {a['cluster']}",
+                           parse_mode="HTML")
+            return
+        day, week = await asyncio.to_thread(_postmortem_build, now - timedelta(days=1), now)
+        await m.answer(postmortem.render_digest("Разбор сделок за сутки", day, week)[:4096],
+                       parse_mode="HTML")
 
     @dp.message(Command("teasers"))
     async def _teasers(m):
@@ -4483,6 +4555,12 @@ def main() -> None:
         # повторить вручную — /pack. Фоновой задачей: рендер — минуты.
         p_now = datetime.now(timezone.utc)
         p_day = (p_now - timedelta(days=1)).date().isoformat()
+        if p_now.hour >= 5 and cfg.admin_ids and runtime.postmortem_last_day() != p_day:
+            await asyncio.to_thread(runtime.set_postmortem_last_day, p_day)
+            task = asyncio.create_task(_send_postmortem(
+                list(cfg.admin_ids), date.fromisoformat(p_day)))
+            _BG_TASKS.add(task)
+            task.add_done_callback(_BG_TASKS.discard)
         if p_now.hour >= 5 and cfg.admin_ids and runtime.content_pack_last_day() != p_day:
             await asyncio.to_thread(runtime.set_content_pack_last_day, p_day)
             task = asyncio.create_task(_send_content_pack(

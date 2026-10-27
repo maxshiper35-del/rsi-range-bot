@@ -946,6 +946,23 @@ def trades_for_period(start_iso: str, end_iso: str) -> list[dict]:
         (start_iso, end_iso))]
 
 
+def postmortem_rows(start_iso: str, end_iso: str) -> list[dict]:
+    """Закрытые СДЕЛКИ периода с уровнями и временем филла — для админского разбора
+    (app/delivery/postmortem.py). Отбор как у trades_for_period, без отменённых лимиток."""
+    return [dict(r) for r in db.query(
+        "SELECT id, symbol, side, timeframe, entry, stop, status, result_r, created_at, "
+        "filled_at, closed_at FROM signals WHERE status IN ('tp1','tp2','tp3','stopped') "
+        "AND result_r IS NOT NULL AND closed_at >= ? AND closed_at < ? ORDER BY closed_at",
+        (start_iso, end_iso))]
+
+
+def closed_at_of(sid: int) -> str | None:
+    """closed_at ЗАКРЫТОЙ сделки (для /why <id>) или None."""
+    r = db.query_one("SELECT closed_at FROM signals WHERE id=? AND result_r IS NOT NULL "
+                     "AND status IN ('tp1','tp2','tp3','stopped')", (sid,))
+    return r["closed_at"] if r else None
+
+
 def equity_series() -> list:
     """Хронологический список result_r закрытых сделок (по closed_at) — для эквити-кривой
     дашборда. Тот же фильтр, что stats(): суммы совпадут с total_r до копейки."""
