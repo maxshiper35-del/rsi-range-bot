@@ -149,7 +149,7 @@ def test_format_about_contains_disclaimer_parts():
 def test_format_backtest_summary():
     txt = bot.format_backtest_summary()
     assert "смоделированный" in txt          # CFTC 4.41-стиль дисклеймера
-    assert "НЕ обнаружено" in txt
+    assert "НЕ доказан" in txt
     assert "/stats" in txt
     assert "hindsight" in txt
     # /backtest — статический текст, не зависит от БД (не упадёт на пустом контексте)
