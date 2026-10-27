@@ -818,6 +818,20 @@ def acquisition_breakdown() -> dict:
     return {r["source"]: {"total": r["total"], "paid": r["paid"]} for r in rows}
 
 
+def revenue_by_source() -> dict:
+    """Выручка по источнику прихода юзера — только status='paid' (как acquisition_breakdown).
+    Валюты не смешиваем: Stars и USDT — разные деньги для мерчанта.
+    -> {source: {currency: сумма}}, source="—" — без метки."""
+    rows = db.query(
+        "SELECT COALESCE(u.acquisition_source, '—') AS source, p.currency AS currency, "
+        "SUM(p.amount) AS amount FROM payments p JOIN users u ON u.tg_id = p.tg_id "
+        "WHERE p.status='paid' GROUP BY source, p.currency")
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["source"], {})[r["currency"]] = float(r["amount"] or 0)
+    return out
+
+
 def admin_revoke(tg_id: int) -> None:
     """Снять подписку (tier=free, paid_until в прошлое)."""
     db.execute("UPDATE users SET tier='free', paid_until=?, updated_at=? WHERE tg_id=?",

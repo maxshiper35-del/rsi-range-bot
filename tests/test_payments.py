@@ -349,6 +349,21 @@ def test_acquisition_breakdown_promo_not_counted_as_paid(fresh_db):
     assert b["promo_campaign"] == {"total": 1, "paid": 0}
 
 
+
+def test_revenue_by_source_paid_only_currencies_apart(fresh_db):
+    """Выручка /growth по источнику: только status='paid', Stars и USDT не складываем."""
+    from app.delivery import payments
+    payments.register_user(740)
+    payments.set_acquisition_source(740, "tg_a")
+    payments.grant_subscription(740, "stars", 500, "XTR", 30, "charge_740")
+    payments.grant_subscription(740, "stars", 10, "XTR", 1, "charge_740b")
+    payments.register_user(741)
+    payments.set_acquisition_source(741, "tg_a")
+    payments.grant_subscription(741, "cryptobot", 7, "USDT", 30, "inv_741")
+    payments.register_user(742)
+    payments.grant_trial(742, 5)                           # триал — не выручка
+    assert payments.revenue_by_source() == {"tg_a": {"XTR": 510.0, "USDT": 7.0}}
+
 # --- USDT через CryptoBot (мок API) ---
 def test_cryptobot_enabled_via_runtime_token(fresh_db, monkeypatch):
     from app import runtime

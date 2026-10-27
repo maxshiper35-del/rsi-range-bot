@@ -396,21 +396,132 @@ def format_by_setup(by_setup: dict, title: str = "📐 Статистика по
     return "\n".join(lines)
 
 
-def format_growth(breakdown: dict) -> str:
+def _amount(x: float) -> str:
+    """Сумма с пробелом-разделителем тысяч и без хвостовых нулей: 1500 -> '1 500'."""
+    return f"{x:,.2f}".rstrip("0").rstrip(".").replace(",", " ")
+
+
+def _revenue(by_currency: dict) -> str:
+    return " + ".join(f"{_amount(v)}⭐" if cur == "XTR" else f"{_amount(v)} {cur}"
+                      for cur, v in sorted(by_currency.items()))
+
+
+def format_growth(breakdown: dict, spend: dict | None = None,
+                  revenue: dict | None = None) -> str:
     """Текст /growth — источник → приглашено → реально оплатили → % конверсии. "Оплатили"
     здесь строго payments.status='paid' (см. journal.acquisition_breakdown) — триал/промо
-    не в счёт, иначе конверсия дашборда врала бы себе."""
-    if not breakdown:
+    не в счёт, иначе конверсия дашборда врала бы себе.
+
+    spend — расход на рекламу по меткам (/ad, ₽): метка с расходом, но без пришедших,
+    тоже видна — купленный пост, который никого не привёл, и есть главный вывод.
+    revenue — выручка по источникам (payments.revenue_by_source), валюты не смешиваем."""
+    spend = {k: v for k, v in (spend or {}).items() if v > 0}
+    revenue = revenue or {}
+    if not breakdown and not spend:
         return "📈 Атрибуция\n────────────────────\nЮзеров пока нет."
+    rows = dict(breakdown)
+    for src in spend:
+        rows.setdefault(src, {"total": 0, "paid": 0})
     lines = ["📈 Атрибуция по источникам", "────────────────────"]
-    for source, s in sorted(breakdown.items(), key=lambda kv: -kv[1]["total"]):
+    for source, s in sorted(rows.items(), key=lambda kv: -kv[1]["total"]):
         total, paid = s["total"], s["paid"]
         pct = f"{paid / total:.0%}" if total else "0%"
         label = "неизвестно/органика" if source == "—" else source
         lines.append(f"• {label}: {total} приглашено, {paid} оплатили ({pct})")
+        extra = []
+        if source in spend:
+            cost = spend[source]
+            per_user = f"{_amount(cost / total)} ₽" if total else "—"
+            per_paid = f"{_amount(cost / paid)} ₽" if paid else "—"
+            extra.append(f"расход {_amount(cost)} ₽: {per_user} за юзера, "
+                         f"{per_paid} за оплатившего")
+        if revenue.get(source):
+            extra.append(f"выручка {_revenue(revenue[source])}")
+        if extra:
+            lines.append("   " + " · ".join(extra))
+    if spend:
+        users = sum(rows[s]["total"] for s in spend)
+        payers = sum(rows[s]["paid"] for s in spend)
+        lines.append("────────────────────")
+        lines.append(f"Реклама (/ad): {_amount(sum(spend.values()))} ₽ → {users} юзеров, "
+                     f"{payers} оплатили")
     lines.append("────────────────────")
     lines.append("Рефералы: программа ещё не запущена (задача 23, после первой оплаты).")
     return "\n".join(lines)
+
+
+# метка рекламного источника: часть deep-link /start src_<метка> (Telegram: start-параметр
+# до 64 символов из [A-Za-z0-9_-]); нижний регистр — чтобы «Kanal» и «kanal» не стали двумя
+_AD_LABEL = re.compile(r"[a-z0-9_]{2,40}")
+
+
+def parse_ad_args(text: str) -> tuple[str | None, float]:
+    """'/ad <метка> [сумма₽]' -> (метка | None без аргументов, сумма; 0 — без расхода).
+    Сумма допускает '1 500', '1500₽', '-500' (поправка). Кривой ввод -> ValueError с
+    текстом для админа: расход наугад не пишем."""
+    parts = (text or "").split()[1:]
+    if not parts:
+        return None, 0.0
+    label = parts[0].lower()
+    if label.startswith("src_"):
+        label = label[4:]
+    if not _AD_LABEL.fullmatch(label):
+        raise ValueError("Метка — латиница, цифры и _ (2–40 символов), напр. tg_cryptoxyz")
+    raw = "".join(parts[1:]).replace(",", ".").rstrip("₽рР.") if len(parts) > 1 else ""
+    if not raw:
+        return label, 0.0
+    try:
+        amount = float(raw)
+    except ValueError:
+        raise ValueError("Сумма — число в рублях: /ad <метка> 1500 (минус — поправка)") \
+            from None
+    return label, amount
+
+
+def format_ad_reply(label: str, link: str, total_spend: float, added: float,
+                    stats: dict) -> str:
+    """Ответ /ad: ссылка с меткой, накопленный расход и что метка уже принесла."""
+    spent = f"{_amount(total_spend)} ₽"
+    if added:
+        spent += f" ({'+' if added > 0 else '−'}{_amount(abs(added))} ₽ сейчас)"
+    return (f"📣 Метка: {label}\nСсылка: {link}\nРасход: {spent}\n"
+            f"Пришло: {stats.get('total', 0)} · оплатили: {stats.get('paid', 0)}\n\n"
+            "Пост для канала — следующим сообщением. Итоги по всем меткам — /growth.")
+
+
+def format_ad_help(spend: dict) -> str:
+    lines = ["📣 Реклама: метки и расходы", "────────────────────",
+             "/ad <метка> [сумма₽] — ссылка с меткой + готовый пост для канала; сумма "
+             "прибавляется к расходу метки (минус — поправка).",
+             "Метка — латиница/цифры/_, своя на каждый канал: tg_cryptoxyz", ""]
+    spend = {k: v for k, v in spend.items() if v > 0}
+    if not spend:
+        lines.append("Расходов пока нет.")
+    for src, v in sorted(spend.items(), key=lambda kv: -kv[1]):
+        lines.append(f"• {src}: {_amount(v)} ₽")
+    return "\n".join(lines)
+
+
+def _days_word(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return "день"
+    return "дня" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "дней"
+
+
+def format_ad_post(link: str, trial_days: int) -> str:
+    """Рекламный пост для посева в чужом Telegram-канале. Только проверяемые свойства
+    продукта (все исходы публикуются, журнал скачивается — /trackrecord), без доходностей
+    и без названий сетапов — та же граница публикации, что у роликов и подписей."""
+    offer = (f"{trial_days} {_days_word(trial_days)} полного доступа бесплатно 👇"
+             if trial_days > 0 else "Попробовать 👇")
+    return ("Сигналы по крипто-фьючерсам, где видно все сделки — и убыточные тоже.\n\n"
+            "RSI Range — бот присылает в личку вход и стоп и ведёт сделку до закрытия.\n\n"
+            "• Публикуется каждый исход, стопы не прячутся\n"
+            "• Результат пишется автоматически по ценам биржи\n"
+            "• Весь журнал можно скачать и проверить самому\n"
+            "• Без обещаний «иксов»: риск на сделку 1–2%\n\n"
+            f"{offer}\n{link}\n\n"
+            "Не финансовый совет. Фьючерсы — высокий риск.")
 
 
 # тег сетапа -> короткий код без спецсимволов для callback_data кнопок админ-панели
@@ -1246,6 +1357,7 @@ ADMIN_COMMANDS = USER_COMMANDS + [
     ("bysetup", "статистика по тегу сетапа (6226/1:1/open-SMC/LTF-BB/LTF-OB)"),
     ("shadow", "теневые сетапы: итог проверки вперёд (не публикуются)"),
     ("growth", "атрибуция: источник -> приглашено -> оплатили -> %"),
+    ("ad", "реклама: ссылка с меткой + пост, учёт расхода: /ad <метка> [₽]"),
     ("minconf", "порог уверенности сетапа (0..1)"),
     ("minimpulse", "мин. размер импульса в ATR"),
     ("channel", "on|off|<id> — канал публикации"),
@@ -3253,7 +3365,32 @@ def main() -> None:
         if not _is_admin(m):
             return
         breakdown = await asyncio.to_thread(payments.acquisition_breakdown)
-        await m.answer(format_growth(breakdown))
+        spend = await asyncio.to_thread(runtime.ad_spend)
+        revenue = await asyncio.to_thread(payments.revenue_by_source)
+        await m.answer(format_growth(breakdown, spend, revenue))
+
+    @dp.message(Command("ad"))
+    async def _ad(m):
+        if not _is_admin(m):
+            return
+        try:
+            label, amount = parse_ad_args(m.text or "")
+        except ValueError as e:
+            await m.answer(str(e))
+            return
+        if label is None:
+            await m.answer(format_ad_help(await asyncio.to_thread(runtime.ad_spend)))
+            return
+        if amount:
+            total = await asyncio.to_thread(runtime.add_ad_spend, label, amount)
+        else:
+            total = (await asyncio.to_thread(runtime.ad_spend)).get(label, 0.0)
+        stats = (await asyncio.to_thread(payments.acquisition_breakdown)).get(label, {})
+        link = f"https://t.me/{bot_info['username'] or 'rsirange_bot'}?start=src_{label}"
+        await m.answer(format_ad_reply(label, link, total, amount, stats),
+                       disable_web_page_preview=True)
+        await m.answer(format_ad_post(link, runtime.trial_days()),
+                       disable_web_page_preview=True)
 
     @dp.message(Command("minimpulse"))
     async def _minimpulse(m):

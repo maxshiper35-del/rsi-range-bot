@@ -279,6 +279,26 @@ def affiliate_url() -> str:
     return _raw("affiliate_url") or ""
 
 
+def ad_spend() -> dict[str, float]:
+    """Расход на рекламу по меткам источника (/ad), в рублях: {метка: сумма}. Ключи
+    settings 'ad_spend:<метка>' — та же таблица override, без отдельной миграции;
+    битое значение пропускаем (как _num), а не роняем /growth."""
+    out: dict[str, float] = {}
+    for r in db.query("SELECT key, value FROM settings WHERE substr(key, 1, 9) = 'ad_spend:'"):
+        try:
+            out[r["key"][9:]] = float(r["value"])
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def add_ad_spend(src: str, rub: float) -> float:
+    """Прибавить расход к метке (минус — поправка опечатки), итог не ниже 0. -> новый итог."""
+    total = max(ad_spend().get(src, 0.0) + rub, 0.0)
+    set_value(f"ad_spend:{src}", total)
+    return total
+
+
 def exec_report_last_week() -> str | None:
     """ISO-неделя последнего отчёта «исполнение vs журнал» админам (не слать дважды)."""
     return _raw("exec_report_last_week")

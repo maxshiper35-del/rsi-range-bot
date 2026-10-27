@@ -497,6 +497,54 @@ def test_format_growth():
     assert bot.format_growth({}) == empty
 
 
+
+def test_format_growth_with_ad_spend_and_revenue():
+    """Расход /ad -> цена юзера и оплатившего; метка с расходом без пришедших видна
+    (купленный пост, который никого не привёл, — главный вывод); выручка по валютам."""
+    breakdown = {"tg_a": {"total": 10, "paid": 2}, "—": {"total": 5, "paid": 0}}
+    spend = {"tg_a": 1500.0, "tg_b": 800.0, "tg_zero": 0.0}
+    revenue = {"tg_a": {"XTR": 510.0, "USDT": 7.0}}
+    txt = bot.format_growth(breakdown, spend, revenue)
+    assert "tg_a: 10 приглашено, 2 оплатили (20%)" in txt
+    assert "расход 1 500 ₽: 150 ₽ за юзера, 750 ₽ за оплатившего" in txt
+    assert "выручка 7 USDT + 510⭐" in txt
+    assert "tg_b: 0 приглашено, 0 оплатили (0%)" in txt
+    assert "расход 800 ₽: — за юзера, — за оплатившего" in txt
+    assert "tg_zero" not in txt                             # обнулённая поправкой метка
+    assert "Реклама (/ad): 2 300 ₽ → 10 юзеров, 2 оплатили" in txt
+    # без рекламы и выручки — прежний вид, без лишних строк
+    assert "расход" not in bot.format_growth(breakdown)
+    assert "Юзеров пока нет" not in bot.format_growth({}, {"tg_b": 800.0})
+
+
+def test_parse_ad_args():
+    assert bot.parse_ad_args("/ad") == (None, 0.0)
+    assert bot.parse_ad_args("/ad Tg_CryptoXYZ") == ("tg_cryptoxyz", 0.0)
+    assert bot.parse_ad_args("/ad src_tg_a 1500") == ("tg_a", 1500.0)  # вставили с src_
+    assert bot.parse_ad_args("/ad tg_a 1 500₽") == ("tg_a", 1500.0)
+    assert bot.parse_ad_args("/ad tg_a -300") == ("tg_a", -300.0)
+    assert bot.parse_ad_args("/ad tg_a 99,5") == ("tg_a", 99.5)
+    for bad in ("/ad канал 100", "/ad a", "/ad tg-a 100", "/ad tg_a сто"):
+        with pytest.raises(ValueError):
+            bot.parse_ad_args(bad)
+
+
+def test_format_ad_post_and_reply():
+    link = "https://t.me/rsirange_bot?start=src_tg_a"
+    post = bot.format_ad_post(link, 5)
+    assert link in post and "5 дней полного доступа бесплатно" in post
+    assert "Не финансовый совет" in post
+    for leak in ("6226", "LTF", "1:1", "SMC", "%/мес", "прибыль"):  # граница публикации
+        assert leak not in post, leak
+    assert "1 день полного" in bot.format_ad_post(link, 1)
+    assert "3 дня полного" in bot.format_ad_post(link, 3)
+    assert "бесплатно" not in bot.format_ad_post(link, 0)
+    reply = bot.format_ad_reply("tg_a", link, 2000.0, 500.0, {"total": 3, "paid": 1})
+    assert "Расход: 2 000 ₽ (+500 ₽ сейчас)" in reply and "Пришло: 3 · оплатили: 1" in reply
+    assert "−300 ₽ сейчас" in bot.format_ad_reply("tg_a", link, 0.0, -300.0, {})
+    assert "Расходов пока нет" in bot.format_ad_help({})
+    assert "• tg_a: 1 500 ₽" in bot.format_ad_help({"tg_a": 1500.0, "tg_b": 0.0})
+
 def test_format_by_setup():
     by_setup = {
         "1:1": {"trades": 120, "wins": 66, "winrate": 0.55, "expectancy_r": 0.12, "total_r": 14.4},

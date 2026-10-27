@@ -258,3 +258,17 @@ def test_min_stop_pct_and_time_filter_defaults(fresh_db):
     assert runtime.min_stop_pct() == 1.3
     eff = runtime.effective()
     assert eff["min_stop_pct"] == 1.3 and eff["time_filter_enabled"] is False
+
+
+def test_ad_spend_accumulates_per_label(fresh_db):
+    """Расход на посевы (/ad): копится по метке, минус — поправка, ниже нуля не уходит;
+    битое значение в settings пропускается, а не роняет /growth."""
+    from app import runtime
+    assert runtime.ad_spend() == {}
+    assert runtime.add_ad_spend("tg_a", 1500) == 1500
+    assert runtime.add_ad_spend("tg_a", 500) == 2000
+    assert runtime.add_ad_spend("tg_a", -300) == 1700
+    assert runtime.add_ad_spend("tg_b", -100) == 0          # поправка не уводит в минус
+    runtime.set_value("ad_spend:tg_c", "мусор")
+    runtime.set_value("ad_spend_x", "999")                   # чужой ключ без ':' — не метка
+    assert runtime.ad_spend() == {"tg_a": 1700.0, "tg_b": 0.0}
