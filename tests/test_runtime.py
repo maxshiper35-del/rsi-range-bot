@@ -284,3 +284,15 @@ def test_teaser_per_day_default_and_clamp(fresh_db):
     runtime.set_value("teaser_per_day", "мусор")
     assert runtime.teaser_per_day() == 1
     assert runtime.effective()["teaser_per_day"] == 1
+
+
+def test_week_tier_default_and_override(fresh_db):
+    """Неделя 150⭐ (27.10): дороже месяца в пересчёте на неделю, 0 прячет кнопку."""
+    from app import runtime
+    assert runtime.week_price_stars() == 150
+    runtime.set_value("sub_price_stars", "500")             # прод-цена месяца с 27.10
+    runtime.set_value("sub_days", "30")
+    assert runtime.week_price_stars() > runtime.price_stars() * 7 / runtime.sub_days()
+    runtime.set_value("week_price_stars", "0")
+    assert runtime.week_price_stars() == 0
+    assert runtime.effective()["week_price_stars"] == 0

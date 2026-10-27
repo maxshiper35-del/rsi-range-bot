@@ -446,6 +446,14 @@ def _stars_tier(key: str, default: int) -> int:
     return _num(key, int, default)
 
 
+def week_price_stars() -> int:
+    """Неделя (7 дней) разовым Stars-инвойсом. 0 = кнопка скрыта. Дефолт 150 (27.10.2026):
+    месячную подписку не брал никто, а единственный постоянный плательщик в активные недели
+    покупал пробные 10⭐/5ч по 10–12 раз (100–120⭐/нед). 150 — дороже его недельных трат,
+    но без покупки каждые 5 часов, и дороже месяца в пересчёте на неделю (500/30×7 ≈ 117)."""
+    return _stars_tier("week_price_stars", 150)
+
+
 def quarter_price_stars() -> int:
     """Квартал (90 дней) разовым Stars-инвойсом. 0 = кнопка скрыта.
     Нативные Stars-подписки длиннее 30 дней невозможны (проверено в доках) —
@@ -716,6 +724,7 @@ def effective() -> dict:
         "intro_price_stars": intro_price_stars(),
         "intro_hours": intro_hours(),
         "paid_signal_stars": paid_signal_stars(),
+        "week_price_stars": week_price_stars(),
         "quarter_price_stars": quarter_price_stars(),
         "year_price_stars": year_price_stars(),
         "lifetime_price_stars": lifetime_price_stars(),

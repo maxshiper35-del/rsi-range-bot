@@ -895,6 +895,10 @@ def test_lifecycle_chart_wanted():
     assert bot.lifecycle_chart_wanted(True, "teaser") is False   # teaser не раскрывает уровни
     assert bot.lifecycle_chart_wanted(False, "full") is False    # флаг выключен
     assert bot.lifecycle_chart_wanted(False, "teaser") is False
+    # закрытая сделка в teaser-канале — карта есть: уровни уже не дают входа, а разбор
+    # «как отработало» и есть публичный трек-рекорд
+    assert bot.lifecycle_chart_wanted(True, "teaser", closed=True) is True
+    assert bot.lifecycle_chart_wanted(False, "teaser", closed=True) is False
 
 
 def test_scan_auto_respects_max_open_per_side(fresh_db):

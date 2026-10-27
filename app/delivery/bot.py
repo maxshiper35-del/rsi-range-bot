@@ -550,6 +550,7 @@ _ADMIN_NUMERIC_FIELDS = {
     "intro_price_stars": ("Цена пробного тарифа в Stars (0 — выключить пробный)", "int"),
     "intro_hours": ("Длительность пробного тарифа в часах", "float"),
     "paid_signal_stars": ("Цена разовой покупки сигнала в Stars (0 — выключить кнопку)", "int"),
+    "week_price_stars": ("Цена недели (7 дней) в Stars (0 — скрыть тариф)", "int"),
     "quarter_price_stars": ("Цена квартала (90 дней) в Stars (0 — скрыть тариф)", "int"),
     "year_price_stars": ("Цена года (365 дней) в Stars (0 — скрыть тариф)", "int"),
     "lifetime_price_stars": ("Цена lifetime в Stars (0 — скрыть тариф)", "int"),
@@ -1035,10 +1036,12 @@ def build_signal_chart_data(sig: Signal, sid: int, df: pd.DataFrame,
     }
 
 
-def lifecycle_chart_wanted(chart_enabled: bool, channel_mode: str) -> bool:
+def lifecycle_chart_wanted(chart_enabled: bool, channel_mode: str, closed: bool = False) -> bool:
     """Рисовать ли карту на посте цикла сделки (филл/результат): флаг ВКЛ И канал в full —
-    в teaser карта раскрыла бы скрытые уровни входа/стопа/тейков. Чистая функция для тестов."""
-    return chart_enabled and channel_mode == "full"
+    в teaser карта раскрыла бы скрытые уровни входа/стопа/тейков. Исключение — ЗАКРЫТАЯ
+    сделка (closed): её уровни уже ничего не дают для входа, а публичный разбор «как
+    отработало» и есть трек-рекорд канала. Чистая функция для тестов."""
+    return chart_enabled and (channel_mode == "full" or closed)
 
 
 def should_refresh_board(last_update: str | None, now_iso: str, hours: int = 24) -> bool:
@@ -1751,6 +1754,10 @@ def main() -> None:
                 text=f"⭐ {runtime.intro_price_stars()} Stars / "
                      f"{runtime.intro_hours():g} ч — попробовать",
                 callback_data="pay_stars_intro")])
+        if runtime.week_price_stars() > 0:              # между пробными часами и месяцем
+            rows.append([InlineKeyboardButton(
+                text=f"⭐ {runtime.week_price_stars()} Stars / 7 дней",
+                callback_data="pay_stars_week")])
         rows.append([InlineKeyboardButton(
             text=f"⭐ {runtime.price_stars()} Stars / {_fmt_days(runtime.sub_days())}",
             callback_data="pay_stars")])
@@ -2133,6 +2140,10 @@ def main() -> None:
     @dp.callback_query(F.data == "pay_stars_intro")
     async def _pay_stars_intro(cq):
         await _pay_tier(cq, round(runtime.intro_hours() / 24, 6), runtime.intro_price_stars())
+
+    @dp.callback_query(F.data == "pay_stars_week")
+    async def _pay_stars_week(cq):
+        await _pay_tier(cq, 7, runtime.week_price_stars(), label="7 дней")
 
     @dp.callback_query(F.data == "pay_stars_quarter")
     async def _pay_stars_quarter(cq):
@@ -2517,6 +2528,7 @@ def main() -> None:
     def _current_stars_tiers() -> list[tuple[float, int]]:
         """(дни, цена⭐) включённых сейчас тарифов — те же, что строит _subscribe_kb."""
         tiers = [(float(runtime.sub_days()), runtime.price_stars()),
+                 (7.0, runtime.week_price_stars()),
                  (90.0, runtime.quarter_price_stars()), (365.0, runtime.year_price_stars()),
                  (36500.0, runtime.lifetime_price_stars())]
         if runtime.intro_hours() > 0:
@@ -2779,6 +2791,8 @@ def main() -> None:
             [b(text=(f"🔓 Разовый сигнал: {eff['paid_signal_stars']}⭐"
                      if eff['paid_signal_stars'] else "🔓 Разовый сигнал: выкл"),
                callback_data="adm_prompt_paid_signal_stars")],
+            [b(text=f"📅 Неделя: {eff['week_price_stars']}⭐",
+               callback_data="adm_prompt_week_price_stars")],
             [b(text=f"📅 Квартал: {eff['quarter_price_stars']}⭐",
                callback_data="adm_prompt_quarter_price_stars"),
              b(text=f"📅 Год: {eff['year_price_stars']}⭐",
@@ -4579,7 +4593,7 @@ def main() -> None:
                     log.info("сигнал #%s: пост expired OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] in ("tp1", "tp2", "tp3", "stopped"):
                     want_chart = lifecycle_chart_wanted(
-                        runtime.lifecycle_chart_enabled(), runtime.channel_mode())
+                        runtime.lifecycle_chart_enabled(), runtime.channel_mode(), closed=True)
                     # под результатом — «Рентген сделки» (анатомия по deep-link) + CTA
                     xray_kb = (xray_channel_markup(bot_info["username"], c["id"],
                                                    runtime.affiliate_url())
