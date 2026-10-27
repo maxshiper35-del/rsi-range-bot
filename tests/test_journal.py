@@ -1034,3 +1034,29 @@ def test_open_trade_persists_trailed_stop_for_executor(fresh_db):
         {"BTC/USDT:USDT": _bars(rows, start="2026-01-01T01:00:00+00:00", step_min=60)})
     assert abs(db.query_one("SELECT trail_stop FROM signals WHERE id=1")["trail_stop"]
                - 103.6) < 1e-9
+
+
+def test_breakeven_rule_from_snapshot():
+    """Безубыток (исследование 27.10): ход ≥ be_trigger_r после бара филла переносит стоп на
+    entry + be_lock_r·R со СЛЕДУЮЩЕГО бара. Без поля в снапшоте — прежний полный стоп."""
+    from app.brain import journal
+
+    def row(trail):
+        return {"entry": 100.0, "stop": 110.0, "side": "SHORT", "timeframe": "1h",
+                "created_at": "2026-01-01T00:00:00+00:00", "filled_at": None,
+                "status": "open", "tp1": 80.0, "tp2": None, "tp3": None,
+                "snapshot_json": json.dumps({"trail": trail})}
+
+    df = _bars([(100, 101, 99, 100),      # филл
+                (100, 100, 89, 90),       # ход +1.1R
+                (90, 112, 90, 111)],      # разворот за исходный стоп
+               start="2026-01-01T01:00:00+00:00")
+    base = {"activate_r": 1.5, "distance_r": 0.2, "tp_exit": False, "max_hold_hours": 168}
+    r0 = journal._outcome_from_bars(row(base), df)
+    assert r0[0] == "stopped" and r0[2] == -1.0                  # без правила — полный стоп
+    r1 = journal._outcome_from_bars(row({**base, "be_trigger_r": 1.0}), df)
+    assert r1[0] == "stopped" and r1[2] == 0.0                   # безубыток по entry
+    r2 = journal._outcome_from_bars(row({**base, "be_trigger_r": 1.0, "be_lock_r": 0.3}), df)
+    assert r2[2] == 0.3                                          # фиксация +0.3R
+    r3 = journal._outcome_from_bars(row({**base, "be_trigger_r": 1.2}), df)
+    assert r3[2] == -1.0                                         # +1.1R не дотянул до 1.2

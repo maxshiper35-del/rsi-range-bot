@@ -625,13 +625,18 @@ def _outcome_from_bars(row, df, fill_through_frac: float = 0.0,
             # На баре ФИЛЛА трейлинг не активируем по той же причине, по которой не
             # присуждаем на нём тейк: выгодный ход мог случиться ДО исполнения лимитки,
             # и подписчик его не получил бы.
+            be_trig = trail.get("be_trigger_r") or 0.0
             if side == "LONG":
                 mfe_r = (hi - entry) / risk
+                if be_trig > 0 and mfe_r >= be_trig:
+                    cur_stop = max(cur_stop, entry + trail.get("be_lock_r", 0.0) * risk)
                 if mfe_r >= trail["activate_r"]:
                     peak = max(peak, hi)
                     cur_stop = max(cur_stop, peak - trail["distance_r"] * risk)
             else:
                 mfe_r = (entry - lo) / risk
+                if be_trig > 0 and mfe_r >= be_trig:
+                    cur_stop = min(cur_stop, entry - trail.get("be_lock_r", 0.0) * risk)
                 if mfe_r >= trail["activate_r"]:
                     peak = min(peak, lo)
                     cur_stop = min(cur_stop, peak + trail["distance_r"] * risk)
@@ -678,9 +683,17 @@ def _trail_of(row) -> dict | None:
         max_hold = float(t.get("max_hold_hours") or 0.0)
     except (TypeError, ValueError):
         max_hold = 0.0
+    # безубыток (ИССЛЕДОВАНИЕ 27.10, замер 2026-10-27-breakeven): после хода ≥ be_trigger_r
+    # стоп переносится на entry + be_lock_r·R. Нет поля в снапшоте — правила нет (прод).
+    try:
+        be_trig = float(t.get("be_trigger_r") or 0.0)
+        be_lock = float(t.get("be_lock_r") or 0.0)
+    except (TypeError, ValueError):
+        be_trig, be_lock = 0.0, 0.0
     # tp_exit отсутствует в снапшотах первой версии трейлинга -> True (тейк закрывал сделку)
     return {"activate_r": act, "distance_r": dist,
-            "tp_exit": bool(t.get("tp_exit", True)), "max_hold_hours": max_hold}
+            "tp_exit": bool(t.get("tp_exit", True)), "max_hold_hours": max_hold,
+            "be_trigger_r": be_trig, "be_lock_r": be_lock}
 
 
 def _setup_of(row) -> str:

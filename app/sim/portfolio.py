@@ -34,7 +34,8 @@ def _live_outcome(sig: dict, df1h: pd.DataFrame, idx1h: pd.DatetimeIndex, *,
                   fee_pct: float, slippage_pct: float, funding_bps_per_bar: float,
                   trail_activate_r: float | None, trail_distance_r: float,
                   tp_exit: bool, max_hold_hours: float, fill_through_frac: float = 0.0,
-                  extra_cost_r: float = 0.0, gap_open: bool = False):
+                  extra_cost_r: float = 0.0, gap_open: bool = False,
+                  be_trigger_r: float = 0.0, be_lock_r: float = 0.0):
     """Исход сигнала САМИМ живым судьёй (journal._outcome_from_bars) на 1h-барах — паритет
     с публичным журналом по построению: стоп на баре филла = −1R, на баре филла нет тейка
     и трейлинга, окно ожидания 50ч, потолок удержания, 4h-сигналы судятся 1h-барами.
@@ -53,7 +54,8 @@ def _live_outcome(sig: dict, df1h: pd.DataFrame, idx1h: pd.DatetimeIndex, *,
     span = int(MAX_WAIT_HOURS + (max_hold_hours if max_hold_hours > 0 else 24 * 40)) + 8
     win = df1h.iloc[start:start + span]
     trail = ({"activate_r": trail_activate_r, "distance_r": trail_distance_r,
-              "tp_exit": tp_exit, "max_hold_hours": max_hold_hours}
+              "tp_exit": tp_exit, "max_hold_hours": max_hold_hours,
+              "be_trigger_r": be_trigger_r, "be_lock_r": be_lock_r}
              if trail_activate_r else None)
     row = {"entry": sig["entry"], "stop": sig["stop"], "side": sig["side"],
            "timeframe": sig["tf"], "created_at": created.isoformat(), "filled_at": None,
@@ -157,7 +159,9 @@ def simulate_portfolio(bars: dict, signals: list, *,
                        extra_cost_r: float = 0.0,
                        symbol_cooldown_hours: float = 0.0,
                        gap_open: bool = False,
-                       dedup_scope: str = "setup") -> PortfolioReport:
+                       dedup_scope: str = "setup",
+                       be_trigger_r: float = 0.0,
+                       be_lock_r: float = 0.0) -> PortfolioReport:
     """bars: {(symbol, tf): df} — те же кэш-бары, по которым считались сигналы.
     signals: список словарей из scripts.dump_signals (symbol, tf, bar_index, side, ...).
 
@@ -256,7 +260,8 @@ def simulate_portfolio(bars: dict, signals: list, *,
                 trail_distance_r=trail_distance_r, tp_exit=tp_exit,
                 max_hold_hours=max_hold_hours,
                 fill_through_frac=through_frac if entry_fill == "through" else 0.0,
-                extra_cost_r=extra_cost_r, gap_open=gap_open)
+                extra_cost_r=extra_cost_r, gap_open=gap_open,
+                be_trigger_r=be_trigger_r, be_lock_r=be_lock_r)
             if lres is None:
                 continue
             kind, r_net, fill_dt, closed_dt = lres
