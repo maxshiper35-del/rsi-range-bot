@@ -3197,6 +3197,8 @@ def main() -> None:
                         cid, BufferedInputFile(mp4, filename=f"rsirange_{row['id']}_{base}.mp4"),
                         width=replay.W, height=replay.H, supports_streaming=True,
                         caption=content_pack.replay_caption(row))
+                log.info("контент-пак %s -> %s: %d сделок, %d повторов", period, cid,
+                         len(trades), len(replays))
             except Exception as e:                      # noqa: BLE001 — один админ не валит всех
                 log.warning("контент-пак -> %s: %s", cid, e)
 
