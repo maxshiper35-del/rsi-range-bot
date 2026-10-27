@@ -1359,6 +1359,7 @@ USER_COMMANDS = [
     ("depo", "твой объём в каждом сигнале: /depo <депозит$> [риск%]"),
     ("mycard", "карточка твоего итога по отмеченным сделкам"),
     ("alert", "бесплатный прайс-алерт: /alert BTC 65000"),
+    ("check", "проверить чужой сигнал: перешлите пост из любого канала"),
     ("notify", "уведомления: мьют и тихие часы"),
     ("cancel", "отменить текущий пошаговый ввод"),
     ("about", "как устроен сервис, честный дисклеймер"),
@@ -1914,7 +1915,9 @@ def main() -> None:
             "(не «прибыль 400%»).\n\n"
             "• 100% исходов публикуются — включая убыточные\n"
             "• Исход пишется автоматически по ценам биржи, без ручных правок\n"
-            "• Трек-рекорд проверяем: CSV + sha256 + офлайн-верификатор (/trackrecord)\n\n"
+            "• Трек-рекорд проверяем: CSV + sha256 + офлайн-верификатор (/trackrecord)\n"
+            "• 🔎 Проверка чужих сигналов: перешлите сюда пост из любого канала — бот "
+            "покажет, чем он закончился (/check)\n\n"
             "Меню внизу экрана — всё в один тап; команды тоже работают (/help).\n"
             f"{ANTISCAM_LINE}\n"
             "⚠️ Не финансовый совет. Риск на сделку 1–2%.\n\n"
@@ -3850,6 +3853,157 @@ def main() -> None:
         await asyncio.to_thread(runtime.set_value, "symbols", ",".join(syms))
         await m.answer("Символы: " + ", ".join(syms))
 
+    # --- inline-режим: «@rsirange_bot btc» в любом чате (рост без бюджета, 27.10.2026) ---
+    # Каждый отправленный результат подписан Telegram'ом «via @rsirange_bot» — бот виден
+    # всему чату. Карточка — общая картина рынка (market_card), без сетапов и уровней.
+    _card_cache: dict = {}                      # symbol -> (monotonic, dict | None)
+    _card_jobs: dict = {}                       # symbol -> asyncio.Task обновления
+    # Telegram ждёт ответ на inline-запрос ~10с, а первый load_markets Bybit после рестарта
+    # — 12с (замер 27.10): ждём свежие данные не дольше бюджета, иначе отдаём устаревшие
+    # (stale-while-revalidate), а обновление дорабатывает в фоне к следующему нажатию
+    _CARD_WAIT_S = 6.0
+
+    async def _refresh_card(sym: str) -> None:
+        _card_cache[sym] = (_monotonic(), await asyncio.to_thread(_load_card, sym))
+
+    async def _card(sym: str) -> dict | None:
+        hit = _card_cache.get(sym)
+        if hit is not None and _monotonic() - hit[0] <= (180 if hit[1] else 60):
+            return hit[1]
+        job = _card_jobs.get(sym)
+        if job is None or job.done():
+            job = _card_jobs[sym] = asyncio.ensure_future(_refresh_card(sym))
+        if hit is not None and hit[1] is not None:
+            return hit[1]                       # устаревшее, но мгновенно
+        try:
+            await asyncio.wait_for(asyncio.shield(job), _CARD_WAIT_S)
+        except asyncio.TimeoutError:
+            return None
+        hit = _card_cache.get(sym)
+        return hit[1] if hit else None
+
+    async def warm_inline_cards() -> None:
+        """Прогрев после старта: рынки биржи + карточки быстрых подсказок."""
+        from app.delivery import market_card
+        for coin in market_card.DEFAULT_COINS:
+            if sym := market_card.parse_coin(coin):
+                await _refresh_card(sym)
+
+    def _load_card(symbol: str) -> dict | None:
+        # синхронно (ccxt) — только через asyncio.to_thread; None — нет рынка/истории/сети
+        from app.data.market_data import _exchange, fetch_closed_ohlcv
+        from app.delivery import market_card
+        markets = _exchange(cfg.exchange_id).markets
+        if markets and symbol not in markets:
+            if "1000" + symbol in markets:      # PEPE/SHIB/BONK на Bybit — только 1000-лоты
+                symbol = "1000" + symbol
+            else:                               # «bt» на полпути набора — без запроса бирже
+                return None
+        try:
+            h1 = fetch_closed_ohlcv(symbol, "1h", limit=120, retries=1)
+            h4 = fetch_closed_ohlcv(symbol, "4h", limit=400, retries=1)
+            return market_card.card_data(symbol, h1, h4)
+        except Exception as e:                  # noqa: BLE001 — молодая монета / сеть / лимит
+            log.info("inline-карточка %s: %s", symbol, e)
+            return None
+
+    @dp.inline_query()
+    async def _inline(q):
+        from aiogram.types import (
+            InlineQueryResultArticle,
+            InlineQueryResultsButton,
+            InputTextMessageContent,
+        )
+
+        from app.delivery import market_card
+        query = (q.query or "").strip()
+        coins = [query] if query else list(market_card.DEFAULT_COINS)
+        username = bot_info["username"] or "rsirange_bot"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="📊 Сигналы и статистика",
+            url=f"https://t.me/{username}?start=src_inline")]])
+        syms = [s for s in map(market_card.parse_coin, coins) if s is not None]
+        cards = await asyncio.gather(*(_card(s) for s in syms))
+        results = []
+        for sym, d in zip(syms, cards):
+            if d is None:
+                continue
+            results.append(InlineQueryResultArticle(
+                id=sym.split("/")[0][:60], title=market_card.card_title(d),
+                description=market_card.card_description(d),
+                input_message_content=InputTextMessageContent(
+                    message_text=market_card.render_card(d), parse_mode="HTML"),
+                reply_markup=kb))
+        # пусто (монета грузится/не найдена) — не кешируем, следующее нажатие спросит снова
+        try:
+            await q.answer(results, cache_time=60 if results else 1, is_personal=False,
+                           button=InlineQueryResultsButton(
+                               text="Сигналы с открытой статистикой →",
+                               start_parameter="src_inline"))
+        except TelegramBadRequest as e:
+            # юзер успел допечатать — старый query_id протух; это не сбой бота, алерт
+            # админам не нужен (иначе каждая медленная биржа = «ошибка в хендлере»)
+            if "query is too old" not in str(e):
+                raise
+            log.info("inline: ответ опоздал (%s)", q.query)
+
+    # --- проверка чужого сигнала: пересланный пост -> исход по свечам (27.10.2026) ---
+    _check_log: dict = {}                       # tg_id -> [monotonic проверок за сутки]
+    _check_sem = asyncio.Semaphore(2)           # не больше двух прогонов разом (лимиты Bybit)
+
+    def _run_check(sig, posted) -> str:
+        # синхронно (ccxt) — только через asyncio.to_thread
+        from app.data.market_data import _exchange, fetch_history
+        from app.delivery import signal_check
+        age = (datetime.now(timezone.utc) - posted).total_seconds()
+        tf = signal_check.pick_timeframe(age)
+        if tf is None:
+            return (f"Сигнал старше {signal_check.MAX_AGE_DAYS} дней — так далеко назад "
+                    "не проверяю.")
+        sym, scale = sig.symbol, 1.0
+        markets = _exchange(cfg.exchange_id).markets
+        if markets and sym not in markets:
+            if "1000" + sym not in markets:
+                return f"Монеты {templates.esc(sig.coin)} нет на Bybit — проверить не могу."
+            sym, scale = "1000" + sym, 1000.0   # PEPE/SHIB на Bybit — 1000-лоты
+        tf_s = {"15m": 900, "1h": 3600, "4h": 14400}[tf]
+        bars = fetch_history(sym, tf, int(age // tf_s) + 3, exchange_id=cfg.exchange_id)
+        if scale != 1.0:
+            bars[["open", "high", "low", "close"]] /= scale
+        res = signal_check.evaluate(sig, bars, pd.Timestamp(posted))
+        log.info("проверка сигнала: %s %s -> %s (целей %d)", sig.coin, sig.side,
+                 res.status, res.hit)
+        return signal_check.render_check(sig, res, posted, tf)
+
+    @dp.message(Command("check"))
+    async def _check_help(m):
+        from app.delivery import signal_check
+        await m.answer(signal_check.HELP, parse_mode="HTML")
+
+    @dp.message(F.forward_origin, F.chat.type == "private")
+    async def _check_forward(m):
+        from app.delivery import signal_check
+        sig = signal_check.parse_signal(m.text or m.caption or "")
+        if sig is None:
+            await m.answer("Не нашёл в посте сигнал: нужны монета, LONG/SHORT, вход "
+                           "(или «по рынку») и стоп. Подробнее — /check")
+            return
+        uid, now = m.from_user.id, _monotonic()
+        recent = [t for t in _check_log.get(uid, []) if now - t < 86400]
+        if len(recent) >= 20 and not _is_admin(m):
+            await m.answer("Лимит — 20 проверок в сутки. Завтра можно снова.")
+            return
+        _check_log[uid] = recent + [now]
+        wait = await m.answer("🔎 Проверяю по свечам биржи…")
+        async with _check_sem:
+            try:
+                txt = await asyncio.to_thread(_run_check, sig, m.forward_origin.date)
+            except Exception as e:              # noqa: BLE001 — сеть / лимит / нет рынка
+                log.info("проверка сигнала %s: %s", sig.coin, e)
+                txt = (f"Не получилось загрузить свечи {templates.esc(sig.coin)} с биржи. "
+                       "Попробуйте через пару минут.")
+        await wait.edit_text(txt, parse_mode="HTML")
+
     def _signal_chart_png(sig, sid):
         # синхронно (ccxt + Playwright) — вызывать только через asyncio.to_thread
         from app.data.market_data import fetch_closed_ohlcv
@@ -5021,12 +5175,16 @@ def main() -> None:
         stream_task.add_done_callback(_task_died)
         maint_task = asyncio.create_task(_maintenance_loop(), name="maintenance")
         maint_task.add_done_callback(_task_died)
+        # прогрев inline-карточек: первый load_markets Bybit — 12с, дольше окна ответа
+        # Telegram; разовая задача, падение некритично (карточка догрузится по запросу)
+        warm_task = asyncio.create_task(warm_inline_cards(), name="inline-warm")
         try:
             await dp.start_polling(bot)
         finally:
             poller.cancel()
             stream_task.cancel()
             maint_task.cancel()
+            warm_task.cancel()
 
     # TODO: /calc интерактивный (пока формат через format_calc); USDT через CryptoBot.
     log.info("bot запущен, engine=SMC, polling+poller, платежи=Stars")
