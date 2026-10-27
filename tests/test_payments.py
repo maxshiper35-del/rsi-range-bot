@@ -101,6 +101,30 @@ def test_funnel_free_limit_then_teaser(fresh_db):
     assert 100 not in dict(payments.plan_recipients(3, 2, admins))
 
 
+
+def test_funnel_teaser_daily_cap(fresh_db):
+    """Потолок тизеров (замер 27.10: ~6 замков в день на сигналы из открытого канала, половина
+    юзеров заблокировала бота): сверх teaser_per_day за сутки free-юзер сигнал не получает,
+    недельный лимит полных и платные не затронуты; None — прежнее поведение без потолка."""
+    from app.delivery import payments
+    payments.register_user(110)                                   # free, лимит полных = 0
+    payments.grant_subscription(210, "stars", 1, "XTR", 30, "c210")
+    admins = (900,)
+
+    def deliver(sid, cap):
+        plan = payments.plan_recipients(sid, 0, admins, cap)
+        for uid, kind in plan:
+            payments.record_delivery(uid, sid, kind)
+        return dict(plan)
+
+    assert deliver(1, 1)[110] == "teaser"                         # первый тизер за сутки
+    p2 = deliver(2, 1)
+    assert 110 not in p2                                          # потолок — молчим
+    assert p2[210] == "full" and p2[900] == "full"
+    assert deliver(3, 2)[110] == "teaser"                         # потолок 2 — ещё один
+    assert 110 not in deliver(4, 0)                               # 0 — тизеров нет вовсе
+    assert deliver(5, None)[110] == "teaser"                      # None — без потолка
+
 def test_record_delivery_idempotent(fresh_db):
     from app.delivery import payments
     assert payments.record_delivery(1, 1, "full") is True

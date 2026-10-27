@@ -272,3 +272,15 @@ def test_ad_spend_accumulates_per_label(fresh_db):
     runtime.set_value("ad_spend:tg_c", "мусор")
     runtime.set_value("ad_spend_x", "999")                   # чужой ключ без ':' — не метка
     assert runtime.ad_spend() == {"tg_a": 1700.0, "tg_b": 0.0}
+
+
+def test_teaser_per_day_default_and_clamp(fresh_db):
+    from app import runtime
+    assert runtime.teaser_per_day() == 1                    # дефолт: один апселл в сутки
+    runtime.set_value("teaser_per_day", "0")
+    assert runtime.teaser_per_day() == 0
+    runtime.set_value("teaser_per_day", "-3")
+    assert runtime.teaser_per_day() == 0                    # отрицательное -> 0, не «без потолка»
+    runtime.set_value("teaser_per_day", "мусор")
+    assert runtime.teaser_per_day() == 1
+    assert runtime.effective()["teaser_per_day"] == 1

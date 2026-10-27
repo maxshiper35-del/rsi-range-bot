@@ -371,11 +371,20 @@ def free_full_last_week(tg_id: int) -> int:
         (tg_id, since))["c"]  # type: ignore[index]
 
 
-def plan_recipients(signal_id: int, free_limit: int, admin_ids) -> list:
+def teasers_last_day(tg_id: int) -> int:
+    since = (_now_dt() - timedelta(days=1)).isoformat()
+    return db.query_one(
+        "SELECT COUNT(*) AS c FROM deliveries WHERE tg_id=? AND kind='teaser' AND created_at >= ?",
+        (tg_id, since))["c"]  # type: ignore[index]
+
+
+def plan_recipients(signal_id: int, free_limit: int, admin_ids,
+                    teaser_per_day: int | None = None) -> list:
     """Кому и в каком виде слать сигнал: -> [(tg_id, 'full'|'teaser')].
 
-    Админы и платные -> 'full'. Free -> 'full', пока не исчерпан недельный лимит, иначе 'teaser'.
-    Уже доставленные пропускаются.
+    Админы и платные -> 'full'. Free -> 'full', пока не исчерпан недельный лимит, иначе 'teaser',
+    но не больше teaser_per_day тизеров за скользящие сутки (None — без потолка): сверх потолка
+    free-юзер этот сигнал в личку не получает вовсе. Уже доставленные пропускаются.
     """
     admin_set = set(admin_ids)
     ids = list(dict.fromkeys([*admin_ids, *all_user_ids()]))
@@ -387,7 +396,7 @@ def plan_recipients(signal_id: int, free_limit: int, admin_ids) -> list:
             out.append((uid, "full"))
         elif free_full_last_week(uid) < free_limit:
             out.append((uid, "full"))
-        else:
+        elif teaser_per_day is None or teasers_last_day(uid) < teaser_per_day:
             out.append((uid, "teaser"))
     return out
 

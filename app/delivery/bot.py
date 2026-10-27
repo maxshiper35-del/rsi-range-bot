@@ -1366,6 +1366,7 @@ ADMIN_COMMANDS = USER_COMMANDS + [
     ("post", "разовая сводка статистики в канал"),
     ("price", "stars|usdt|days <N> — цена подписки"),
     ("freeweek", "лимит бесплатных сигналов/нед"),
+    ("teasers", "потолок тизеров «по подписке» free-юзеру в сутки: /teasers 1"),
     ("affiliate", "реф-ссылка биржи в /about и закреп: /affiliate <url>|off"),
     ("addpromo", "создать промокод: /addpromo <код> <дней> [лимит]"),
     ("usdtlink", "ссылка на ручной USDT-счёт"),
@@ -3416,6 +3417,17 @@ def main() -> None:
             return
         await _set(m, "free_signals_per_week", parts[1], f"Free-лимит: {parts[1]}/нед")
 
+    @dp.message(Command("teasers"))
+    async def _teasers(m):
+        if not _is_admin(m):
+            return
+        parts = (m.text or "").split()
+        if len(parts) < 2 or not parts[1].isdecimal():
+            await m.answer(f"Сейчас: {runtime.teaser_per_day()} тизер(а) в сутки free-юзеру.\n"
+                           "Формат: /teasers 1 (0 — без тизеров)")
+            return
+        await _set(m, "teaser_per_day", parts[1], f"Тизеров free-юзеру: до {parts[1]} в сутки")
+
     @dp.message(Command("affiliate"))
     async def _affiliate(m):
         if not _is_admin(m):
@@ -3883,7 +3895,11 @@ def main() -> None:
         except Exception:                              # noqa: BLE001 — формат не роняет цикл
             log.exception("формат алерта #%s", sid)
             full = f"🔔 Сигнал #{sid} (ошибка форматирования — детали в журнале)"
-        teaser = templates.render_teaser(sig, sid, stats=journal.stats())  # соц-пруф на пейволле
+        channel = runtime.signals_channel()
+        channel_open = bool(channel) and runtime.channel_enabled() \
+            and runtime.channel_mode() == "full"
+        teaser = templates.render_teaser(                # соц-пруф на пейволле
+            sig, sid, stats=journal.stats(), open_channel="@rsi_range" if channel_open else None)
         # разовая покупка сигнала (paid media): кнопка на тизере, если включена цена
         unlock_price = runtime.paid_signal_stars()
         unlock_kb = None
@@ -3892,7 +3908,6 @@ def main() -> None:
                 text=f"🔓 Открыть этот сигнал — {unlock_price}⭐",
                 callback_data=f"unlock:{sid}")]])
         # пост в канал (если включён) — полный или тизер, по режиму канала
-        channel = runtime.signals_channel()
         if channel and runtime.channel_enabled():
             ch_is_teaser = runtime.channel_mode() != "full"
             if not ch_is_teaser:
@@ -3932,7 +3947,8 @@ def main() -> None:
                 log.warning("пост в канал %s: %s", channel, e)
         # воронка: админы/платные -> полный; free -> полный до лимита/нед, дальше тизер
         plan = await asyncio.to_thread(payments.plan_recipients, sid,
-                                       runtime.free_per_week(), tuple(cfg.admin_ids))
+                                       runtime.free_per_week(), tuple(cfg.admin_ids),
+                                       runtime.teaser_per_day())
         sent = 0
         hour_utc = datetime.now(timezone.utc).hour
         for uid, kind in plan:

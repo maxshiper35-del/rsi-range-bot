@@ -366,6 +366,16 @@ def free_per_week() -> int:
     return _num("free_signals_per_week", int, lambda: get_settings().free_signals_per_week)
 
 
+def teaser_per_day() -> int:
+    """Потолок тизеров («🔒 по подписке») в личку free-юзеру за скользящие сутки (0 — без них).
+
+    Замер 27.10.2026: free-юзер сверх недельного лимита получал ~43 тизера в неделю (~6 в
+    день) — на сигналы, которые тут же целиком лежат в открытом канале (channel_mode=full);
+    14 из 29 юзеров заблокировали бота. Дефолт 1: один мягкий апселл в день вместо ленты
+    замков; недельный дайджест «что ты упустил» считает только реально доставленные тизеры."""
+    return max(_num("teaser_per_day", int, 1), 0)
+
+
 def intro_price_stars() -> int:
     """Цена пробного тарифа в Stars (0 — пробный тариф выключен, остаётся только основной).
     Решение владельца 2026-07-10: тестовая цена 10⭐/5ч показала реальные платежи —
@@ -697,6 +707,7 @@ def effective() -> dict:
         "price_usdt": price_usdt(),
         "sub_days": sub_days(),
         "free_per_week": free_per_week(),
+        "teaser_per_day": teaser_per_day(),
         "cornix_enabled": cornix_block_enabled(),
         "trial_days": trial_days(),
         "display_leverage": display_leverage(),

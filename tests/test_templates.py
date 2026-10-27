@@ -61,6 +61,15 @@ def test_render_teaser_hides_levels():
     assert "62340" not in txt and "62980" not in txt   # ни входа, ни стопа
 
 
+
+def test_render_teaser_open_channel_tells_truth():
+    """Канал в full-режиме публикует уровни открыто — тизер не обещает их «по подписке»,
+    а говорит, за что платят на самом деле, и уровни по-прежнему не раскрывает."""
+    txt = templates.render_teaser(_sig(), 9, open_channel="@rsi_range")
+    assert "в канале @rsi_range" in txt and "без лимита" in txt and "/subscribe" in txt
+    assert "Вход, стоп, тейки и разбор — по подписке" not in txt
+    assert "62340" not in txt and "62980" not in txt
+
 def test_render_fill():
     txt = templates.render_fill(_closed(status="filled"), show_price=True)
     assert "вход исполнен" in txt and "#5" in txt and "<code>100</code>" in txt

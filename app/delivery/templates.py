@@ -170,17 +170,26 @@ def _proof_line(stats: dict | None) -> str:
             f"матож. {stats['expectancy_r']:+.2f}R/сделку — всё проверяемо (/trackrecord)\n")
 
 
-def render_teaser(sig: Signal, signal_id: int, stats: dict | None = None) -> str:
+def render_teaser(sig: Signal, signal_id: int, stats: dict | None = None,
+                  open_channel: str | None = None) -> str:
     """Превью для free-юзера сверх недельного лимита / канала в режиме teaser.
 
     stats (journal.stats()) — соц-пруф прямо на пейволле: не голое «по подписке», а
-    проверяемые цифры в точке, где юзер упёрся в лимит."""
+    проверяемые цифры в точке, где юзер упёрся в лимит.
+    open_channel — канал, где этот же сигнал уже опубликован целиком (channel_mode=full):
+    тогда «уровни по подписке» было бы неправдой, и тизер говорит, за что на самом деле
+    платят — личка без лимита и объём под свой депозит."""
+    if open_channel:
+        offer = (f"Полный сигнал — в канале {esc(open_channel)}. В личку без лимита, "
+                 "с объёмом под твой депозит (/depo) — по подписке.\n"
+                 "/subscribe — тарифы")
+    else:
+        offer = "Вход, стоп, тейки и разбор — по подписке.\n/subscribe — открыть все сигналы"
     return (
         f"🔒 <b>СИГНАЛ #{signal_id}</b> — превью\n"
         f"{_sig_head(sig)}\n"
         f"{_proof_line(stats)}"
-        "Вход, стоп, тейки и разбор — по подписке.\n"
-        "/subscribe — открыть все сигналы"
+        f"{offer}"
     )
 
 
