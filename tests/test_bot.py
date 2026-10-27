@@ -1336,3 +1336,12 @@ def test_bybit_guide():
     assert "реферальная" in withref and "partner.bybit.com/b/RSIRANGE" in withref
     for leak in ("6226", "LTF", "SMC"):
         assert leak not in withref
+
+
+def test_parse_shadow_set():
+    """/shadow set: тег@ТФ через запятую; «-» снимает тень со всех; кривой ввод — None."""
+    assert bot.parse_shadow_set("LTF-BB@4h, LTF-OB@4h,6226@4h") == [
+        "LTF-BB@4h", "LTF-OB@4h", "6226@4h"]
+    assert bot.parse_shadow_set("-") == []
+    for bad in ("", "  ", "LTF-BB", "LTF-BB@", "@4h", "a@b@c", "LTF-BB@4h,мусор"):
+        assert bot.parse_shadow_set(bad) is None, bad

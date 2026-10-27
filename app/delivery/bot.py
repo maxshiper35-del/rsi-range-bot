@@ -684,17 +684,25 @@ def format_terms() -> str:
 
 
 def format_backtest_summary() -> str:
-    """/backtest — честный итог бэктеста + дисклеймер в духе CFTC Rule 4.41 (статический текст)."""
+    """/backtest — честный итог бэктеста + дисклеймер в духе CFTC Rule 4.41 (статический текст).
+
+    Цифры — замер 27.10.2026 (docs/measurements/2026-10-27-equity-curve-filter.md, база
+    воспроизведена в 2026-10-27-1h-only-trail10-m2.md): прод-конфиг, живой судья, M2′.
+    Ротационный вотчлист — 2026-10-24-rotating-universe.md. Менять только новым замером."""
     return (
         "🧪 Бэктест стратегии — честный итог\n"
         f"{_LINE}\n"
-        "Период: 12 месяцев, BTC/ETH/SOL (Bybit perpetuals).\n"
-        "Метод: walk-forward без лукахеда — движку подавались только закрытые бары, "
-        "комиссии и проскальзывание учтены, при касании стопа и тейка в одном баре "
-        "консервативно засчитывался стоп.\n\n"
-        "Вывод: устойчивого механического края НЕ обнаружено. Все кандидаты после "
-        "издержек около нуля или в минусе; лучший из них фальсифицирован на генуинной "
-        "out-of-sample проверке.\n\n"
+        "Период: 5 лет (07.2021–07.2026), 9 монет Bybit, таймфреймы 1h и 4h.\n"
+        "Метод: те же правила, что у живого бота — движку подаются только закрытые бары, "
+        "исход судится по часовым свечам, выход только трейлинг-стопом, не больше 6 "
+        "позиций в одну сторону. Издержки реальные: комиссия тейкера 0,055%, "
+        "проскальзывание 0,15%, фандинг.\n\n"
+        "Итог: 4672 сделки, +29R за 5 лет — в среднем +0,006R на сделку, то есть около "
+        "нуля. Первые 4 года −7R, последний год +36R (+0,03R на сделку). На ротационном "
+        "списке монет, как торгует живой бот, за 2 года: +0,02R на сделку, 95% интервал "
+        "от −0,04 до +0,09R.\n\n"
+        "Вывод: устойчивого края после реальных издержек НЕ обнаружено — результат на грани "
+        "нуля и зависит от режима рынка.\n\n"
         "⚠️ Важно: бэктест — это смоделированный расчёт задним числом. Гипотетические "
         "результаты имеют врождённые ограничения: hindsight bias, идеализированное "
         "исполнение, не учитывают реальную ликвидность. В отличие от бэктеста, /stats "
@@ -770,6 +778,18 @@ def fill_is_fresh(c: dict, now: datetime, factor: float = 2.0, slack: float = 90
         filled = filled.replace(tzinfo=timezone.utc)
     tf_sec = _TF_SECONDS_VIEW.get(str(c.get("timeframe")), 3600)
     return (now - filled).total_seconds() <= factor * tf_sec + slack
+
+
+def parse_shadow_set(raw: str) -> list[str] | None:
+    """Аргумент '/shadow set …' -> список 'тег@ТФ' ([] для «-» — снять тень со всех) или
+    None при кривом вводе: пустая строка или элемент не вида тег@ТФ."""
+    raw = (raw or "").strip()
+    if raw == "-":
+        return []
+    items = [x.strip() for x in raw.split(",") if x.strip()]
+    if not items or any(x.count("@") != 1 or not all(x.split("@")) for x in items):
+        return None
+    return items
 
 
 def is_shadow_setup(sig) -> bool:
@@ -1358,7 +1378,7 @@ ADMIN_COMMANDS = USER_COMMANDS + [
     ("setups", "включённые сетапы стратегии"),
     ("executor", "демо-исполнение на BingX (VST): status | on | off"),
     ("bysetup", "статистика по тегу сетапа (6226/1:1/open-SMC/LTF-BB/LTF-OB)"),
-    ("shadow", "теневые сетапы: итог проверки вперёд (не публикуются)"),
+    ("shadow", "теневые сетапы: итог проверки вперёд | /shadow set тег@ТФ,…"),
     ("growth", "атрибуция: источник -> приглашено -> оплатили -> %"),
     ("ad", "реклама: ссылка с меткой + пост, учёт расхода: /ad <метка> [₽]"),
     ("minconf", "порог уверенности сетапа (0..1)"),
@@ -3334,6 +3354,20 @@ def main() -> None:
         # теневой режим сетапов: итог контрфакта (не публикуется) — к решению по
         # docs/measurements/2026-10-05-shadow-ltfbb-4h.md
         if not _is_admin(m):
+            return
+        parts = (m.text or "").split(maxsplit=2)
+        if len(parts) >= 2 and parts[1].lower() == "set":
+            # /shadow set LTF-BB@4h,6226@4h — перевод сетапов в тень (решение владельца по
+            # замеру; пустой список недопустим — «всё в публикацию» = /shadow set -)
+            items = parse_shadow_set(parts[2] if len(parts) == 3 else "")
+            if items is None:
+                await m.answer("Формат: /shadow set LTF-BB@4h,LTF-OB@4h,6226@4h "
+                               "(тег@ТФ через запятую; «-» — снять тень со всех)")
+                return
+            await asyncio.to_thread(runtime.set_value, "shadow_setups", ",".join(items))
+            cur = await asyncio.to_thread(runtime.shadow_setups)
+            await m.answer("🌑 В тени: " + (", ".join(f"{t}@{tf}" for t, tf in sorted(cur))
+                                           or "— (всё публикуется)"))
             return
         cur = await asyncio.to_thread(runtime.shadow_setups)
         st = await asyncio.to_thread(journal.shadow_stats)
