@@ -290,7 +290,7 @@ def main() -> None:
     keys = sys.argv[1:] or list(VIDEOS)
     for k in keys:
         name, build, caption = VIDEOS[k]
-        mp4 = replay.frames_to_mp4(build())
+        mp4 = replay.frames_to_mp4(build(), seed=list(VIDEOS).index(k))
         (OUT / f"{name}.mp4").write_bytes(mp4)
         (OUT / f"{name}.txt").write_text(caption + "\n\nНе финансовый совет.\n", encoding="utf-8")
         print(f"{name}.mp4 — {len(mp4) // 1024} КБ", flush=True)

@@ -283,8 +283,10 @@ def fetch_trade_bars(row: dict) -> pd.DataFrame:
     return df[df["dt"] + pd.Timedelta(hours=1) <= now].reset_index(drop=True)
 
 
-def frames_to_mp4(frames: list[tuple[str, float]]) -> bytes:
-    """[(HTML кадра 1080×1920, длительность с)] -> MP4 (H.264, 30 fps, faststart).
+def frames_to_mp4(frames: list[tuple[str, float]], seed: int = 0,
+                  cues: list | None = None, music: bool = True) -> bytes:
+    """[(HTML кадра 1080×1920, длительность с)] -> MP4 (H.264, 30 fps, faststart) со
+    своей фоновой музыкой (soundtrack.build) и акцентами cues [(время_с, вид)].
     Один браузер на всё видео; синхронно — только через asyncio.to_thread."""
     import subprocess
     import tempfile
@@ -312,7 +314,24 @@ def frames_to_mp4(frames: list[tuple[str, float]]) -> bytes:
              "-i", "list.txt", "-vf", "fps=30,format=yuv420p", "-c:v", "libx264",
              "-preset", "medium", "-crf", "20", "-movflags", "+faststart", out.name],
             cwd=td, check=True)
-        return out.read_bytes()
+        if not music:
+            return out.read_bytes()
+        from app.delivery import soundtrack
+        total = sum(d for _h, d in frames)
+        (Path(td) / "audio.wav").write_bytes(soundtrack.build(total, seed, cues))
+        final = Path(td) / "final.mp4"
+        # громкость под нормы соцсетей (~−14 LUFS) — ОТДЕЛЬНЫМ шагом: loudnorm в одной
+        # команде с -shortest съедал хвост ~2.6 с (окно анализа) — пропадал финальный итог
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", "audio.wav",
+             "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-ar", "44100", "norm.wav"],
+            cwd=td, check=True)
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", out.name, "-i", "norm.wav",
+             "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+             "-t", f"{total:.3f}", "-movflags", "+faststart", final.name],
+            cwd=td, check=True)
+        return final.read_bytes()
 
 
 def render_replay_mp4(row: dict, bars: pd.DataFrame | None = None,
@@ -328,5 +347,15 @@ def render_replay_mp4(row: dict, bars: pd.DataFrame | None = None,
     last = plan["frames"][-1]
     seq += [(last, (i + 1) / 12, 0.1) for i in range(12)]
     seq.append((last, 1.0, 2.6))
+    # акценты: щелчок на входе, аккорд итога в начале счётчика (плюс — мажор, минус — вниз)
+    cues, t = [], 0.0
+    filled = False
+    for fr, outro, dur in seq:
+        if not filled and fr["stage"] in ("open", "trail", "exit") and outro is None:
+            cues.append((t, "tick"))
+            filled = True
+        if outro is not None and not any(k in ("win", "loss") for _t, k in cues):
+            cues.append((t, "win" if plan["final_r"] > 0 else "loss"))
+        t += dur
     return frames_to_mp4([(build_frame_html(row, plan, fr, outro, channel), dur)
-                          for fr, outro, dur in seq])
+                          for fr, outro, dur in seq], seed=int(row.get("id") or 0), cues=cues)

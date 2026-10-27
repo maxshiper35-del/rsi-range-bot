@@ -210,4 +210,12 @@ def render_week_mp4(period: str, trades: list[dict], channel: str = "@rsi_range"
                for i in range(12)]
     frames.append((build_week_frame_html(period, trades, n, summary=True, outro=1.0,
                                          channel=channel), 2.8))
-    return frames_to_mp4(frames)
+    # акценты: по звуку на каждую сделку (выше — плюс, ниже — минус) и аккорд итога недели
+    cues, t = [], 1.2
+    for tr in trades:
+        cues.append((t, "tw" if float(tr["result_r"]) > 0 else "tl"))
+        t += step
+    t += 1.0 - step + 2.4
+    cues.append((t, "win" if week_stats(trades)["total"] > 0 else "loss"))
+    seed = sum(ord(c) for c in period)
+    return frames_to_mp4(frames, seed=seed, cues=cues)
