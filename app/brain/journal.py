@@ -923,6 +923,16 @@ def stats_for_period(start_iso: str, end_iso: str) -> dict:
     }
 
 
+def trades_for_period(start_iso: str, end_iso: str) -> list[dict]:
+    """Закрытые сделки периода — ТОТ ЖЕ отбор и порядок, что stats_for_period (видео-итог
+    недели и карточка недели показывают одни и те же цифры). Без уровней и сетапов."""
+    return [dict(r) for r in db.query(
+        "SELECT id, symbol, side, timeframe, closed_at, result_r "
+        "FROM signals WHERE status IN ('tp1','tp2','tp3','stopped','expired') "
+        "AND result_r IS NOT NULL AND closed_at >= ? AND closed_at < ? ORDER BY closed_at",
+        (start_iso, end_iso))]
+
+
 def equity_series() -> list:
     """Хронологический список result_r закрытых сделок (по closed_at) — для эквити-кривой
     дашборда. Тот же фильтр, что stats(): суммы совпадут с total_r до копейки."""

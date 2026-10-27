@@ -283,15 +283,41 @@ def fetch_trade_bars(row: dict) -> pd.DataFrame:
     return df[df["dt"] + pd.Timedelta(hours=1) <= now].reset_index(drop=True)
 
 
-def render_replay_mp4(row: dict, bars: pd.DataFrame | None = None,
-                      channel: str = "@rsi_range") -> bytes:
-    """MP4 1080×1920, 30 fps: интро 1.6с, повтор ≤ ~8с, счётчик итога 1.2с + 2.6с."""
+def frames_to_mp4(frames: list[tuple[str, float]]) -> bytes:
+    """[(HTML кадра 1080×1920, длительность с)] -> MP4 (H.264, 30 fps, faststart).
+    Один браузер на всё видео; синхронно — только через asyncio.to_thread."""
     import subprocess
     import tempfile
     from pathlib import Path
 
     from playwright.sync_api import sync_playwright
 
+    with tempfile.TemporaryDirectory() as td, sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": W, "height": H}, device_scale_factor=1)
+            lines = []
+            for k, (html, dur) in enumerate(frames):
+                page.set_content(html)
+                path = Path(td) / f"f{k:04d}.png"
+                page.screenshot(path=str(path))
+                lines += [f"file '{path.name}'", f"duration {dur}"]
+            lines.append(f"file '{path.name}'")             # concat: последний кадр дважды
+        finally:
+            browser.close()
+        (Path(td) / "list.txt").write_text("\n".join(lines))
+        out = Path(td) / "video.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+             "-i", "list.txt", "-vf", "fps=30,format=yuv420p", "-c:v", "libx264",
+             "-preset", "medium", "-crf", "20", "-movflags", "+faststart", out.name],
+            cwd=td, check=True)
+        return out.read_bytes()
+
+
+def render_replay_mp4(row: dict, bars: pd.DataFrame | None = None,
+                      channel: str = "@rsi_range") -> bytes:
+    """MP4 1080×1920, 30 fps: интро 1.6с, повтор ≤ ~8с, счётчик итога 1.2с + 2.6с."""
     if bars is None:
         bars = fetch_trade_bars(row)
     plan = replay_plan(row, bars)
@@ -302,24 +328,5 @@ def render_replay_mp4(row: dict, bars: pd.DataFrame | None = None,
     last = plan["frames"][-1]
     seq += [(last, (i + 1) / 12, 0.1) for i in range(12)]
     seq.append((last, 1.0, 2.6))
-    with tempfile.TemporaryDirectory() as td, sync_playwright() as p:
-        browser = p.chromium.launch()
-        try:
-            page = browser.new_page(viewport={"width": W, "height": H}, device_scale_factor=1)
-            lines = []
-            for k, (fr, outro, dur) in enumerate(seq):
-                page.set_content(build_frame_html(row, plan, fr, outro, channel))
-                path = Path(td) / f"f{k:04d}.png"
-                page.screenshot(path=str(path))
-                lines += [f"file '{path.name}'", f"duration {dur}"]
-            lines.append(f"file '{path.name}'")             # concat: последний кадр дважды
-        finally:
-            browser.close()
-        (Path(td) / "list.txt").write_text("\n".join(lines))
-        out = Path(td) / "replay.mp4"
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
-             "-i", "list.txt", "-vf", "fps=30,format=yuv420p", "-c:v", "libx264",
-             "-preset", "medium", "-crf", "20", "-movflags", "+faststart", out.name],
-            cwd=td, check=True)
-        return out.read_bytes()
+    return frames_to_mp4([(build_frame_html(row, plan, fr, outro, channel), dur)
+                          for fr, outro, dur in seq])

@@ -45,6 +45,8 @@ def scan_frames(symbol: str, frames: dict[str, pd.DataFrame], engine: SMCEngine,
 # встают в очередь за браузерами (ревью 14.08, starvation воспроизведён). 2 слота:
 # юзерский рендер не блокирует канальный пост и наоборот, а пула хватает на остальное.
 _RENDER_SEM = asyncio.Semaphore(2)
+# фоновые задачи (видео-итог недели): ссылка держит задачу от сборщика мусора до завершения
+_BG_TASKS: set = set()
 
 
 class _ErrorBuffer(logging.Handler):
@@ -2997,7 +2999,7 @@ def main() -> None:
         row = dict(rows[0])
         await m.answer(f"🎬 Рендерю повтор #{row['id']} — ~30 с…")
         try:
-            mp4 = await asyncio.to_thread(replay.render_replay_mp4, row)
+            mp4 = await _render_png(replay.render_replay_mp4, row)
         except Exception as e:                          # noqa: BLE001 — сеть/браузер/ffmpeg
             log.exception("video #%s", row["id"])
             await m.answer(f"Не вышло отрендерить: {templates.esc(str(e))[:300]}")
@@ -3007,6 +3009,47 @@ def main() -> None:
             BufferedInputFile(mp4, filename=f"rsirange_{row['id']}_{base}.mp4"),
             width=replay.W, height=replay.H, supports_streaming=True,
             caption=(f"#{row['id']} {base} {row['side']} · {row['result_r']:+.2f}R "
+                     "(до комиссий). Для Reels/Shorts/TikTok — сохраните файл."))
+
+    @dp.message(Command("weekvideo"))
+    async def _weekvideo_cmd(m):
+        # видео-итог недели 9:16: /weekvideo — прошлая полная неделя, /weekvideo now — текущая
+        if not _is_admin(m):
+            return
+        now_dt = datetime.now(timezone.utc)
+        if (m.text or "").split()[1:2] == ["now"]:
+            iso_year, iso_week, _ = now_dt.isocalendar()
+            start = datetime.fromisocalendar(iso_year, iso_week, 1).replace(tzinfo=timezone.utc)
+            end = now_dt
+        else:
+            start, end = weekly_report_period(now_dt)
+        await m.answer("🎬 Рендерю итог недели — до минуты…")
+        await _send_week_video(m.chat.id, start, end)
+
+    async def _send_week_video(chat_id: int, start: datetime, end: datetime) -> None:
+        """Видео-итог периода [start, end) в личку (публикация — решение админа)."""
+        from aiogram.types import BufferedInputFile
+
+        from app.delivery import weekly_video
+        trades = await asyncio.to_thread(journal.trades_for_period, start.isoformat(),
+                                         end.isoformat())
+        last = min(end, datetime.now(timezone.utc)) - timedelta(seconds=1)
+        period = f"{start:%d.%m}–{last:%d.%m.%Y}"
+        if not trades:
+            await bot.send_message(chat_id, f"За {period} закрытых сделок нет — видео не будет.")
+            return
+        try:
+            mp4 = await _render_png(weekly_video.render_week_mp4, period, trades)
+        except Exception as e:                          # noqa: BLE001 — браузер/ffmpeg
+            log.exception("week video")
+            await bot.send_message(chat_id, f"Не вышло отрендерить итог недели: "
+                                            f"{templates.esc(str(e))[:300]}")
+            return
+        total = sum(float(t["result_r"]) for t in trades)
+        await bot.send_video(
+            chat_id, BufferedInputFile(mp4, filename=f"rsirange_week_{start:%Y%m%d}.mp4"),
+            width=weekly_video.W, height=weekly_video.H, supports_streaming=True,
+            caption=(f"🎬 Итог недели {period}: {len(trades)} сделок · {total:+.2f}R "
                      "(до комиссий). Для Reels/Shorts/TikTok — сохраните файл."))
 
     @dp.message(Command("shadow"))
@@ -4051,6 +4094,13 @@ def main() -> None:
                         reply_markup=_channel_kb("chcard"))
                 except Exception as e:                      # noqa: BLE001
                     log.warning("карточка недели: %s", e)
+                # видео-итог недели — админам в личку (публикация в соцсети — их решение);
+                # фоновой задачей: рендер ~30–60с не должен держать такт обслуживания
+                for admin_id in cfg.admin_ids:
+                    task = asyncio.create_task(
+                        _send_week_video(admin_id, *weekly_report_period(now_dt)))
+                    _BG_TASKS.add(task)
+                    task.add_done_callback(_BG_TASKS.discard)
                 try:
                     rows = await asyncio.to_thread(journal.export_public_trades)
                     csv_bytes = await asyncio.to_thread(build_trackrecord_csv, rows)
