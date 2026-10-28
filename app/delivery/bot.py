@@ -4539,7 +4539,10 @@ def main() -> None:
         for uid, stage in await asyncio.to_thread(payments.due_for_trial_drip,
                                                   float(runtime.trial_days())):
             try:
-                await bot.send_message(uid, templates.TRIAL_DRIP[stage], parse_mode="HTML")
+                drip = (templates.TRIAL_DRIP[stage] if stage in templates.TRIAL_DRIP
+                        else templates.render_trial_last_day(
+                            runtime.free_per_week(), await asyncio.to_thread(journal.stats)))
+                await bot.send_message(uid, drip, parse_mode="HTML")
                 await asyncio.to_thread(payments.mark_trial_drip, uid, stage)
                 log.info("дрип стадия %d -> %s", stage, uid)
             except Exception as e:                     # noqa: BLE001 — заблокировал бота и т.п.
@@ -4821,7 +4824,10 @@ def main() -> None:
                         block = templates.render_discipline_block(coach) if coach else ""
                     except Exception as e:              # noqa: BLE001
                         log.warning("коуч -> %s: %s", uid, e)
-                    await _send_retry(uid, d_text + ("\n" + block if block else ""),
+                    depo = await asyncio.to_thread(payments.depo_prefs, uid)
+                    text = templates.render_weekly_digest(d_label, d_wk, d_st, depo=depo,
+                                                          ask_depo=True)
+                    await _send_retry(uid, text + ("\n" + block if block else ""),
                                       parse_mode="HTML")
                     sent += 1
                 except Exception as e:                  # noqa: BLE001
@@ -4835,8 +4841,10 @@ def main() -> None:
                         continue
                     missed = await asyncio.to_thread(
                         payments.missed_teaser_r, uid, start_iso, end_iso)
+                    depo = await asyncio.to_thread(payments.depo_prefs, uid)
                     await _send_retry(
-                        uid, templates.render_weekly_digest(d_label, d_wk, d_st, missed),
+                        uid, templates.render_weekly_digest(d_label, d_wk, d_st, missed,
+                                                            depo=depo, ask_depo=True),
                         parse_mode="HTML")
                     f_sent += 1
                 except Exception as e:                  # noqa: BLE001

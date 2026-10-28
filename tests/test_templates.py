@@ -114,11 +114,24 @@ def test_render_milestone():
 
 
 def test_trial_drip_texts():
-    assert set(templates.TRIAL_DRIP) == {1, 2, 3}
+    assert set(templates.TRIAL_DRIP) == {1, 2}                # 3 — render_trial_last_day
     assert "стоп" in templates.TRIAL_DRIP[1].lower()         # день 1: риск-дисциплина
+    assert "/depo" in templates.TRIAL_DRIP[1] and "/notify" in templates.TRIAL_DRIP[1]
     assert "/trackrecord" in templates.TRIAL_DRIP[2]          # день 3: проверь сам
-    assert "/subscribe" in templates.TRIAL_DRIP[3]            # финал: тарифы
-    assert "не за обещание прибыли" in templates.TRIAL_DRIP[3]  # честность и в продаже
+    assert "/check" in templates.TRIAL_DRIP[2] and "@rsi_range" in templates.TRIAL_DRIP[2]
+
+
+def test_trial_last_day_says_what_stays_free_before_price():
+    st = {"trades": 417, "winrate": 0.393, "total_r": 48.8}
+    txt = templates.render_trial_last_day(7, st)
+    assert "7 полных сигналов в неделю" in txt
+    assert "417 закрытых сделок" in txt and "+48.8R" in txt and "минусы не прячем" in txt
+    # порядок: сначала «что остаётся бесплатно», потом подписка
+    assert txt.index("Бесплатно остаётся") < txt.index("/subscribe")
+    assert "не за обещание прибыли" in txt                    # честность и в продаже
+    assert "края не показал" not in txt
+    no_free = templates.render_trial_last_day(0, {})
+    assert "полных сигналов" not in no_free and "Журнал как есть" not in no_free
 
 
 def test_render_winback_has_promo_and_proof():
@@ -222,3 +235,19 @@ def test_trail_only_exit_line_states_tp_is_reference():
     # классический режим — строки про ориентир нет
     sig.indicators_snapshot["trail"]["tp_exit"] = True
     assert "ориентир" not in templates.trail_line(sig)
+
+
+def test_weekly_digest_usd_line_for_user_deposit():
+    wk = {"trades": 10, "wins": 4, "losses": 6, "winrate": 0.4, "total_r": 5.0}
+    st = {"trades": 417, "open": 3, "expectancy_r": 0.12, "total_r": 48.8}
+    txt = templates.render_weekly_digest("20.10–26.10", wk, st, depo=(1000.0, 1.0))
+    assert "На ваш депозит $1 000 при риске 1%" in txt and "+50$" in txt
+    neg = templates.render_weekly_digest("20.10–26.10", {**wk, "total_r": -3.0}, st,
+                                         depo=(500.0, 2.0))
+    assert "−" in neg or "-30$" in neg                    # минусовая неделя — минусом
+    ask = templates.render_weekly_digest("20.10–26.10", wk, st, ask_depo=True)
+    assert "/depo 500" in ask
+    assert "/depo" not in templates.render_weekly_digest("20.10–26.10", wk, st)
+    quiet = templates.render_weekly_digest("20.10–26.10", {**wk, "trades": 0}, st,
+                                           depo=(1000.0, 1.0))
+    assert "На ваш депозит" not in quiet                  # пустая неделя — без строки
