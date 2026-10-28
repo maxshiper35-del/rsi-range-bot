@@ -1355,3 +1355,9 @@ def test_parse_shadow_set():
     assert bot.parse_shadow_set("-") == []
     for bad in ("", "  ", "LTF-BB", "LTF-BB@", "@4h", "a@b@c", "LTF-BB@4h,мусор"):
         assert bot.parse_shadow_set(bad) is None, bad
+
+
+def test_channel_join_markup_points_to_public_channel():
+    kb = bot.channel_join_markup()
+    btn = kb.inline_keyboard[0][0]
+    assert btn.url == "https://t.me/rsi_range" and "Подписаться на канал" in btn.text

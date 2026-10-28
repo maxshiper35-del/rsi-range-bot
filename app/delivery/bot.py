@@ -1187,6 +1187,19 @@ def affiliate_row(url: str) -> list:
     return [[InlineKeyboardButton(text=affiliate_label(url), url=url)]]
 
 
+CHANNEL_URL = "https://t.me/rsi_range"   # публичный адрес канала (в .env он задан числовым id)
+
+
+def channel_join_markup():
+    """Кнопка «подписаться на канал» в личке: после приветствия и под проверкой сигнала.
+    Разбор 28.10: из 6 пришедших с рекламы в канал не дошёл никто — строку со ссылкой в
+    длинном приветствии не замечают, кнопку жмут."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup  # ленивый импорт
+
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="📣 Подписаться на канал", url=CHANNEL_URL)]])
+
+
 def channel_cta_markup(bot_username: str | None, src: str, affiliate_url: str = ""):
     """Инлайн-CTA под постом КАНАЛА: единственная кнопка-ссылка в бота с deep-link
     атрибуцией (/start src_<src> -> payments.set_acquisition_source, first-touch).
@@ -1928,8 +1941,6 @@ def main() -> None:
             "• Трек-рекорд проверяем: CSV + sha256 + офлайн-верификатор (/trackrecord)\n"
             "• 🔎 Проверка чужих сигналов: перешлите сюда пост из любого канала — бот "
             "покажет, чем он закончился (/check)\n\n"
-            "📣 Итог каждой сделки — в канале @rsi_range, подпишитесь, чтобы видеть "
-            "статистику, даже когда доступ закончится.\n\n"
             "Меню внизу экрана — всё в один тап; команды тоже работают (/help).\n"
             f"{ANTISCAM_LINE}\n"
             "⚠️ Не финансовый совет. Риск на сделку 1–2%.\n\n"
@@ -1939,6 +1950,11 @@ def main() -> None:
             text = (f"🎁 <b>Открыт полный доступ на {trial_days} дн.</b> — "
                     f"все сигналы без ограничений.\n\n" + text)
         await m.answer(text, reply_markup=_main_menu_kb(_is_admin(m)), parse_mode="HTML")
+        # отдельным сообщением: к приветствию уже привязано reply-меню, а инлайн-кнопка
+        # и reply-клавиатура в одном сообщении не уживаются
+        await m.answer("📣 Итог каждой сделки — плюс или минус — публикуем в канале. "
+                       "Подпишитесь, чтобы видеть статистику, даже когда доступ закончится.",
+                       reply_markup=channel_join_markup())
 
     @dp.message(Command("bybit"))
     async def _bybit(m):
@@ -4037,7 +4053,7 @@ def main() -> None:
                 log.info("проверка сигнала %s: %s", sig.coin, e)
                 txt = (f"Не получилось загрузить свечи {templates.esc(sig.coin)} с биржи. "
                        "Попробуйте через пару минут.")
-        await wait.edit_text(txt, parse_mode="HTML")
+        await wait.edit_text(txt, parse_mode="HTML", reply_markup=channel_join_markup())
 
     def _signal_chart_png(sig, sid):
         # синхронно (ccxt + Playwright) — вызывать только через asyncio.to_thread
