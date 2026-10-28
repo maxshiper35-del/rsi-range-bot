@@ -827,6 +827,19 @@ def acquisition_breakdown() -> dict:
     return {r["source"]: {"total": r["total"], "paid": r["paid"]} for r in rows}
 
 
+def users_by_source() -> dict:
+    """Кто пришёл из каждого источника — для качества трафика в /growth (запрос владельца
+    28.10: «нужно качество людей, чтобы оставались»). -> {source: {"ids": [tg_id], "active":
+    сколько НЕ заблокировали бота}}, source="—" — без метки."""
+    out: dict = {}
+    for r in db.query("SELECT COALESCE(acquisition_source, '—') AS source, tg_id, is_active "
+                      "FROM users"):
+        s = out.setdefault(r["source"], {"ids": [], "active": 0})
+        s["ids"].append(r["tg_id"])
+        s["active"] += 1 if r["is_active"] else 0
+    return out
+
+
 def revenue_by_source() -> dict:
     """Выручка по источнику прихода юзера — только status='paid' (как acquisition_breakdown).
     Валюты не смешиваем: Stars и USDT — разные деньги для мерчанта.

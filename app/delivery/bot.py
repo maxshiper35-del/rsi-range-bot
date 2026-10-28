@@ -407,16 +407,19 @@ def _revenue(by_currency: dict) -> str:
 
 
 def format_growth(breakdown: dict, spend: dict | None = None,
-                  revenue: dict | None = None) -> str:
+                  revenue: dict | None = None, quality: dict | None = None) -> str:
     """Текст /growth — источник → приглашено → реально оплатили → % конверсии. "Оплатили"
     здесь строго payments.status='paid' (см. journal.acquisition_breakdown) — триал/промо
     не в счёт, иначе конверсия дашборда врала бы себе.
 
     spend — расход на рекламу по меткам (/ad, ₽): метка с расходом, но без пришедших,
     тоже видна — купленный пост, который никого не привёл, и есть главный вывод.
-    revenue — выручка по источникам (payments.revenue_by_source), валюты не смешиваем."""
+    revenue — выручка по источникам (payments.revenue_by_source), валюты не смешиваем.
+    quality — {source: {"active": не заблокировали бота, "in_channel": подписаны на канал
+    или None, если проверить не удалось}}: дешёвый, но сразу ушедший трафик — не трафик."""
     spend = {k: v for k, v in (spend or {}).items() if v > 0}
     revenue = revenue or {}
+    quality = quality or {}
     if not breakdown and not spend:
         return "📈 Атрибуция\n────────────────────\nЮзеров пока нет."
     rows = dict(breakdown)
@@ -428,6 +431,11 @@ def format_growth(breakdown: dict, spend: dict | None = None,
         pct = f"{paid / total:.0%}" if total else "0%"
         label = "неизвестно/органика" if source == "—" else source
         lines.append(f"• {label}: {total} приглашено, {paid} оплатили ({pct})")
+        if source in quality and total:
+            q = quality[source]
+            chan = (f" · в канале {q['in_channel']}"
+                    if q.get("in_channel") is not None else "")
+            lines.append(f"   остались в боте {q['active']} из {total}{chan}")
         extra = []
         if source in spend:
             cost = spend[source]
@@ -1920,6 +1928,8 @@ def main() -> None:
             "• Трек-рекорд проверяем: CSV + sha256 + офлайн-верификатор (/trackrecord)\n"
             "• 🔎 Проверка чужих сигналов: перешлите сюда пост из любого канала — бот "
             "покажет, чем он закончился (/check)\n\n"
+            "📣 Итог каждой сделки — в канале @rsi_range, подпишитесь, чтобы видеть "
+            "статистику, даже когда доступ закончится.\n\n"
             "Меню внизу экрана — всё в один тап; команды тоже работают (/help).\n"
             f"{ANTISCAM_LINE}\n"
             "⚠️ Не финансовый совет. Риск на сделку 1–2%.\n\n"
@@ -3462,7 +3472,30 @@ def main() -> None:
         breakdown = await asyncio.to_thread(payments.acquisition_breakdown)
         spend = await asyncio.to_thread(runtime.ad_spend)
         revenue = await asyncio.to_thread(payments.revenue_by_source)
-        await m.answer(format_growth(breakdown, spend, revenue))
+        quality = await _growth_quality()
+        await m.answer(format_growth(breakdown, spend, revenue, quality))
+
+    async def _growth_quality() -> dict:
+        """Остались ли пришедшие: не заблокировали бота + подписаны на канал (get_chat_member;
+        бот — админ канала). Сбой проверки канала — None, а не «0 в канале»."""
+        by_src = await asyncio.to_thread(payments.users_by_source)
+        out: dict = {}
+        for src, s in by_src.items():
+            n, ok = 0, bool(cfg.signals_channel)
+            for uid in s["ids"] if ok else []:
+                try:
+                    cm = await bot.get_chat_member(cfg.signals_channel, uid)
+                    if cm.status in ("member", "administrator", "creator", "restricted"):
+                        n += 1
+                except TelegramBadRequest:
+                    pass                        # юзер не найден / не в канале — не считаем
+                except Exception as e:          # noqa: BLE001 — сеть / права бота
+                    log.info("growth: проверка канала %s: %s", uid, e)
+                    ok = False
+                    break
+                await asyncio.sleep(0.05)       # бережём лимит Bot API (~30 запросов/с)
+            out[src] = {"active": s["active"], "in_channel": n if ok else None}
+        return out
 
     @dp.message(Command("ad"))
     async def _ad(m):

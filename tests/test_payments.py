@@ -1059,3 +1059,17 @@ def test_mark_refunded_idempotent_and_reverses_referral(fresh_db):
     ref_after = datetime.fromisoformat(payments.get_user(830)["paid_until"])
     assert ref_after < ref_until
     assert payments.get_user(831)["referral_rewarded_at"] is None
+
+
+def test_users_by_source_counts_who_stayed(fresh_db):
+    """Качество трафика (/growth): сколько пришедших НЕ заблокировали бота."""
+    from app.delivery import payments
+    for uid in (740, 741, 742):
+        payments.register_user(uid)
+        payments.set_acquisition_source(uid, "gramads_a")
+    payments.register_user(743)                           # органика
+    payments.mark_blocked(741)                            # заблокировал бота
+    q = payments.users_by_source()
+    assert sorted(q["gramads_a"]["ids"]) == [740, 741, 742]
+    assert q["gramads_a"]["active"] == 2
+    assert q["—"]["ids"] == [743] and q["—"]["active"] == 1

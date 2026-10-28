@@ -498,6 +498,15 @@ def test_format_growth():
 
 
 
+def test_format_growth_quality_lines():
+    breakdown = {"gramads_a": {"total": 4, "paid": 0}, "—": {"total": 2, "paid": 0}}
+    quality = {"gramads_a": {"active": 3, "in_channel": 1},
+               "—": {"active": 2, "in_channel": None}}       # канал не проверился
+    txt = bot.format_growth(breakdown, quality=quality)
+    assert "остались в боте 3 из 4 · в канале 1" in txt
+    assert "остались в боте 2 из 2" in txt and "в канале None" not in txt
+
+
 def test_format_growth_with_ad_spend_and_revenue():
     """Расход /ad -> цена юзера и оплатившего; метка с расходом без пришедших видна
     (купленный пост, который никого не привёл, — главный вывод); выручка по валютам."""
