@@ -534,6 +534,7 @@ def test_format_ad_post_and_reply():
     post = bot.format_ad_post(link, 5)
     assert link in post and "5 дней полного доступа бесплатно" in post
     assert "Не финансовый совет" in post
+    assert "перешлите боту сигнал из любого канала" in post        # крючок проверки (27.10)
     for leak in ("6226", "LTF", "1:1", "SMC", "%/мес", "прибыль"):  # граница публикации
         assert leak not in post, leak
     assert "1 день полного" in bot.format_ad_post(link, 1)
