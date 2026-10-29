@@ -1131,6 +1131,27 @@ def should_alert_poller_stale(last_tick_at: str | None, last_alert_at: str | Non
     return (now - datetime.fromisoformat(last_alert_at)).total_seconds() >= rethrottle_hours * 3600
 
 
+def should_alert_data_stale(last_ok_at: str | None, last_tick_at: str | None,
+                            last_alert_at: str | None, now_iso: str, stale_seconds: float,
+                            uptime_seconds: float, rethrottle_hours: int = 6) -> bool:
+    """Сторож СЛЕПОТЫ (аудит надёжности 30.10): такты поллера идут, но ни один не получил
+    баров биржи дольше stale_seconds — Bybit лежит, бан или гео-блок IP. До этого сторожа
+    такое было тишиной: тик ставится при пробуждении, поэтому и watchdog поллера, и пульс
+    healthchecks зелёные, а сбои фетча — только WARNING в логе (в DM админам идут ERROR).
+    Тик сам устарел — молчим: это дело should_alert_poller_stale, один алерт на причину.
+    Тиков ещё не было — тоже молчим (свежая БД/старт). Метки данных нет вовсе при живых
+    тиках после грейса аптайма — тревога: хоть один удачный такт успел бы её поставить."""
+    from datetime import datetime
+
+    if last_tick_at is None:
+        return False
+    tick_age = (datetime.fromisoformat(now_iso) - datetime.fromisoformat(last_tick_at))
+    if tick_age.total_seconds() >= stale_seconds:
+        return False
+    return should_alert_poller_stale(last_ok_at, last_alert_at, now_iso, stale_seconds,
+                                     uptime_seconds, rethrottle_hours)
+
+
 _healthcheck_ok_logged = False
 
 
@@ -1605,12 +1626,18 @@ def poller_tick_slack_seconds(timeframes: list) -> float:
     return max(youngest * 1.15, youngest + 300)
 
 
+_NOT_SHOWN = object()
+
+
 def format_health(uptime_seconds: float, last_tick_at: str | None,
                   last_backup_at: str | None, db_size_bytes: int, wal_mode: str,
-                  tick_slack_seconds: float = 3700.0) -> str:
+                  tick_slack_seconds: float = 3700.0, *,
+                  data_ok_at: object = _NOT_SHOWN) -> str:
     """/health — быстрый живой чек: аптайм, последний тик поллера, бэкап, БД, WAL.
     tick_slack_seconds — см. poller_tick_slack_seconds (дефолт — старое поведение
-    под 15m, для обратной совместимости вызовов без явного расчёта)."""
+    под 15m, для обратной совместимости вызовов без явного расчёта). data_ok_at —
+    метка последнего такта, получившего бары биржи (строка показывается, если передана):
+    тик без данных = поллер жив, но слеп (аудит надёжности 30.10)."""
     from datetime import datetime
 
     now = datetime.now(timezone.utc)
@@ -1621,11 +1648,18 @@ def format_health(uptime_seconds: float, last_tick_at: str | None,
                           .total_seconds() > tick_slack_seconds) else "✅ "
     backup_warn = "⚠️ " if (not last_backup_at or (now - datetime.fromisoformat(last_backup_at))
                             .total_seconds() > 26 * 3600) else "✅ "
+    data_line = ""
+    if data_ok_at is not _NOT_SHOWN:
+        data_iso = data_ok_at if isinstance(data_ok_at, str) and data_ok_at else None
+        data_warn = "⚠️ " if (not data_iso or (now - datetime.fromisoformat(data_iso))
+                              .total_seconds() > tick_slack_seconds) else "✅ "
+        data_line = f"{data_warn}Бары биржи получены: {_fmt_age(data_iso, now)}\n"
     return (
         "❤️ Health check\n"
         "────────────────────\n"
         f"Аптайм процесса: {up_h:.1f}ч\n"
         f"{tick_warn}Последний тик poller: {tick_age}\n"
+        f"{data_line}"
         f"{backup_warn}Последний бэкап: {backup_age}\n"
         f"БД: {db_size_bytes / 1024:.0f} KB, journal_mode={wal_mode}"
     )
@@ -2944,7 +2978,8 @@ def main() -> None:
         uptime, wal, size = await asyncio.to_thread(_collect)
         slack = poller_tick_slack_seconds(runtime.timeframes())
         await m.answer(format_health(uptime, runtime.last_poller_tick_at(),
-                                     runtime.last_backup_at(), size, wal, slack))
+                                     runtime.last_backup_at(), size, wal, slack,
+                                     data_ok_at=runtime._raw("last_poll_ok_at")))
 
     @dp.message(Command("pause"))
     async def _pause(m):
@@ -4486,6 +4521,24 @@ def main() -> None:
                 except Exception as e:                     # noqa: BLE001
                     log.warning("poller stale алерт админу %s: %s", admin_id, e)
             await asyncio.to_thread(runtime.set_last_poller_alert_at, now_)
+        # сторож слепоты: такты идут, а бары биржи не приходят (Bybit лежит/бан/гео-блок IP)
+        # — сигналов и судейства открытых нет, а пульс healthchecks зелёный (аудит 30.10)
+        last_data = runtime._raw("last_poll_ok_at")
+        if should_alert_data_stale(last_data, runtime.last_poller_tick_at(),
+                                   runtime._raw("last_data_alert_at"), now_, tick_stale,
+                                   uptime_s):
+            data_age = _fmt_age(last_data, datetime.now(timezone.utc))
+            text = (f"⚠️ Биржа данных не отдаёт бары (последний удачный такт: {data_age}). "
+                    "Такты идут, но ни один символ не загрузился — новых сигналов и "
+                    "судейства открытых сделок нет; пульс healthchecks при этом зелёный. "
+                    "Вероятно, Bybit недоступен или ограничил IP: logs/bot.log, строки "
+                    "«poll …» и «такт: …». Открытые позиции на бирже держат свои стопы.")
+            for admin_id in cfg.admin_ids:
+                try:
+                    await bot.send_message(admin_id, text)
+                except Exception as e:                     # noqa: BLE001
+                    log.warning("data stale алерт админу %s: %s", admin_id, e)
+            await asyncio.to_thread(runtime.set_value, "last_data_alert_at", now_)
         # пауза висит давно — напомнить админу (раз в сутки), чтобы молчание бота не
         # выглядело поломкой и не стоило недель без сигналов
         try:

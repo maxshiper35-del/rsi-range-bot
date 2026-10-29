@@ -211,6 +211,14 @@ def poll_once(symbols: list, timeframes: list, engine=None,
     return found, closed
 
 
+def poll_data_ok(stats: dict) -> bool:
+    """Такт получил данные биржи: хоть один символ загрузился, либо грузить было нечего
+    (пустой вотчлист — не слепота). Все загрузки упали или итога нет -> False."""
+    if not stats:
+        return False
+    return stats.get("ok", 0) > 0 or stats.get("failed", 0) == 0
+
+
 async def run_poller(on_candidate, engine=None, on_tick=None, on_close=None) -> None:
     """Бесконечный цикл: спать до закрытия младшей свечи из Settings.timeframes,
     затем poll_once по watchlist; на каждого кандидата вызвать on_candidate(sig, sid).
@@ -253,6 +261,12 @@ async def run_poller(on_candidate, engine=None, on_tick=None, on_close=None) -> 
                 use_time_filter=runtime.time_filter_enabled()))
             found, closed = await asyncio.to_thread(
                 poll_once, runtime.symbols(), tfs, eng, None, 1.5, scan_new=not paused)
+            # метка «бары биржи реально пришли» — отдельно от тика: тик ставится при
+            # пробуждении и при лежащем Bybit идёт как ни в чём не бывало (пульс
+            # healthchecks — тоже), а сторож слепоты в боте смотрит сюда (аудит 30.10)
+            if poll_data_ok(LAST_POLL_STATS):
+                await asyncio.to_thread(runtime.set_value, "last_poll_ok_at",
+                                        clock.utcnow_iso())
             for sig, sid in found:
                 try:
                     res = on_candidate(sig, sid)

@@ -441,6 +441,49 @@ def test_should_alert_poller_stale():
     assert bot.should_alert_poller_stale(stale, old, now_iso, slack, up_long) is True
 
 
+def test_should_alert_data_stale_blind_poller():
+    """Сторож слепоты (аудит 30.10): тик свежий, а бары биржи не приходят — тревога;
+    тик сам протух — молчим (это алерт should_alert_poller_stale, один на причину)."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    stale_s = 2 * 4140.0                                    # 2x slack для 1h,4h — как в боте
+    up_long = stale_s + 100
+    tick_fresh = (now - timedelta(minutes=10)).isoformat()
+    data_fresh = (now - timedelta(minutes=11)).isoformat()
+    data_old = (now - timedelta(hours=5)).isoformat()
+    tick_old = (now - timedelta(hours=5)).isoformat()
+
+    f = bot.should_alert_data_stale
+    assert f(data_fresh, tick_fresh, None, now_iso, stale_s, up_long) is False   # всё живо
+    assert f(data_old, tick_fresh, None, now_iso, stale_s, up_long) is True      # слепота
+    assert f(None, tick_fresh, None, now_iso, stale_s, up_long) is True    # меток данных нет
+    assert f(data_old, tick_old, None, now_iso, stale_s, up_long) is False       # поллер завис
+    assert f(data_old, None, None, now_iso, stale_s, up_long) is False           # тиков не было
+    assert f(data_old, tick_fresh, None, now_iso, stale_s, stale_s - 1) is False  # грейс старта
+    recent = (now - timedelta(hours=1)).isoformat()
+    assert f(data_old, tick_fresh, recent, now_iso, stale_s, up_long) is False   # троттлинг
+    old_alert = (now - timedelta(hours=7)).isoformat()
+    assert f(data_old, tick_fresh, old_alert, now_iso, stale_s, up_long) is True
+
+
+def test_format_health_data_freshness_line():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    fresh = (now - timedelta(minutes=5)).isoformat()
+    old = (now - timedelta(hours=4)).isoformat()
+    slack = bot.poller_tick_slack_seconds(["1h", "4h"])
+    assert "Бары биржи" not in bot.format_health(3600.0, fresh, fresh, 1024, "wal", slack)
+    ok = bot.format_health(3600.0, fresh, fresh, 1024, "wal", slack, data_ok_at=fresh)
+    assert "✅ Бары биржи получены: 5м назад" in ok
+    blind = bot.format_health(3600.0, fresh, fresh, 1024, "wal", slack, data_ok_at=old)
+    assert "⚠️ Бары биржи получены" in blind and "✅ Последний тик poller" in blind
+    never = bot.format_health(3600.0, fresh, fresh, 1024, "wal", slack, data_ok_at=None)
+    assert "⚠️ Бары биржи получены: нет данных" in never
+
+
 def test_setup_codes_roundtrip():
     # каждый известный сетап имеет код, и код однозначно возвращается обратно в тег
     assert set(bot._KNOWN_SETUPS) == set(bot._SETUP_CODES)

@@ -476,6 +476,17 @@ def test_rate_limit_retry_is_info_other_errors_warn(monkeypatch, caplog):
     assert after["requests"] - before["requests"] == 3
 
 
+def test_poll_data_ok_semantics():
+    """Метка «бары биржи пришли» для сторожа слепоты: хоть один символ загрузился или
+    грузить было нечего; все загрузки упали / итога нет — нет метки."""
+    from app.data.market_data import poll_data_ok
+
+    assert poll_data_ok({"ok": 1, "failed": 13}) is True
+    assert poll_data_ok({"ok": 0, "failed": 0}) is True         # пустой вотчлист — не слепота
+    assert poll_data_ok({"ok": 0, "failed": 14}) is False       # Bybit лежит/бан IP
+    assert poll_data_ok({}) is False                            # такт не дошёл до итога
+
+
 def test_is_rate_limit_classification():
     import ccxt
 
