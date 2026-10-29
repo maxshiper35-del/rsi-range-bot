@@ -325,13 +325,22 @@ def _extend_and_activate(conn, tg_id: int, days: float, real_payment: bool = Fal
     return new_until
 
 
-def grant_gift_days(conn, tg_id: int, days: float) -> str:
+def grant_gift_days(conn, tg_id: int, days: float, remind_window_days: float = 3.0) -> str:
     """Подарочные дни (приз недели игры /game) ВНУТРИ транзакции вызывающего — та же
     механика, что у промо, триала и реф-награды (_extend_and_activate без real_payment):
     не платёж — в payments не пишется, реферер не награждается, win-back не перевзводится.
     Строка users должна существовать (register_user — ДО транзакции: _write_lock не
-    реентерабелен). -> новый paid_until."""
-    return _extend_and_activate(conn, tg_id, days)
+    реентерабелен).
+
+    Если доступа после подарка не больше окна напоминания о продлении (remind_window_days =
+    due_for_reminder(3) в bot._maintenance) — напоминание сразу помечается отправленным:
+    «подписка истекает, продлите» в ту же минуту, что «ты выиграл 3 дня», — спам; об
+    окончании всё равно скажет expire_overdue. -> новый paid_until."""
+    until = _extend_and_activate(conn, tg_id, days)
+    if datetime.fromisoformat(until) - _now_dt() <= timedelta(days=remind_window_days):
+        conn.execute("UPDATE users SET renew_reminded_at=? WHERE tg_id=?",
+                     (clock.utcnow_iso(), tg_id))
+    return until
 
 
 # ---------------------------------------------------------------------------

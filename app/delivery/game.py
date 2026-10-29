@@ -592,12 +592,12 @@ def result_recipients(now: datetime | None = None) -> list[tuple[int, int]]:
 def week_recipients(now: datetime | None = None) -> list[tuple[str, int]]:
     """(week_key, tg_id) итогов недели к отправке: участники недели, оставшиеся в игре и не в
     мьюте/тишине, + победитель всегда (начисленные дни — транзакционное уведомление, как
-    реф-награда)."""
+    реф-награда). Неделя без победителя (никто не набрал очков) не объявляется."""
     now = _aware(now)
     since = (now - timedelta(hours=WEEK_NOTIFY_HOURS)).isoformat()
     out = []
-    for w in db.query("SELECT * FROM game_weeks WHERE awarded_at >= ? AND players > 0 "
-                      "ORDER BY week_key", (since,)):
+    for w in db.query("SELECT * FROM game_weeks WHERE awarded_at >= ? "
+                      "AND winner_tg_id IS NOT NULL ORDER BY week_key", (since,)):
         mon, sun = week_days(w["week_key"])
         winner = w["winner_tg_id"]
         rows = db.query(

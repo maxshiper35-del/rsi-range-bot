@@ -469,6 +469,20 @@ def test_award_week_grants_prize_once_not_a_payment(fresh_db):
     assert payments.get_user(99)["paid_until"] is None       # админ вне зачёта
 
 
+def test_prize_does_not_trigger_instant_renewal_nag(fresh_db):
+    """Free-победитель с 3 днями доступа не должен в ту же минуту получить «подписка
+    истекает, продлите»; у платника с долгим сроком напоминание остаётся на своём месте."""
+    from app.delivery import game, payments
+
+    _week_fixture(fresh_db)
+    game.award_week("2026-W44", 3, (99,), at(7, 13))
+    assert payments.due_for_reminder(3) == []
+    payments.grant_subscription(10, "stars", 500, "XTR", 30, "c-10")
+    with fresh_db.transaction() as conn:
+        payments.grant_gift_days(conn, 10, 3)
+    assert payments.get_user(10)["renew_reminded_at"] is None
+
+
 def test_award_week_prize_disabled_and_no_scorers(fresh_db):
     from app.delivery import game, payments
 
@@ -483,6 +497,8 @@ def test_award_week_prize_disabled_and_no_scorers(fresh_db):
     assert res["winner"] is None and res["prize_days"] == 0
     row = fresh_db.query_one("SELECT * FROM game_weeks WHERE week_key='2026-W45'")
     assert row["winner_tg_id"] is None and row["players"] == 1
+    game.join(10, at(14, 9))
+    assert ("2026-W45", 10) not in game.week_recipients(at(14, 13, 1))   # объявлять нечего
 
 
 def test_weeks_to_award_waits_for_unresolved_round(fresh_db):
