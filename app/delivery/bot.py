@@ -4098,7 +4098,10 @@ def main() -> None:
     @dp.message(F.forward_origin, F.chat.type == "private")
     async def _check_forward(m):
         from app.delivery import signal_check
-        sig = signal_check.parse_signal(m.text or m.caption or "")
+        # разбор — в потоке: текст присылает кто угодно, и до лимита 20/сутки (лимит
+        # считает только распознанные сигналы). Синхронный разбор на event loop при
+        # квадратичном regex замораживал ВЕСЬ бот на 5 с за сообщение (аудит 30.10.2026)
+        sig = await asyncio.to_thread(signal_check.parse_signal, m.text or m.caption or "")
         if sig is None:
             await m.answer("Не нашёл в посте сигнал: нужны монета, LONG/SHORT, вход "
                            "(или «по рынку») и стоп. Подробнее — /check")
