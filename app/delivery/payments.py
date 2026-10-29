@@ -325,6 +325,15 @@ def _extend_and_activate(conn, tg_id: int, days: float, real_payment: bool = Fal
     return new_until
 
 
+def grant_gift_days(conn, tg_id: int, days: float) -> str:
+    """Подарочные дни (приз недели игры /game) ВНУТРИ транзакции вызывающего — та же
+    механика, что у промо, триала и реф-награды (_extend_and_activate без real_payment):
+    не платёж — в payments не пишется, реферер не награждается, win-back не перевзводится.
+    Строка users должна существовать (register_user — ДО транзакции: _write_lock не
+    реентерабелен). -> новый paid_until."""
+    return _extend_and_activate(conn, tg_id, days)
+
+
 # ---------------------------------------------------------------------------
 # Воронка доставок (free: N полных сигналов/нед, дальше — тизер)
 # ---------------------------------------------------------------------------
