@@ -1200,6 +1200,34 @@ def channel_join_markup():
         text="📣 Подписаться на канал", url=CHANNEL_URL)]])
 
 
+# метки рекламы, которая обещает «перешли сигнал — бот проверит» (GramAds A/B/D, 28.10)
+CHECK_HOOK_SOURCES = frozenset({"gramads_a", "gramads_name", "gramads_spor"})
+
+
+def is_check_hook_source(src: str) -> bool:
+    """Пришёл с рекламы-проверки: по такой рекламе 84 человека за сутки и ни одной проверки
+    (29.10) — человек жмёт кнопку и не понимает, что пересылать. Своя метка новой рекламы
+    этого типа — с префиксом check_."""
+    return src in CHECK_HOOK_SOURCES or src.startswith("check_")
+
+
+CHECK_HOWTO = (
+    "🔎 <b>Как проверить сигнал любого канала</b>\n"
+    "1. Откройте канал с сигналами.\n"
+    "2. Зажмите пост с сигналом → <b>«Переслать»</b> → выберите этот чат.\n"
+    "3. Через пару секунд бот покажет по свечам биржи: исполнился ли вход, какие цели "
+    "взяты, был ли стоп.\n\n"
+    "Важно: именно «Переслать», а не копировать — так бот знает время публикации.\n"
+    "Хотите посмотреть, как это выглядит? 👇")
+
+
+def check_demo_markup():
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup  # ленивый импорт
+
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="🔎 Показать пример проверки", callback_data="check_demo")]])
+
+
 def channel_cta_markup(bot_username: str | None, src: str, affiliate_url: str = ""):
     """Инлайн-CTA под постом КАНАЛА: единственная кнопка-ссылка в бота с deep-link
     атрибуцией (/start src_<src> -> payments.set_acquisition_source, first-touch).
@@ -1955,6 +1983,8 @@ def main() -> None:
         await m.answer("📣 Итог каждой сделки — плюс или минус — публикуем в канале. "
                        "Подпишитесь, чтобы видеть статистику, даже когда доступ закончится.",
                        reply_markup=channel_join_markup())
+        if arg.startswith("src_") and is_check_hook_source(arg[4:]):
+            await m.answer(CHECK_HOWTO, parse_mode="HTML", reply_markup=check_demo_markup())
 
     @dp.message(Command("bybit"))
     async def _bybit(m):
@@ -4030,6 +4060,40 @@ def main() -> None:
     async def _check_help(m):
         from app.delivery import signal_check
         await m.answer(signal_check.HELP, parse_mode="HTML")
+
+    @dp.callback_query(F.data == "check_demo")
+    async def _check_demo(cq):
+        """Пример проверки на нашем же последнем закрытом сигнале — человек видит, что
+        получит, ещё до того, как найдёт, что переслать. Сигнал берётся последний по
+        закрытию, без выбора «удачного»; фактический итог журнала показан рядом."""
+        from app.delivery import signal_check
+        await cq.answer()
+        row = await asyncio.to_thread(
+            db.query_one,
+            "SELECT * FROM signals WHERE status IN ('tp1','tp2','tp3','stopped') "
+            "AND result_r IS NOT NULL ORDER BY closed_at DESC LIMIT 1")
+        if row is None:
+            await cq.message.answer(CHECK_HOWTO, parse_mode="HTML")
+            return
+        plain = re.sub(r"<[^>]+>", "", templates.render_signal_dm(
+            journal.row_to_signal(row), row["id"]))
+        sig = signal_check.parse_signal(plain)
+        if sig is None:
+            await cq.message.answer("Пример сейчас недоступен — просто перешлите сюда "
+                                    "любой сигнал.")
+            return
+        wait = await cq.message.answer(f"🔎 Проверяю наш сигнал #{row['id']} по свечам биржи…")
+        async with _check_sem:
+            try:
+                txt = await asyncio.to_thread(
+                    _run_check, sig, datetime.fromisoformat(row["created_at"]))
+            except Exception as e:              # noqa: BLE001 — сеть / лимит биржи
+                log.info("пример проверки #%s: %s", row["id"], e)
+                txt = "Не получилось загрузить свечи с биржи. Попробуйте через пару минут."
+        txt = (f"<i>Пример на нашем сигнале #{row['id']}. Наш бот выходит по трейлинг-стопу, "
+               f"поэтому фактический итог в журнале — {row['result_r']:+.2f}R.</i>\n\n" + txt
+               + "\n\nТеперь перешлите сюда сигнал из своего канала 👆")
+        await wait.edit_text(txt, parse_mode="HTML", reply_markup=channel_join_markup())
 
     @dp.message(F.forward_origin, F.chat.type == "private")
     async def _check_forward(m):

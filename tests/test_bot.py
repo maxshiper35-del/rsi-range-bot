@@ -1361,3 +1361,13 @@ def test_channel_join_markup_points_to_public_channel():
     kb = bot.channel_join_markup()
     btn = kb.inline_keyboard[0][0]
     assert btn.url == "https://t.me/rsi_range" and "Подписаться на канал" in btn.text
+
+
+def test_check_hook_sources_get_howto():
+    for src in ("gramads_a", "gramads_name", "gramads_spor", "check_x20"):
+        assert bot.is_check_hook_source(src), src
+    for src in ("gramads_b", "referral", "chres", "share"):
+        assert not bot.is_check_hook_source(src), src
+    assert "«Переслать»" in bot.CHECK_HOWTO and "время публикации" in bot.CHECK_HOWTO
+    btn = bot.check_demo_markup().inline_keyboard[0][0]
+    assert btn.callback_data == "check_demo"
