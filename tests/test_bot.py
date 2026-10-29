@@ -804,6 +804,30 @@ def test_unlock_verdict():
         assert verdict in bot._UNLOCK_DENIALS
 
 
+def test_signal_action_loader_hides_shadows_from_non_admins(fresh_db):
+    """Кнопки «📈 График»/«🧮 Риск»: callback_data `sigcalc:<id>` подделывается, и любой
+    подписчик/триальщик перебором id получал вход и стоп теней (аудит 30.10.2026).
+    Не-админу — только публичный журнал; админ по-прежнему видит и тени."""
+    from app.brain import journal
+    from app.core.signal_engine import Side
+    from app.core.signal_engine import Signal as _Signal
+
+    def _s(sym, created):
+        return _Signal(symbol=sym, side=Side.LONG, timeframe="1h", entry=100.0, stop=95.0,
+                       take_profits=[110.0], risk_reward=2.0, confidence=0.7,
+                       reasons=["тест"], created_at=created,
+                       indicators_snapshot={"setup": "LTF-BB"})
+
+    sid_pub = journal.record_signal(_s("BTC/USDT:USDT", "2026-10-29T10:00:00+00:00"))
+    sid_shadow = journal.record_shadow(_s("ETH/USDT:USDT", "2026-10-29T11:00:00+00:00"),
+                                       reason="late_entry")
+    sid_cand = journal.record_candidate(_s("SOL/USDT:USDT", "2026-10-29T12:00:00+00:00"))
+    user, admin = bot.signal_action_loader(False), bot.signal_action_loader(True)
+    assert user(sid_pub)["id"] == sid_pub
+    assert user(sid_shadow) is None and user(sid_cand) is None
+    assert admin(sid_shadow)["id"] == sid_shadow and admin(sid_cand)["id"] == sid_cand
+
+
 def test_milestone_reached():
     """Вехи: одна (старшая) за раз, только что пересечённая."""
     assert bot.milestone_reached(0, 5) is None

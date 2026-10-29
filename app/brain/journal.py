@@ -112,8 +112,29 @@ def try_mark_filled(signal_id: int, iso_ts: str) -> bool:
 
 
 def signal_row(signal_id: int):
-    """Строка signals по id (или None) — для разовой покупки/переформатирования."""
+    """Строка signals по id (или None) — для разовой покупки/переформатирования.
+    Отдаёт ЛЮБОЙ статус, включая тени и кандидатов: для id, пришедшего от юзера
+    (callback_data), — только public_signal_row."""
     return db.query_one("SELECT * FROM signals WHERE id=?", (signal_id,))
+
+
+def public_signal_row(signal_id: int):
+    """Строка сигнала, ТОЛЬКО если он входит в публичный журнал, иначе None. Граница —
+    та же, что у export_public_trades: candidate/rejected (тени setup_off/late_entry,
+    кандидаты semiauto) и никогда не публиковавшиеся TTL-истёкшие кандидаты наружу
+    не отдаются.
+
+    Для юзер-поверхностей, получающих id извне (кнопки «📈 График»/«🧮 Риск»):
+    callback_data подделывается тривиально (MTProto getBotCallbackAnswer с любым data),
+    а signal_row по перебору id отдавал вход/стоп/тейки непубликуемых теней любому
+    подписчику — и любому новичку на бесплатном триале (аудит безопасности 30.10.2026)."""
+    return db.query_one(
+        "SELECT * FROM signals WHERE id=? AND status NOT IN ('candidate','rejected') "
+        "AND NOT (status='expired' "
+        "AND EXISTS (SELECT 1 FROM signal_events e WHERE e.signal_id = signals.id "
+        "AND e.event = 'candidate') "
+        "AND NOT EXISTS (SELECT 1 FROM signal_events c WHERE c.signal_id = signals.id "
+        "AND c.event = 'confirmed'))", (signal_id,))
 
 
 def row_to_signal(row) -> Signal:
