@@ -282,6 +282,15 @@ def set_postmortem_last_day(day: str) -> None:
     set_value("postmortem_last_day", day)
 
 
+def account_push_last_day() -> str | None:
+    """YYYY-MM-DD дня, за который утренний «💼 счёт за вчера» уже разослан (раз в сутки)."""
+    return _raw("account_push_last_day")
+
+
+def set_account_push_last_day(day: str) -> None:
+    set_value("account_push_last_day", day)
+
+
 def affiliate_url() -> str:
     """Партнёрская ссылка биржи ('' = блоки скрыты) — /affiliate у админа.
     Монетизация без подписки (пункт PR-кита): реф в /about, /start и закрепе."""

@@ -327,11 +327,13 @@ def _market_overview() -> list:
 
 def _last_closed_public(limit: int = 30) -> list:
     """Последние закрытые с id — публичная таблица «Закрытые» (тап -> график сделки).
-    Исходы закрытых и так публичны (/trackrecord CSV) — граница публикации та же."""
+    Исходы закрытых и так публичны (/trackrecord CSV, где есть и status) — граница
+    публикации та же; st — статус исхода для чипа «тейк/трейл/стоп» (v7, 29.10)."""
     return [{"id": r["id"], "s": r["symbol"].split("/")[0], "side": r["side"],
-             "tf": r["timeframe"], "r": r["result_r"], "d": (r["closed_at"] or "")[5:10]}
+             "tf": r["timeframe"], "r": r["result_r"], "d": (r["closed_at"] or "")[5:10],
+             "st": r["status"]}
             for r in db.query(
-                f"SELECT id, symbol, side, timeframe, result_r, closed_at FROM signals "
+                f"SELECT id, symbol, side, timeframe, status, result_r, closed_at FROM signals "
                 f"WHERE {_CLOSED} ORDER BY closed_at DESC LIMIT ?", (limit,))]
 
 
@@ -455,8 +457,8 @@ def _trades_page(offset: int, limit: int, side: str, tf: str, res: str, q: str) 
     agg = db.query_one(f"SELECT COUNT(*) AS n, COALESCE(SUM(result_r), 0) AS s, "
                        f"COALESCE(SUM(result_r > 0), 0) AS w FROM signals WHERE {w}", tuple(args))
     rows = db.query(
-        f"SELECT id, symbol, side, timeframe, result_r, created_at, filled_at, closed_at "
-        f"FROM signals WHERE {w} ORDER BY closed_at DESC, id DESC LIMIT ? OFFSET ?",
+        f"SELECT id, symbol, side, timeframe, status, result_r, created_at, filled_at, "
+        f"closed_at FROM signals WHERE {w} ORDER BY closed_at DESC, id DESC LIMIT ? OFFSET ?",
         (*args, limit, offset))
     from datetime import datetime
     items = []
@@ -472,7 +474,7 @@ def _trades_page(offset: int, limit: int, side: str, tf: str, res: str, q: str) 
         items.append({"id": r["id"], "s": r["symbol"].split("/")[0], "side": r["side"],
                       "tf": r["timeframe"], "r": round(r["result_r"], 2),
                       "d": (r["closed_at"] or "")[:10], "c": (r["created_at"] or "")[:16],
-                      "h": hold})
+                      "h": hold, "st": r["status"]})
     n = int(agg["n"]) if agg else 0
     return {"ok": True, "total": n, "sum_r": round(float(agg["s"]), 2) if agg else 0.0,
             "wins": int(agg["w"]) if agg else 0, "offset": offset, "items": items}
@@ -1103,6 +1105,70 @@ def api_prefs() -> Response:
     dp = payments.depo_prefs(uid)
     return _no_store({"ok": True, "depo": {"usd": dp[0], "risk": dp[1]} if dp else None,
                       "notify": payments.notify_prefs(uid)})
+
+
+def _account_payload(uid: int) -> dict | None:
+    """«Мой счёт» юзера для вкладки «Счёт» или None (не нажимал /start в боте)."""
+    from app.delivery import my_account
+    acc = my_account.account_for(uid)
+    if acc is None:
+        return None
+    payload = my_account.to_payload(acc, my_account.push_enabled(uid))
+    payload["bot"] = runtime.bot_username()
+    return payload
+
+
+@app.get("/api/account")
+def api_account() -> Response:
+    """Виртуальный счёт в $ (app/delivery/my_account.py) — ЛЮБОМУ зарегистрированному юзеру
+    с валидной подписью, не только платнику: внутри только уже закрытые публичные сделки
+    (граница та же, что /api/trades и CSV /trackrecord), ничего платного. Ретеншн 28.10:
+    уходят на конце триала — им-то и нужно видеть, что сигналы сделали бы в деньгах."""
+    user = _auth_user()
+    if user is None:
+        return _no_store({"ok": False}, 401)
+    payload = _account_payload(int(user["id"]))
+    if payload is None:
+        return _no_store({"ok": True, "registered": False, "bot": runtime.bot_username()})
+    return _no_store(payload)
+
+
+@app.post("/api/account")
+def api_account_set() -> Response:
+    """Настройки счёта из Mini App: депозит/риск (те же поля, что /depo — личные сигналы
+    тоже посчитают объём от них) и утренний отчёт. Границы — как у /api/prefs. Юзера
+    здесь не заводим: без /start в боте ему некуда слать отчёт — 404."""
+    user = _auth_user()
+    if user is None:
+        return _no_store({"ok": False}, 401)
+    uid = int(user["id"])
+    from app.delivery import my_account, payments
+    if payments.get_user(uid) is None:
+        return _no_store({"ok": False, "err": "сначала /start в боте"}, 404)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not ({"depo_usd", "risk_pct", "push"} & set(body)):
+        return _no_store({"ok": False}, 400)
+
+    def num(v, lo, hi):
+        return not isinstance(v, bool) and isinstance(v, (int, float)) and lo <= v <= hi
+
+    depo: tuple[float | None, float | None] | None = None
+    if "depo_usd" in body or "risk_pct" in body:
+        usd, risk = body.get("depo_usd"), body.get("risk_pct")
+        if usd is None and risk is None:
+            depo = (None, None)
+        elif num(usd, 10, 10_000_000) and num(risk, 0.1, 10):
+            depo = (float(usd or 0), float(risk or 0))
+        else:
+            return _no_store({"ok": False, "err": "депозит 10…10 000 000, риск 0.1…10%"}, 400)
+    push = body.get("push")
+    if "push" in body and not isinstance(push, bool):
+        return _no_store({"ok": False}, 400)
+    if depo is not None:                      # запись — только когда ВСЁ тело прошло проверку
+        payments.set_depo(uid, *depo)
+    if isinstance(push, bool):
+        my_account.set_push(uid, push)
+    return _no_store(_account_payload(uid) or {"ok": False})
 
 
 @app.get("/api/trades")
