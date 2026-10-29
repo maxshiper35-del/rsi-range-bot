@@ -2,11 +2,13 @@
 market_data.py — данные биржи и планировщик опроса.
 
 Реализовано: fetch_closed_ohlcv (общий ccxt-инстанс, ретраи с бэкоффом, только
-закрытые бары), load_frames (мультиТФ), load_correlated (SMT-партнёр),
+закрытые бары), fetch_closed_ohlcv_cached (старшие ТФ — кеш до закрытия их следующего
+бара), load_frames (мультиТФ), load_correlated (SMT-партнёр),
 seconds_to_next_close / poll_once / run_poller (такт по закрытию свечи).
 """
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 
@@ -15,6 +17,45 @@ import pandas as pd
 from app import clock
 
 _TF_SECONDS = {"15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
+
+# Попытки фетча в такте поллера. 10006 у Bybit — толкучка всей биржи в первые ~40с после
+# закрытия часа (пик :06–:12, к :40 ноль), а не наш темп: мы шлём ≤1 запрос/с (throttle
+# ccxt = rateLimit 200мс × cost 5), BTC (первый запрос, :02) за 14 дней не упал ни разу,
+# а часы 4h-закрытий при той же нашей нагрузке дают больше отказов. Три попытки (t, +2с,
+# +6с) целиком лежат в горячем окне — дважды за 14 дней символ выпадал из такта целиком;
+# четвёртая (+14с) уходит туда, где отказов почти нет (аудит надёжности 30.10).
+_POLL_RETRIES = 4
+
+# счётчики фетчей для итоговой строки такта: сколько реально запросов ушло, сколько
+# старших ТФ отдал кеш и сколько раз биржа ответила rate-limit (их ретраи — INFO, не WARNING)
+_FETCH_STATS = {"requests": 0, "rate_limited": 0, "cache_hits": 0}
+_STATS_LOCK = threading.Lock()
+
+# итог последнего poll_once — run_poller по нему ставит метку «данные биржи живы»
+LAST_POLL_STATS: dict = {}
+
+
+def _bump(key: str, n: int = 1) -> None:
+    with _STATS_LOCK:
+        _FETCH_STATS[key] += n
+
+
+def _stats_snapshot() -> dict:
+    with _STATS_LOCK:
+        return dict(_FETCH_STATS)
+
+
+def _is_rate_limit(e: Exception) -> bool:
+    """Отказ по лимиту запросов (Bybit 10006/10018/403 -> ccxt.RateLimitExceeded/DDoSProtection).
+    Строковый фолбэк — для обёрток, теряющих тип исключения."""
+    try:
+        import ccxt
+        if isinstance(e, (ccxt.RateLimitExceeded, ccxt.DDoSProtection)):
+            return True
+    except ImportError:                                 # pragma: no cover — ccxt в зависимостях
+        pass
+    s = str(e)
+    return "10006" in s or "Too many visits" in s
 
 
 def seconds_to_next_close(tf: str, now_ts: float) -> float:
@@ -80,20 +121,42 @@ def poll_once(symbols: list, timeframes: list, engine=None,
 
     log = get_logger("poller")
     base_tf = min(timeframes, key=lambda t: SMCEngine.TF_MINUTES.get(t, 10 ** 9))
-    # дефолтный загрузчик углубляет фетч под старые нескорённые сигналы символа;
-    # инъектированный (тесты) сохраняет двухаргументный контракт (symbol, tfs)
-    loader = frames_loader or (
-        lambda s, tfs_: load_frames(s, tfs_, limit=_scoring_limit(s, base_tf)))
+
+    def _default_loader(symbol_: str, tfs_: list) -> dict:
+        # входной ТФ — свежий фетч с глубиной под скоринг старых открытых сигналов;
+        # старшие ТФ (4h) читает ТОЛЬКО движок, и ровно ENGINE_WINDOW баров (см. ниже), —
+        # им окно 200 и кеш до закрытия их следующего бара: 3 часа из 4 закрытые 4h-бары
+        # те же самые, а запрос за ними попадал в горячие секунды после закрытия часа
+        # (половина 10006 — фетчи 4h). Вход движка бит-в-бит прежний (аудит надёжности 30.10)
+        out = {}
+        for tf in tfs_:
+            if tf == base_tf:
+                out[tf] = fetch_closed_ohlcv(symbol_, tf, limit=_scoring_limit(symbol_, base_tf),
+                                             retries=_POLL_RETRIES)
+            else:
+                out[tf] = fetch_closed_ohlcv_cached(symbol_, tf, limit=ENGINE_WINDOW + 1,
+                                                    retries=_POLL_RETRIES)
+        return out
+
+    # инъектированный загрузчик (тесты) сохраняет двухаргументный контракт (symbol, tfs)
+    loader = frames_loader or _default_loader
     engine = engine or SMCEngine()
     import time as _time
 
+    started = _time.monotonic()
+    LAST_POLL_STATS.clear()                     # упавший посреди такт не оставит старый «ок»
+    stats_before = _stats_snapshot()
+    n_ok = n_fail = 0
     found = []
     bars_by_symbol = {}
     for i, symbol in enumerate(symbols):
         if pause_sec and i:
             _time.sleep(pause_sec)                      # разрядка запросов — не дразнить rate-limit
+        loaded = False
         try:
             frames = loader(symbol, list(timeframes))
+            loaded = True
+            n_ok += 1
             # бары входного ТФ (самого младшего) — для скоринга исходов
             entry_tf = min(frames, key=lambda t: SMCEngine.TF_MINUTES.get(t, 10 ** 9))
             bars_by_symbol[symbol] = frames[entry_tf]
@@ -105,6 +168,8 @@ def poll_once(symbols: list, timeframes: list, engine=None,
                                  for tf, df in frames.items()}
                 found.extend(scan(symbol, engine_frames, engine))  # (Signal, sid) на каждый ТФ
         except Exception as e:                          # noqa: BLE001 — один символ не роняет цикл
+            if not loaded:                              # счётчики — про загрузку баров, не скан
+                n_fail += 1
             log.warning("poll %s: %s", symbol, e)
     # осиротевшие позиции: символы с открытыми сигналами, ВЫПАВШИЕ из вотчлиста
     # (авто-ротация или ручное удаление) — их исход всё равно надо доскорить свежими
@@ -118,8 +183,22 @@ def poll_once(symbols: list, timeframes: list, engine=None,
             _time.sleep(pause_sec)
         try:                                            # loader, не fetch — инъектится в тестах
             bars_by_symbol[symbol] = loader(symbol, [base_tf])[base_tf]
+            n_ok += 1
         except Exception as e:                          # noqa: BLE001 — один сирота не роняет цикл
+            n_fail += 1
             log.warning("orphan-скоринг %s: %s", symbol, e)
+    # итог такта одной строкой: вместо россыпи WARNING про штатные 10006 — счётчики, по
+    # которым видно и толкучку биржи, и пользу кеша старших ТФ. ok/failed — символы, чьи
+    # бары загрузились / не загрузились (сбой самого скана виден отдельно, WARNING выше)
+    stats_after = _stats_snapshot()
+    LAST_POLL_STATS.clear()
+    LAST_POLL_STATS.update(
+        ok=n_ok, failed=n_fail, seconds=round(_time.monotonic() - started, 1),
+        **{k: stats_after[k] - stats_before[k] for k in stats_after})
+    log.info("такт: символов ок %d, сбой %d; запросов %d, старший ТФ из кеша %d, "
+             "rate-limit %d; %.0fс", n_ok, n_fail, LAST_POLL_STATS["requests"],
+             LAST_POLL_STATS["cache_hits"], LAST_POLL_STATS["rate_limited"],
+             LAST_POLL_STATS["seconds"])
     # каждый такт скорим исходы open/rejected по свежим закрытым барам
     closed = []
     try:
@@ -258,14 +337,23 @@ def fetch_closed_ohlcv(symbol: str, timeframe: str, limit: int = 200,
     for attempt in range(retries):
         try:
             with _EXCHANGE_LOCK:                        # sync-ccxt не потокобезопасен
+                _bump("requests")
                 raw = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
             break
         except Exception as e:                          # noqa: BLE001 — ccxt Network/RateLimit/Exchange
             last_err = e
+            limited = _is_rate_limit(e)
+            if limited:
+                _bump("rate_limited")
             if attempt == retries - 1:
                 raise
             delay = backoff_base * (2 ** attempt)
-            get_logger("market_data").warning(
+            # отказ по лимиту в секунды после закрытия бара — штатная толкучка биржи, которую
+            # ретрай гасит: INFO (счётчик — в итоговой строке такта), иначе ~30 WARNING в сутки
+            # вытесняли настоящие проблемы из хвоста лога в админ-панели. Прочие сбои и
+            # окончательный отказ («poll SYM») — по-прежнему WARNING
+            get_logger("market_data").log(
+                logging.INFO if limited else logging.WARNING,
                 "fetch %s %s: %s — ретрай через %.0fс", symbol, timeframe, e, delay)
             _time.sleep(delay)
     else:                                               # pragma: no cover
@@ -273,6 +361,58 @@ def fetch_closed_ohlcv(symbol: str, timeframe: str, limit: int = 200,
     df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
     df["dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
     return df.iloc[:-1].reset_index(drop=True)          # последний бар может быть незакрыт
+
+
+def _now_ts() -> float:
+    """Часы кеша старших ТФ (точка подмены в тестах)."""
+    import time as _time
+
+    return _time.time()
+
+
+def last_closed_open_ms(tf: str, now_ts: float) -> int:
+    """Время ОТКРЫТИЯ последнего закрытого бара ТФ на момент now_ts, мс (UTC-выравнивание
+    баров Bybit: 4h — 00/04/08…, 1d — 00:00)."""
+    period = _TF_SECONDS[tf]
+    return (int(now_ts // period) * period - period) * 1000
+
+
+# (биржа, символ, ТФ) -> (limit, df): закрытые бары старших ТФ между их закрытиями
+_HTF_CACHE: dict[tuple, tuple[int, pd.DataFrame]] = {}
+_HTF_LOCK = threading.Lock()
+
+
+def fetch_closed_ohlcv_cached(symbol: str, timeframe: str, limit: int = 200,
+                              exchange_id: str | None = None, now_ts: float | None = None,
+                              retries: int = 3, backoff_base: float = 2.0) -> pd.DataFrame:
+    """fetch_closed_ohlcv с кешем до закрытия СЛЕДУЮЩЕГО бара этого ТФ.
+
+    Кеш самопроверяемый: копия отдаётся, только если её последний бар — ровно тот, что
+    должен быть последним закрытым сейчас (last_closed_open_ms), и она снята с limit не
+    меньше запрошенного. Тогда она совпадает с тем, что вернул бы свежий фетч (закрытый
+    бар биржа не переписывает), и движок видит прежний вход бит-в-бит. Ответ, в котором
+    биржа ещё не выкатила новый бар (запаздывание на закрытии), в кеш не кладётся — его
+    отдаём как есть, как и без кеша. Сбитые часы мака -> промах кеша -> обычный фетч."""
+    if exchange_id is None:
+        from app.config import get_settings
+        exchange_id = get_settings().exchange_id
+    now_ts = _now_ts() if now_ts is None else now_ts
+    want = last_closed_open_ms(timeframe, now_ts)
+    key = (exchange_id, symbol, timeframe)
+    with _HTF_LOCK:
+        hit = _HTF_CACHE.get(key)
+    if hit is not None:
+        cached_limit, cached = hit
+        if cached_limit >= limit and len(cached) and int(cached["ts"].iloc[-1]) == want:
+            _bump("cache_hits")
+            # копия: потребитель не должен мочь испортить кеш на следующие часы
+            return cached.tail(max(limit - 1, 0)).reset_index(drop=True).copy()
+    df = fetch_closed_ohlcv(symbol, timeframe, limit=limit, exchange_id=exchange_id,
+                            retries=retries, backoff_base=backoff_base)
+    if len(df) and int(df["ts"].iloc[-1]) == want:
+        with _HTF_LOCK:
+            _HTF_CACHE[key] = (limit, df.copy())
+    return df
 
 
 def fetch_history(symbol: str, timeframe: str, target_bars: int,
