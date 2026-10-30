@@ -45,6 +45,7 @@ class Step:
     symbol: str
     side: str
     tf: str
+    status: str                                # tp1–tp3 / stopped — чип «тейк/трейл/стоп»
     closed_at: datetime
     r: float
     usd: float                                 # изменение баланса этой сделкой
@@ -126,7 +127,8 @@ def compute_account(rows: Iterable[Mapping], *, start_usd: float, risk_pct: floa
             max_dd = max(max_dd, (peak - bal) / peak * 100.0)
         steps.append(Step(id=int(row["id"]), symbol=str(row["symbol"]).split("/")[0],
                           side=str(row["side"]), tf=str(row["timeframe"]),
-                          closed_at=_dt(row["closed_at"]), r=r, usd=bal - before,
+                          status=str(row["status"]), closed_at=_dt(row["closed_at"]), r=r,
+                          usd=bal - before,
                           balance=bal))
     by_day = _by_day(steps)
     wins = sum(1 for s in steps if s.r > 0)
@@ -332,8 +334,8 @@ def to_payload(acc: Account, push: bool, items: int = 40) -> dict:
         "losses": acc.losses, "max_dd_pct": round(acc.max_dd_pct, 2),
         "yesterday": _d(acc.yesterday), "today": _d(acc.today),
         "eq": eq, "days": [_d(d) for d in daily(acc)],
-        "items": [{"id": s.id, "s": s.symbol, "side": s.side, "tf": s.tf, "r": round(s.r, 2),
-                   "usd": round(s.usd, 2), "bal": round(s.balance, 2),
+        "items": [{"id": s.id, "s": s.symbol, "side": s.side, "tf": s.tf, "st": s.status,
+                   "r": round(s.r, 2), "usd": round(s.usd, 2), "bal": round(s.balance, 2),
                    "d": s.closed_at.strftime("%Y-%m-%dT%H:%M")}
                   for s in reversed(acc.steps[-items:])],
         "push": push,

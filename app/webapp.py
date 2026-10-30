@@ -1264,6 +1264,9 @@ def api_stats() -> Response:
         "split_epoch": _splits(epoch) if epoch else None,
         "daily_all": _daily(),
         "daily_epoch": _daily(epoch) if epoch else [],
+        # флаг секции «Бэктест 5 лет»: фронт не дёргает /api/backtest вслепую (404 в
+        # консоли на каждом открытии, пока секция снята с витрины)
+        "bt": runtime.backtest_public(),
     }
     body = json.dumps(payload, ensure_ascii=False)
     with _STATS_CACHE_LOCK:

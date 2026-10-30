@@ -689,7 +689,8 @@ def render_dashboard_png(data: dict) -> bytes:
 # ---------------------------------------------------------------------------
 # «💼 Мой счёт» — карточка виртуального счёта в ДЕНЬГАХ (my_account.card_data).
 # Та же палитра, что Mini App v7: почти чёрный фон, одна оранжевая метка бренда,
-# зелёный/красный только у данных. Кривая — баланс в $ от стартового депозита:
+# зелёный/красный только у данных — пара #1f9e6e/#f6465d, прошедшая CVD-валидатор
+# (более яркая #2fc38a/#ff6b7d провалила deutan: ΔE 2.7). Кривая — баланс в $ от старта:
 # выше старта зелёная, ниже — красная (клип по линии старта), минус не прячется.
 # Без уровней и сетапов: только сделки, уже закрытые публично.
 # ---------------------------------------------------------------------------
@@ -709,8 +710,8 @@ _ACCOUNT_STYLE = """
   .bal { font-size:132px; font-weight:700; letter-spacing:-.035em; line-height:1.02; margin-top:6px; }
   .row { display:flex; align-items:center; gap:18px; margin-top:18px; }
   .pill { font-size:30px; font-weight:650; padding:9px 20px; border-radius:999px; }
-  .pill.pos { color:#2fbf86; background:rgba(31,158,110,.14); }
-  .pill.neg { color:#ff6b7d; background:rgba(246,70,93,.14); }
+  .pill.pos { color:#1f9e6e; background:rgba(31,158,110,.14); }
+  .pill.neg { color:#f6465d; background:rgba(246,70,93,.14); }
   .pill.zero { color:#a1a9b4; background:rgba(255,255,255,.06); }
   .sub { font-size:22px; color:#6b7480; }
   .chart { margin-top:38px; height:300px; border-radius:22px; background:#111419;
@@ -724,7 +725,7 @@ _ACCOUNT_STYLE = """
   .y { margin-top:16px; font-size:23px; color:#a1a9b4; background:#111419; border-radius:20px;
        border:1px solid rgba(255,255,255,.06); padding:18px 22px; }
   .y b { color:#edeff2; }
-  .pos { color:#2fbf86; } .neg { color:#ff6b7d; }
+  .pos { color:#1f9e6e; } .neg { color:#f6465d; }
   .foot { display:flex; justify-content:space-between; gap:30px; margin-top:34px; padding-top:22px;
           border-top:1px solid rgba(255,255,255,.07); font-size:17px; color:#6b7480; line-height:1.5; }
   .foot b { color:#a1a9b4; font-weight:600; white-space:nowrap; }
@@ -772,7 +773,7 @@ def _balance_svg(series: list, w: int = 916, h: int = 270) -> str:
     base = y(start)
     pts = " ".join(f"{x(i)},{y(v)}" for i, v in enumerate(series))
     area = f"{x(0)},{base} {pts} {x(n)},{base}"
-    end_col = "#2fbf86" if series[-1] >= start else "#ff6b7d"
+    end_col = "#1f9e6e" if series[-1] >= start else "#f6465d"
     return (
         f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">'
         f'<defs><clipPath id="up"><rect x="0" y="0" width="{w}" height="{base}"/></clipPath>'
@@ -782,9 +783,9 @@ def _balance_svg(series: list, w: int = 916, h: int = 270) -> str:
         f'stroke-width="1.5"/>'
         f'<polygon points="{area}" fill="#1f9e6e" fill-opacity=".12" clip-path="url(#up)"/>'
         f'<polygon points="{area}" fill="#f6465d" fill-opacity=".12" clip-path="url(#dn)"/>'
-        f'<polyline points="{pts}" fill="none" stroke="#2fbf86" stroke-width="3.5" '
+        f'<polyline points="{pts}" fill="none" stroke="#1f9e6e" stroke-width="3.5" '
         f'stroke-linejoin="round" stroke-linecap="round" clip-path="url(#up)"/>'
-        f'<polyline points="{pts}" fill="none" stroke="#ff6b7d" stroke-width="3.5" '
+        f'<polyline points="{pts}" fill="none" stroke="#f6465d" stroke-width="3.5" '
         f'stroke-linejoin="round" stroke-linecap="round" clip-path="url(#dn)"/>'
         f'<circle cx="{x(n)}" cy="{y(series[-1])}" r="7" fill="{end_col}" stroke="#111419" '
         f'stroke-width="4"/></svg>')
