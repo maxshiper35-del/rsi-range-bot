@@ -22,7 +22,7 @@ from app.brain import journal
 from app.brain.risk import calculate_position
 from app.brain.smc_setups import SMCEngine
 from app.core.signal_engine import Signal
-from app.delivery import graphics, templates
+from app.delivery import graphics, my_account, templates
 from app.power import battery_alert_text, should_alert_battery
 from app.power import pmset_batt as _pmset_batt
 
@@ -957,6 +957,21 @@ def parse_depo_args(text: str) -> tuple | None:
     return (depo, risk)
 
 
+def parse_account_args(text: str) -> str | None:
+    """'/account' -> 'show'; '/account off|выкл' -> 'off'; '/account on|вкл' -> 'on';
+    иное -> None (подсказка формата: депозит задаётся /depo, не здесь)."""
+    parts = (text or "").split()
+    if len(parts) == 1:
+        return "show"
+    if len(parts) == 2:
+        arg = parts[1].lower()
+        if arg in ("off", "выкл", "стоп", "-"):
+            return "off"
+        if arg in ("on", "вкл", "+"):
+            return "on"
+    return None
+
+
 def parse_vipchannel_args(text: str) -> tuple | None:
     """'/vipchannel @rsi_range_vip 300' -> ('@rsi_range_vip', 300); None если формат неверный
     или цена вне диапазона Telegram (1-10000 Stars — createChatSubscriptionInviteLink)."""
@@ -1428,6 +1443,8 @@ USER_COMMANDS = [
     ("promo", "применить промокод: /promo <код>"),
     ("referral", "пригласить друга и получить дни подписки"),
     ("depo", "твой объём в каждом сигнале: /depo <депозит$> [риск%]"),
+    ("account", "мой счёт в $ по всем сигналам с твоего прихода "
+                "(/account off — без утреннего отчёта)"),
     ("mycard", "карточка твоего итога по отмеченным сделкам"),
     ("alert", "бесплатный прайс-алерт: /alert BTC 65000"),
     ("check", "проверить чужой сигнал: перешлите пост из любого канала"),
@@ -1509,13 +1526,15 @@ def main_menu_layout(is_admin: bool = False) -> list:
             ["👥 Юзеры", "📈 Growth"],
             ["🎯 По сетапам", "❓ Помощь"],
         ]
+    # «💼 Мой счёт» — в первом ряду, рядом с дашбордом (ретеншн 28.10: люди думают в $,
+    # а не в R — деньги по сигналам должны быть на виду, а не за командой)
     return [
+        ["💼 Мой счёт", "📈 Дашборд"],
         ["📊 Статистика", "📄 Трек-рекорд"],
-        ["📈 Дашборд", "🧮 Калькулятор"],
-        ["💳 Подписка", "🤝 Пригласить"],
-        ["ℹ️ О боте", "🧪 Бэктест"],
-        ["📖 Глоссарий", "🎟 Промокод"],
-        ["❓ Помощь"],
+        ["🧮 Калькулятор", "💳 Подписка"],
+        ["🤝 Пригласить", "ℹ️ О боте"],
+        ["🧪 Бэктест", "📖 Глоссарий"],
+        ["🎟 Промокод", "❓ Помощь"],
     ]
 
 
@@ -2236,6 +2255,98 @@ def main() -> None:
                                    reply_markup=_notify_kb(prefs))
         await cq.answer("Готово.")
 
+    # ---- «💼 Мой счёт»: все сигналы с прихода юзера — в деньгах (ретеншн 28.10) ----
+    _acct_png_last: dict[int, float] = {}
+
+    def _webapp_link(tab: str | None = None) -> str | None:
+        """Свежая ссылка Mini App (v= сбрасывает кеш WebView, как у «📈 Дашборд»); tab —
+        вкладка при открытии (?tab=account). None — Mini App выключен (нет https)."""
+        wurl = runtime.webapp_url()
+        if not wurl.startswith("https://"):
+            return None
+        url = f"{wurl}{'&' if '?' in wurl else '?'}v={int(_monotonic())}"
+        return f"{url}&tab={tab}" if tab else url
+
+    def _account_push_kb(on: bool = True) -> InlineKeyboardMarkup:
+        """Под утренним пушем: подробнее (карточка в чат), счёт в терминале и отписка
+        в одно касание — раздражённому юзеру проще нажать её, чем заблокировать бота."""
+        b = InlineKeyboardButton
+        top = [b(text="💼 Подробнее", callback_data="acct")]
+        link = _webapp_link("account")
+        if link:
+            top.append(b(text="📈 В терминале", web_app=WebAppInfo(url=link)))
+        bottom = (b(text="🔕 Не присылать по утрам", callback_data="acct_off") if on
+                  else b(text="🔔 Вернуть утренний отчёт", callback_data="acct_on"))
+        return InlineKeyboardMarkup(inline_keyboard=[top, [bottom]])
+
+    async def _send_account(chat_id: int, user) -> None:
+        """/account, «💼 Мой счёт», «Подробнее» под пушем: текст + PNG счёта.
+
+        Ответ перевыдаёт постоянное меню: reply-клавиатура живёт на клиенте вечно, и у
+        старых юзеров кнопки «💼 Мой счёт» нет, пока бот не пришлёт новую. PNG — с кулдауном
+        60с и через общий семафор рендеров (Chromium на вызов, как /mycard); в кулдауне,
+        без сделок или при сбое рендера — только текст."""
+        uid = user.id
+        await asyncio.to_thread(payments.register_user, uid, user.username)
+        acc = await asyncio.to_thread(my_account.account_for, uid)
+        if acc is None:
+            return
+        text = my_account.render_account(acc)
+        kb = _main_menu_kb(uid in cfg.admin_ids)
+        png = None
+        if acc.trades and _monotonic() - _acct_png_last.get(uid, -1e9) >= 60:
+            _acct_png_last[uid] = _monotonic()   # столбим ДО рендера: спам в очередь не встаёт
+            try:
+                png = await _render_png(graphics.render_account_card,
+                                        my_account.card_data(acc, bot_info["username"]))
+            except Exception as e:                     # noqa: BLE001 — рендер не критичен
+                log.warning("счёт png %s: %s", uid, e)
+        if png:
+            await bot.send_photo(chat_id, BufferedInputFile(png, filename="my_account.png"),
+                                 caption=text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+
+    @dp.message(Command("account"))
+    async def _account_cmd(m):
+        action = parse_account_args(m.text)
+        if action is None:
+            await m.answer("Формат: <code>/account</code> — счёт; <code>/account off</code> "
+                           "или <code>on</code> — утренний отчёт. Депозит и риск: "
+                           "<code>/depo 500 1</code>", parse_mode="HTML")
+            return
+        if action == "show":
+            await _send_account(m.chat.id, m.from_user)
+            return
+        on = action == "on"
+        await asyncio.to_thread(payments.register_user, m.from_user.id, m.from_user.username)
+        await asyncio.to_thread(my_account.set_push, m.from_user.id, on)
+        await m.answer("🔔 Утренний отчёт включён: около 06:00 UTC — что вчерашние сделки "
+                       "сделали с твоим счётом (если они были)." if on else
+                       "🔕 Утренний отчёт выключен. Счёт — по-прежнему тут: /account. "
+                       "Вернуть: /account on")
+
+    @dp.message(F.text == "💼 Мой счёт")
+    async def _account_btn(m):
+        await _send_account(m.chat.id, m.from_user)
+
+    @dp.callback_query(F.data == "acct")
+    async def _account_cb(cq):
+        await cq.answer()                 # до рендера: Telegram ждёт ответ на колбэк ≤15с
+        await _send_account(cq.from_user.id, cq.from_user)      # личка: chat_id == tg_id
+
+    @dp.callback_query(F.data.in_({"acct_off", "acct_on"}))
+    async def _account_push_toggle(cq):
+        on = cq.data == "acct_on"
+        await asyncio.to_thread(payments.register_user, cq.from_user.id, cq.from_user.username)
+        await asyncio.to_thread(my_account.set_push, cq.from_user.id, on)
+        try:
+            await cq.message.edit_reply_markup(reply_markup=_account_push_kb(on))
+        except Exception:                 # noqa: BLE001 — сообщение старое/недоступно: не критично
+            pass
+        await cq.answer("Утренний отчёт снова включён." if on
+                        else "Утренний отчёт выключен. Вернуть: /account on")
+
     # ---- ежедневная игра «Лонг или шорт?» (app/delivery/game.py): opt-in, раунд в 12:00 UTC
     async def _game_render(data: dict) -> bytes:
         return await _render_png(graphics.render_game_chart, data)
@@ -2904,9 +3015,13 @@ def main() -> None:
                 log.warning("dashboard png: %s — отдаю файлом", e)
                 await _send_offline_dashboard(m)
             return
-        vurl = f"{wurl}{'&' if '?' in wurl else '?'}v={int(_monotonic())}"
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="📈 Открыть живой терминал", web_app=WebAppInfo(url=vurl))]])
+        vurl = _webapp_link() or wurl
+        acct_url = _webapp_link("account") or wurl
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📈 Открыть живой терминал",
+                                  web_app=WebAppInfo(url=vurl))],
+            [InlineKeyboardButton(text="💼 Мой счёт в терминале",
+                                  web_app=WebAppInfo(url=acct_url))]])
         await m.answer("Живой терминал — кнопкой ниже. Офлайн-файл: /dashboard",
                        reply_markup=kb)
 
@@ -5197,6 +5312,16 @@ def main() -> None:
                 list(cfg.admin_ids), date.fromisoformat(p_day)))
             _BG_TASKS.add(task)
             task.add_done_callback(_BG_TASKS.discard)
+        # «💼 счёт за вчера» юзерам — раз в сутки в утреннем окне 06–12 UTC (my_account.
+        # push_due). Маркер дня — ДО рассылки: краш посреди не перешлёт всем повторно;
+        # рассылка — фоновой задачей, как дайджест, чтобы не держать 60с-такт.
+        a_now = datetime.now(timezone.utc)
+        a_day = my_account.push_due(a_now, runtime.account_push_last_day())
+        if a_day:
+            await asyncio.to_thread(runtime.set_account_push_last_day, a_day)
+            task = asyncio.create_task(_send_account_pushes(a_now))
+            _BG_TASKS.add(task)
+            task.add_done_callback(_BG_TASKS.discard)
         # недельный ЛИЧНЫЙ дайджест подписчикам (ретеншн) — ВНЕ гейта канала: выключение
         # канала не должно молча убивать подписческую фичу (аудит-2 UX [4]). Отдельный
         # маркер от карточки; маркер ставим ДО рассылки: краш посреди рассылки не должен
@@ -5292,6 +5417,40 @@ def main() -> None:
             log.info("недельный дайджест разослан: %d подписчикам + %d free", sent, f_sent)
         except Exception as e:                          # noqa: BLE001 — таска не роняет процесс
             log.warning("рассылка дайджеста: %s", e)
+
+    async def _send_account_pushes(now: datetime) -> None:
+        """Утренний «💼 Твой счёт за вчера» ВНЕ maintenance-цикла (create_task).
+
+        Всем живым юзерам с включённым отчётом (/account off — опт-аут), у кого вчера по
+        счёту что-то закрылось: пустой день не шлём — пустой пуш = спам, а спам тизерами
+        уже стоил блоков (разбор воронки 27.10). Мьют и тихие часы — тот же гейт, что у
+        пуша сигналов (is_signal_suppressed): отчёт не срочный, тихие часы не будим.
+        Мёртвых получателей списываем mark_blocked. now — один на всю рассылку: окно
+        «вчера» не съезжает, если рассылка перевалит за час."""
+        sent = skipped = 0
+        try:
+            ids = await asyncio.to_thread(my_account.push_recipients)
+            for uid in ids:
+                try:
+                    if await asyncio.to_thread(payments.is_signal_suppressed, uid, now.hour):
+                        skipped += 1
+                        continue
+                    acc = await asyncio.to_thread(my_account.account_for, uid, now)
+                    text = my_account.render_push(acc)
+                    if text is None:
+                        continue
+                    await _send_retry(uid, text, parse_mode="HTML",
+                                      reply_markup=_account_push_kb())
+                    sent += 1
+                except Exception as e:                  # noqa: BLE001 — один юзер не роняет рассылку
+                    log.warning("счёт за вчера -> %s: %s", uid, e)
+                    if _dead_recipient(e):
+                        await asyncio.to_thread(payments.mark_blocked, uid)
+                await asyncio.sleep(0.05)               # ~20 msg/с — под лимитом Telegram
+            log.info("«счёт за вчера»: отправлено %d из %d (мьют/тихие часы: %d)",
+                     sent, len(ids), skipped)
+        except Exception as e:                          # noqa: BLE001 — таска не роняет процесс
+            log.warning("рассылка «счёт за вчера»: %s", e)
 
     async def _on_close(closed):
         # мягкое уведомление АДМИНУ (не в канал): серия стопов подряд на ВКЛЮЧЁННОМ сетапе —

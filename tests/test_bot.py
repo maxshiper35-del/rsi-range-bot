@@ -755,10 +755,22 @@ def test_main_menu_layout_user():
     flat = [t for row in user for t in row]
     for label in ("📊 Статистика", "📄 Трек-рекорд", "📈 Дашборд", "🧮 Калькулятор",
                   "💳 Подписка", "🤝 Пригласить", "ℹ️ О боте", "🧪 Бэктест", "📖 Глоссарий",
-                  "🎟 Промокод", "❓ Помощь"):
+                  "🎟 Промокод", "❓ Помощь", "💼 Мой счёт"):
         assert label in flat, label
     assert "🛠 Админ-панель" not in flat                # админ-кнопки не текут юзерам
     assert all(len(row) <= 2 for row in user)           # компактные ряды по 1-2 кнопки
+    assert "💼 Мой счёт" in user[0]                     # деньги — на виду (ретеншн 28.10)
+    assert len(flat) == len(set(flat))                  # без дублей кнопок
+
+
+def test_parse_account_args():
+    assert bot.parse_account_args("/account") == "show"
+    assert bot.parse_account_args("/account off") == "off"
+    assert bot.parse_account_args("/account ВЫКЛ") == "off"
+    assert bot.parse_account_args("/account on") == "on"
+    assert bot.parse_account_args("/account 500") is None   # депозит — через /depo
+    assert bot.parse_account_args("/account on now") is None
+    assert "account" in dict(bot.USER_COMMANDS)
 
 
 def test_main_menu_layout_admin():

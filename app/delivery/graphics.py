@@ -884,3 +884,139 @@ def build_dashboard_html(data: dict) -> str:
 def render_dashboard_png(data: dict) -> bytes:
     """Дашборд -> PNG (для инлайн-превью/визуального QA). Тяжёлый Playwright — через to_thread."""
     return render_html_to_png(build_dashboard_html(data), width=920)
+
+
+# ---------------------------------------------------------------------------
+# «💼 Мой счёт» — карточка виртуального счёта в ДЕНЬГАХ (my_account.card_data).
+# Та же палитра, что Mini App v7: почти чёрный фон, одна оранжевая метка бренда,
+# зелёный/красный только у данных — пара #1f9e6e/#f6465d, прошедшая CVD-валидатор
+# (более яркая #2fc38a/#ff6b7d провалила deutan: ΔE 2.7). Кривая — баланс в $ от старта:
+# выше старта зелёная, ниже — красная (клип по линии старта), минус не прячется.
+# Без уровней и сетапов: только сделки, уже закрытые публично.
+# ---------------------------------------------------------------------------
+
+_ACCOUNT_STYLE = """
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#0a0c0f; color:#edeff2; -webkit-font-smoothing:antialiased;
+         font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,sans-serif; }
+  .card { width:1080px; padding:60px 64px 44px; background:
+          radial-gradient(900px 420px at 85% -10%, rgba(247,166,0,.07), transparent 60%), #0a0c0f; }
+  .head { display:flex; justify-content:space-between; align-items:center; }
+  .brand { display:flex; align-items:center; gap:14px; font:700 24px/1 ui-monospace,"SF Mono",Menlo,monospace;
+           letter-spacing:.16em; }
+  .brand i { width:14px; height:14px; border-radius:4px; background:#f7a600; }
+  .tag { font-size:20px; color:#6b7480; }
+  .lbl { margin-top:54px; font-size:21px; color:#a1a9b4; letter-spacing:.02em; }
+  .bal { font-size:132px; font-weight:700; letter-spacing:-.035em; line-height:1.02; margin-top:6px; }
+  .row { display:flex; align-items:center; gap:18px; margin-top:18px; }
+  .pill { font-size:30px; font-weight:650; padding:9px 20px; border-radius:999px; }
+  .pill.pos { color:#1f9e6e; background:rgba(31,158,110,.14); }
+  .pill.neg { color:#f6465d; background:rgba(246,70,93,.14); }
+  .pill.zero { color:#a1a9b4; background:rgba(255,255,255,.06); }
+  .sub { font-size:22px; color:#6b7480; }
+  .chart { margin-top:38px; height:300px; border-radius:22px; background:#111419;
+           border:1px solid rgba(255,255,255,.06); padding:18px 18px 12px; }
+  .chart svg { width:100%; height:100%; display:block; }
+  .tiles { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-top:16px; }
+  .tile { background:#111419; border:1px solid rgba(255,255,255,.06); border-radius:20px;
+          padding:20px 22px; }
+  .tile .k { display:block; font-size:18px; color:#6b7480; }
+  .tile b { display:block; font-size:38px; font-weight:650; margin-top:8px; letter-spacing:-.01em; }
+  .y { margin-top:16px; font-size:23px; color:#a1a9b4; background:#111419; border-radius:20px;
+       border:1px solid rgba(255,255,255,.06); padding:18px 22px; }
+  .y b { color:#edeff2; }
+  .pos { color:#1f9e6e; } .neg { color:#f6465d; }
+  .foot { display:flex; justify-content:space-between; gap:30px; margin-top:34px; padding-top:22px;
+          border-top:1px solid rgba(255,255,255,.07); font-size:17px; color:#6b7480; line-height:1.5; }
+  .foot b { color:#a1a9b4; font-weight:600; white-space:nowrap; }
+"""
+
+_ACCOUNT_BODY = Template("""
+<div class="card">
+  <div class="head"><div class="brand"><i></i>RSI RANGE</div>
+    <div class="tag">мой счёт · с $since</div></div>
+  <div class="lbl">Баланс по всем сигналам с моего прихода</div>
+  <div class="bal">$balance</div>
+  <div class="row"><div class="pill $pnl_class">$pnl · $pct</div>
+    <div class="sub">старт $start · риск $risk% на сделку$default</div></div>
+  <div class="chart">$chart</div>
+  <div class="tiles">
+    <div class="tile"><span class="k">сделок</span><b>$trades</b></div>
+    <div class="tile"><span class="k">плюс / минус</span><b><span class="pos">$wins</span> / <span class="neg">$losses</span></b></div>
+    <div class="tile"><span class="k">winrate</span><b>$winrate</b></div>
+    <div class="tile"><span class="k">худший откат</span><b>$dd</b></div>
+  </div>
+  $yesterday
+  <div class="foot"><div>Расчёт по опубликованным сделкам, не реальный счёт: сложный процент,
+    комиссии не учтены. Не финансовый совет.</div><div><b>t.me/$bot</b></div></div>
+</div>
+""")
+
+
+def _balance_svg(series: list, w: int = 916, h: int = 270) -> str:
+    """Баланс в $ по сделкам: линия старта + кривая, выше старта зелёная, ниже — красная
+    (две копии линии под клипами по линии старта). Подпись — только у последней точки."""
+    if len(series) < 2:
+        return ""
+    start = series[0]
+    lo, hi = min(min(series), start), max(max(series), start)
+    span = (hi - lo) or max(abs(start) * 0.01, 1.0)
+    pad_t, pad_b, pad_x = 16, 16, 14
+    n = len(series) - 1
+
+    def x(i: int) -> float:
+        return round(pad_x + i / n * (w - 2 * pad_x), 2)
+
+    def y(v: float) -> float:
+        return round(pad_t + (hi - v) / span * (h - pad_t - pad_b), 2)
+
+    base = y(start)
+    pts = " ".join(f"{x(i)},{y(v)}" for i, v in enumerate(series))
+    area = f"{x(0)},{base} {pts} {x(n)},{base}"
+    end_col = "#1f9e6e" if series[-1] >= start else "#f6465d"
+    return (
+        f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">'
+        f'<defs><clipPath id="up"><rect x="0" y="0" width="{w}" height="{base}"/></clipPath>'
+        f'<clipPath id="dn"><rect x="0" y="{base}" width="{w}" height="{h - base}"/></clipPath>'
+        f'</defs>'
+        f'<line x1="0" y1="{base}" x2="{w}" y2="{base}" stroke="rgba(255,255,255,.12)" '
+        f'stroke-width="1.5"/>'
+        f'<polygon points="{area}" fill="#1f9e6e" fill-opacity=".12" clip-path="url(#up)"/>'
+        f'<polygon points="{area}" fill="#f6465d" fill-opacity=".12" clip-path="url(#dn)"/>'
+        f'<polyline points="{pts}" fill="none" stroke="#1f9e6e" stroke-width="3.5" '
+        f'stroke-linejoin="round" stroke-linecap="round" clip-path="url(#up)"/>'
+        f'<polyline points="{pts}" fill="none" stroke="#f6465d" stroke-width="3.5" '
+        f'stroke-linejoin="round" stroke-linecap="round" clip-path="url(#dn)"/>'
+        f'<circle cx="{x(n)}" cy="{y(series[-1])}" r="7" fill="{end_col}" stroke="#111419" '
+        f'stroke-width="4"/></svg>')
+
+
+def build_account_card_html(data: dict) -> str:
+    """data = my_account.card_data(...) -> HTML карточки. Чистая функция (тест без браузера)."""
+    f = data["fmt"]
+    pnl = data["pnl_usd"]
+    trades = data["trades"]
+    y = data.get("yesterday") or {}
+    if y.get("trades"):
+        y_cls = "pos" if y["pnl_usd"] > 0 else "neg" if y["pnl_usd"] < 0 else ""
+        yesterday = (f'<div class="y">Вчера: <b class="{y_cls}">{_esc(f["y_pnl"])}</b> · '
+                     f'в плюс {y["wins"]}, в минус {y["losses"]}</div>')
+    else:
+        yesterday = '<div class="y">Вчера сделок по счёту не закрылось.</div>'
+    body = _ACCOUNT_BODY.substitute(
+        since=_esc(data["since_label"]), balance=_esc(f["balance"]),
+        pnl_class="pos" if pnl > 0.005 else "neg" if pnl < -0.005 else "zero",
+        pnl=_esc(f["pnl"]), pct=_esc(f["pct"]), start=_esc(f["start"]),
+        risk=f"{data['risk_pct']:g}",
+        default=" (по умолчанию — свой: /depo)" if data.get("is_default") else "",
+        chart=_balance_svg(data["series"]) or '<div class="sub">кривая появится со сделками</div>',
+        trades=trades, wins=data["wins"], losses=data["losses"],
+        winrate=f"{round(data['wins'] / trades * 100)}%" if trades else "—",
+        dd=f"−{data['max_dd_pct']:.1f}%" if data["max_dd_pct"] >= 0.05 else "0%",
+        yesterday=yesterday, bot=_esc(data.get("bot") or "rsirange_bot"))
+    return f"<style>{_ACCOUNT_STYLE}</style>{body}"
+
+
+def render_account_card(data: dict) -> bytes:
+    """PNG «Мой счёт» (1080px, scale 2). Только через to_thread / _render_png."""
+    return render_html_to_png(build_account_card_html(data), width=1080, selector=".card")
