@@ -747,6 +747,46 @@ def test_due_for_reminder_skips_hour_tariffs(fresh_db):
     assert [r["tg_id"] for r in payments.due_for_reminder(3)] == [931]
 
 
+def test_due_for_reminder_only_payers(fresh_db):
+    """Аудит текстов 30.10: «истекает, продлите» с 8 тарифами уходило триалу (13 из 16
+    напоминаний — не платившим). Напоминаем только тем, кто платил."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import db
+    from app.delivery import payments
+    assert payments.grant_trial(940, 5) is True                        # триал без оплаты
+    payments.create_promo("GIFT940", 5)
+    assert payments.redeem_promo(941, "GIFT940")["ok"] is True         # промо без оплаты
+    payments.grant_subscription(942, "stars", 500, "XTR", 30, "m942")  # платил
+    assert payments.grant_trial(943, 5) is True                        # триал, потом оплатил
+    payments.grant_subscription(943, "stars", 150, "XTR", 7, "w943")
+    soon = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    db.execute("UPDATE users SET paid_until=? WHERE tg_id IN (940, 941, 942, 943)", (soon,))
+    assert sorted(r["tg_id"] for r in payments.due_for_reminder(3)) == [942, 943]
+
+
+def test_free_quota_ignores_deliveries_during_access(fresh_db):
+    """Аудит текстов 30.10: квоту free съедали сигналы триала — после него 5–6 дней шли только
+    замки. Считаются только полные доставки после конца доступа."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import db
+    from app.delivery import payments
+    now = datetime.now(timezone.utc)
+    assert payments.grant_trial(950, 5) is True
+    for sid in (1, 2, 3):
+        payments.record_delivery(950, sid, "full")                     # пришли в триал
+    db.execute("UPDATE deliveries SET created_at=? WHERE tg_id=?",
+               ((now - timedelta(days=2)).isoformat(), 950))
+    db.execute("UPDATE users SET paid_until=? WHERE tg_id=?",
+               ((now - timedelta(hours=1)).isoformat(), 950))
+    payments.expire_overdue()
+    assert payments.free_full_last_week(950) == 0                     # триал квоту не съел
+    assert dict(payments.plan_recipients(4, 2, (900,)))[950] == "full"
+    payments.record_delivery(950, 4, "full")
+    assert payments.free_full_last_week(950) == 1                     # бесплатные — считаются
+
+
 def test_expire_overdue_respects_concurrent_payment(fresh_db):
     """Аудит-2 [6]: понижение — условный UPDATE; юзер с будущим paid_until (оплатил между
     SELECT и UPDATE) не понижается."""

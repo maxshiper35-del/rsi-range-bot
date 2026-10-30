@@ -383,10 +383,17 @@ def record_delivery(tg_id: int, signal_id: int, kind: str) -> bool:
 
 
 def free_full_last_week(tg_id: int) -> int:
-    since = (_now_dt() - timedelta(days=7)).isoformat()
+    """Полные сигналы, полученные БЕСПЛАТНО за скользящие 7 дней. Доставки за время доступа
+    (триал, оплата, промо — до paid_until) квоту не едят: иначе после триала 5–6 дней шли
+    только замки вместо обещанных «7 в неделю» (аудит текстов 30.10: первый бесплатный
+    полный — через 1.7–6.5 дня, 6 из 14 не дождались; блоки бота — как раз на 5–6-й день)."""
+    since = _now_dt() - timedelta(days=7)
+    u = db.query_one("SELECT paid_until FROM users WHERE tg_id=?", (tg_id,))
+    if u is not None and u["paid_until"]:
+        since = max(since, datetime.fromisoformat(u["paid_until"]))
     return db.query_one(
         "SELECT COUNT(*) AS c FROM deliveries WHERE tg_id=? AND kind='full' AND created_at >= ?",
-        (tg_id, since))["c"]  # type: ignore[index]
+        (tg_id, since.isoformat()))["c"]  # type: ignore[index]
 
 
 def teasers_last_day(tg_id: int) -> int:
@@ -447,12 +454,18 @@ def due_for_reminder(days: int = 3, min_left_hours: int = 12) -> list:
 
     min_left_hours: не напоминать, когда осталось МЕНЬШЕ N часов — часовые тарифы (intro)
     иначе получают «истекает» через минуты после покупки (подтверждено на обоих реальных
-    intro-покупателях, аудит-2 [5]); напоминание в последние часы — шум, не ценность."""
+    intro-покупателях, аудит-2 [5]); напоминание в последние часы — шум, не ценность.
+
+    Только тем, кто платил: триал, промо и подарок без оплаты получали «истекает, продлите»
+    с 8 кнопками тарифов (аудит текстов 30.10: 13 из 16 напоминаний — не платившим); конец
+    триала объясняют дрип и сообщение об окончании доступа."""
     floor_ = (_now_dt() + timedelta(hours=min_left_hours)).isoformat()
     horizon = (_now_dt() + timedelta(days=days)).isoformat()
     return db.query(
-        "SELECT tg_id, paid_until FROM users WHERE tier='paid' AND paid_until > ? "
-        "AND paid_until <= ? AND renew_reminded_at IS NULL", (floor_, horizon))
+        "SELECT u.tg_id, u.paid_until FROM users u WHERE u.tier='paid' AND u.paid_until > ? "
+        "AND u.paid_until <= ? AND u.renew_reminded_at IS NULL "
+        "AND EXISTS(SELECT 1 FROM payments p WHERE p.tg_id=u.tg_id AND p.status='paid')",
+        (floor_, horizon))
 
 
 def mark_reminded(tg_id: int) -> None:
