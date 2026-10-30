@@ -1218,6 +1218,7 @@ CHECK_HOWTO = (
     "3. Через пару секунд бот покажет по свечам биржи: исполнился ли вход, какие цели "
     "взяты, был ли стоп.\n\n"
     "Важно: именно «Переслать», а не копировать — так бот знает время публикации.\n"
+    "⚡ <b>Или пришлите @username канала — проверю последние сигналы целиком.</b>\n"
     "Хотите посмотреть, как это выглядит? 👇")
 
 
@@ -1226,6 +1227,15 @@ def check_demo_markup():
 
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
         text="🔎 Показать пример проверки", callback_data="check_demo")]])
+
+
+def audit_markup():
+    """Под итогом проверки канала: подписка на наш канал + следующий канал в одно касание
+    (кнопка просит прислать @username — дальше ловит обычный хэндлер ссылки на канал)."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup  # ленивый импорт
+
+    return InlineKeyboardMarkup(inline_keyboard=channel_join_markup().inline_keyboard + [[
+        InlineKeyboardButton(text="🔎 Проверить другой канал", callback_data="audit_again")]])
 
 
 def channel_cta_markup(bot_username: str | None, src: str, affiliate_url: str = ""):
@@ -1411,6 +1421,7 @@ USER_COMMANDS = [
     ("mycard", "карточка твоего итога по отмеченным сделкам"),
     ("alert", "бесплатный прайс-алерт: /alert BTC 65000"),
     ("check", "проверить чужой сигнал: перешлите пост из любого канала"),
+    ("audit", "проверить сигнальный канал целиком: /audit @канал"),
     ("notify", "уведомления: мьют и тихие часы"),
     ("cancel", "отменить текущий пошаговый ввод"),
     ("about", "как устроен сервис, честный дисклеймер"),
@@ -1732,7 +1743,7 @@ def main() -> None:
 
     from aiogram import Bot, Dispatcher, F  # ленивый импорт тяжёлой зависимости
     from aiogram.exceptions import TelegramBadRequest
-    from aiogram.filters import Command
+    from aiogram.filters import Command, StateFilter
     from aiogram.fsm.context import FSMContext
     from aiogram.fsm.state import State, StatesGroup
     from aiogram.types import (
@@ -4032,21 +4043,40 @@ def main() -> None:
     _check_log: dict = {}                       # tg_id -> [monotonic проверок за сутки]
     _check_sem = asyncio.Semaphore(2)           # не больше двух прогонов разом (лимиты Bybit)
 
+    def _venue_symbol(sym: str) -> tuple[str, float] | None:
+        """Символ на бирже свечей и делитель цен: PEPE/SHIB на Bybit — 1000-лоты (/1000);
+        None — монеты там нет. Синхронно, только из потока. Рынки обычно уже загрузил
+        поллер; если нет (первые секунды после старта) — грузим сами: без списка рынков
+        каждая чужая монета стоила бы трёх ретраев fetch_history впустую (+6с, замер 29.10).
+        Не загрузились — пробуем символ как есть."""
+        from app.data.market_data import _EXCHANGE_LOCK, _exchange
+        ex = _exchange(cfg.exchange_id)
+        if not ex.markets:
+            try:
+                with _EXCHANGE_LOCK:            # sync-ccxt не потокобезопасен
+                    ex.load_markets()
+            except Exception as e:              # noqa: BLE001 — сеть: дальше как есть
+                log.info("load_markets: %s", e)
+        markets = ex.markets
+        if not markets or sym in markets:
+            return sym, 1.0
+        if "1000" + sym in markets:
+            return "1000" + sym, 1000.0
+        return None
+
     def _run_check(sig, posted) -> str:
         # синхронно (ccxt) — только через asyncio.to_thread
-        from app.data.market_data import _exchange, fetch_history
+        from app.data.market_data import fetch_history
         from app.delivery import signal_check
         age = (datetime.now(timezone.utc) - posted).total_seconds()
         tf = signal_check.pick_timeframe(age)
         if tf is None:
             return (f"Сигнал старше {signal_check.MAX_AGE_DAYS} дней — так далеко назад "
                     "не проверяю.")
-        sym, scale = sig.symbol, 1.0
-        markets = _exchange(cfg.exchange_id).markets
-        if markets and sym not in markets:
-            if "1000" + sym not in markets:
-                return f"Монеты {templates.esc(sig.coin)} нет на Bybit — проверить не могу."
-            sym, scale = "1000" + sym, 1000.0   # PEPE/SHIB на Bybit — 1000-лоты
+        venue = _venue_symbol(sig.symbol)
+        if venue is None:
+            return f"Монеты {templates.esc(sig.coin)} нет на Bybit — проверить не могу."
+        sym, scale = venue
         tf_s = {"15m": 900, "1h": 3600, "4h": 14400}[tf]
         bars = fetch_history(sym, tf, int(age // tf_s) + 3, exchange_id=cfg.exchange_id)
         if scale != 1.0:
@@ -4118,6 +4148,113 @@ def main() -> None:
                 txt = (f"Не получилось загрузить свечи {templates.esc(sig.coin)} с биржи. "
                        "Попробуйте через пару минут.")
         await wait.edit_text(txt, parse_mode="HTML", reply_markup=channel_join_markup())
+
+    # --- проверка канала целиком: @username -> аудит последних сигналов (29.10.2026) ---
+    # С рекламы «перешли сигнал» не переслал никто из 84 (29.10): набрать @канал проще, чем
+    # найти пост и переслать. Логика и тексты — в channel_audit; здесь сеть, лимит, отправка.
+    from app.delivery import channel_audit
+    _audit_log: dict = {}                       # tg_id -> [monotonic аудитов за сутки]
+
+    def _run_audit(posts) -> dict:
+        # синхронно (ccxt) — только через asyncio.to_thread; свечи монеты — ОДИН запрос истории
+        from app.data.market_data import fetch_history
+        now = pd.Timestamp.now(tz="UTC")
+        bars = {}
+        for sym, (tf, n) in channel_audit.fetch_plan(posts, now).items():
+            venue = _venue_symbol(sym)
+            if venue is None:
+                continue                        # монеты нет на Bybit: сигнал «не проверен»
+            vsym, scale = venue
+            try:
+                df = fetch_history(vsym, tf, n, exchange_id=cfg.exchange_id)
+            except Exception as e:              # noqa: BLE001 — сеть / лимит: монета не проверена
+                log.info("аудит: свечи %s %s: %s", vsym, tf, e)
+                continue
+            if scale != 1.0:
+                df[["open", "high", "low", "close"]] /= scale
+            bars[sym] = df
+        return channel_audit.audit(posts, bars, now)
+
+    async def _audit_channel(m, name: str) -> None:
+        if name.lower() == CHANNEL_URL.rsplit("/", 1)[-1].lower():
+            await m.answer("Это наш канал 🙂 Итог каждой его сделки — плюс или минус — бот "
+                           "записывает сам: /stats, журнал целиком — /trackrecord")
+            return
+        uid, now = m.from_user.id, _monotonic()
+        recent = [t for t in _audit_log.get(uid, []) if now - t < 86400]
+        if len(recent) >= channel_audit.AUDITS_PER_DAY and not _is_admin(m):
+            await m.answer(f"Лимит — {channel_audit.AUDITS_PER_DAY} проверки канала в сутки. "
+                           "Завтра можно снова, а отдельный сигнал — пересылкой сюда (/check).")
+            return
+        _audit_log[uid] = recent + [now]
+        wait = await m.answer(f"🔎 Читаю канал @{templates.esc(name)}…")
+        async with _check_sem:
+            try:
+                page = await asyncio.to_thread(channel_audit.fetch_channel, name)
+            except channel_audit.ChannelUnavailable:
+                _audit_log[uid] = recent        # опечатка / приватный канал — попытка не в счёт
+                await wait.edit_text(
+                    f"Не нашёл публичный канал @{templates.esc(name)}. Проверить можно только "
+                    "открытый канал — не группу, не бота и не приватный канал. Проверьте "
+                    "написание.")
+                return
+            except Exception as e:              # noqa: BLE001 — сеть / таймаут t.me
+                _audit_log[uid] = recent
+                log.info("аудит канала @%s: t.me: %s", name, e)
+                await wait.edit_text("Не получилось открыть канал — Telegram не ответил. "
+                                     "Попробуйте через пару минут.")
+                return
+            n = len(channel_audit.checkable(page.posts, pd.Timestamp.now(tz="UTC")))
+            await wait.edit_text(channel_audit.progress_text(n))
+            try:
+                agg = await asyncio.to_thread(_run_audit, page.posts)
+            except Exception as e:              # noqa: BLE001 — сеть / лимит биржи
+                log.info("аудит канала @%s: свечи: %s", name, e)
+                await wait.edit_text("Не получилось загрузить свечи с биржи. "
+                                     "Попробуйте через пару минут.")
+                return
+        log.info("аудит канала @%s: %s", name, channel_audit.log_line(agg))
+        if channel_audit.card_worthy(agg):
+            html = channel_audit.audit_card_html(name, page.title, agg,
+                                                 bot=bot_info["username"] or "rsirange_bot")
+            try:
+                png = await _render_png(graphics.render_html_to_png, html, 1080, 2, ".card")
+                await m.answer_photo(BufferedInputFile(png, filename=f"audit_{name}.png"),
+                                     caption=channel_audit.audit_caption(name, agg),
+                                     parse_mode="HTML")
+            except Exception as e:              # noqa: BLE001 — итог всё равно уйдёт текстом
+                log.error("аудит канала @%s: карточка не отрисовалась: %s", name, e)
+        await m.answer(channel_audit.render_audit(name, page.title, agg), parse_mode="HTML",
+                       reply_markup=audit_markup(), disable_web_page_preview=True)
+        try:
+            await wait.delete()
+        except Exception:                       # noqa: BLE001 — статус остался — не страшно
+            pass
+
+    # только личка: разбор чужого канала не должен уходить в группу, куда добавили бота
+    @dp.message(Command("audit"), F.chat.type == "private")
+    async def _audit_cmd(m):
+        parts = (m.text or "").split(maxsplit=1)
+        name = channel_audit.parse_channel_ref(parts[1], bare=True) if len(parts) > 1 else None
+        if name is None:
+            await m.answer(channel_audit.HELP, parse_mode="HTML")
+            return
+        await _audit_channel(m, name)
+
+    @dp.callback_query(F.data == "audit_again")
+    async def _audit_again(cq):
+        await cq.answer()
+        await cq.message.answer("Пришлите @username канала или ссылку t.me/… — проверю его "
+                                "последние сигналы по свечам биржи.")
+
+    # Сообщение в личке, где ТОЛЬКО ссылка на канал («@name», «t.me/name») — та же проверка
+    # без команды. Регистрируется после FSM-шагов (промокод, калькулятор, ввод админки
+    # перехватят свой ввод раньше) и пересылки; StateFilter(None) и ~forward_origin —
+    # явная страховка, чтобы будущие шаги и пересланные посты сюда не проваливались.
+    @dp.message(F.chat.type == "private", ~F.forward_origin, StateFilter(None),
+                F.text.func(lambda t: channel_audit.parse_channel_ref(t) is not None))
+    async def _audit_ref(m):
+        await _audit_channel(m, channel_audit.parse_channel_ref(m.text) or "")
 
     def _signal_chart_png(sig, sid):
         # синхронно (ccxt + Playwright) — вызывать только через asyncio.to_thread
