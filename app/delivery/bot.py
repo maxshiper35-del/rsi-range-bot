@@ -1942,6 +1942,20 @@ def main() -> None:
                 text="✅ Я оплатил USDT", callback_data="usdt_claim")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
+    def _trial_end_kb() -> InlineKeyboardMarkup:
+        """Конец триала (аудит текстов 30.10, К-24): 2 решения вместо 8 — неделя и месяц,
+        остальное за «Все тарифы». «Выгоднее» — только если месяц и правда дешевле в день."""
+        rows = []
+        week, month, days = runtime.week_price_stars(), runtime.price_stars(), runtime.sub_days()
+        if week > 0:
+            rows.append([InlineKeyboardButton(text=f"⭐ Неделя — {week}",
+                                              callback_data="pay_stars_week")])
+        better = " · выгоднее" if week > 0 and month / days < week / 7 else ""
+        rows.append([InlineKeyboardButton(text=f"⭐ {_fmt_days(days)} — {month}{better}",
+                                          callback_data="pay_stars")])
+        rows.append([InlineKeyboardButton(text="Все тарифы", callback_data="tariffs")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
     _mycard_last: dict[int, float] = {}
 
     async def _send_mycard(m):
@@ -2079,14 +2093,27 @@ def main() -> None:
     @dp.message(F.text == "💳 Подписка")
     async def _subscribe(m):
         await asyncio.to_thread(payments.register_user, m.from_user.id, m.from_user.username)
-        text = await asyncio.to_thread(payments.subscription_status_text, m.from_user.id)
+        text = await _subscribe_text(m.from_user.id, m.from_user.username)
+        await m.answer(text, reply_markup=_subscribe_kb(), parse_mode="HTML")
+
+    async def _subscribe_text(uid: int, username: str | None) -> str:
+        text = await asyncio.to_thread(payments.subscription_status_text, uid)
         if runtime.usdt_invoice_url() and not payments.cryptobot_enabled():
-            uname = templates.esc(m.from_user.username or m.from_user.id)
+            uname = templates.esc(username or uid)
             text += (f"\n\n💵 USDT: оплати по кнопке, в КОММЕНТАРИИ к платежу укажи «{uname}», "
                      "затем нажми «Я оплатил» — активируем в течение дня.")
         text += ("\n\n💯 <b>Money-back 7 дней</b>: не подошло — вернём Stars по запросу "
                  "(напишите админу канала @rsi_range).")
-        await m.answer(text, reply_markup=_subscribe_kb(), parse_mode="HTML")
+        return text
+
+    @dp.callback_query(F.data == "tariffs")
+    async def _tariffs_cb(cq):
+        """«Все тарифы» под сообщением о конце триала (К-24) — полный экран /subscribe."""
+        await cq.answer()
+        await asyncio.to_thread(payments.register_user, cq.from_user.id, cq.from_user.username)
+        text = await _subscribe_text(cq.from_user.id, cq.from_user.username)
+        await bot.send_message(cq.from_user.id, text, reply_markup=_subscribe_kb(),
+                               parse_mode="HTML")
 
     async def _apply_promo(m, code: str):
         res = await asyncio.to_thread(payments.redeem_promo, m.from_user.id, code)
@@ -4817,10 +4844,19 @@ def main() -> None:
             log.warning("expire_stale_candidates: %s", e)
         # истёкшие подписки -> free + уведомление (точка максимального интента:
         # кнопки оплаты прямо в сообщении, не голый /subscribe — аудит 02.09)
+        # конец триала — свой текст с личным итогом и 2 тарифами (аудит текстов 30.10, К-24),
+        # остальным — что осталось бесплатно + все тарифы (К-26)
         for uid in await asyncio.to_thread(payments.expire_overdue):
             try:
-                await _send_retry(uid, "⌛ Подписка истекла. Продлить — и снова получать "
-                                       "все сигналы:", reply_markup=_subscribe_kb())
+                summ = await asyncio.to_thread(payments.trial_summary, uid)
+                if summ is not None:
+                    depo = await asyncio.to_thread(payments.depo_prefs, uid)
+                    await _send_retry(uid, templates.render_trial_ended(
+                        summ, runtime.free_per_week(), depo), parse_mode="HTML",
+                        reply_markup=_trial_end_kb())
+                else:
+                    await _send_retry(uid, templates.render_access_ended(runtime.free_per_week()),
+                                      reply_markup=_subscribe_kb())
             except Exception as e:                     # noqa: BLE001
                 log.warning("expire notify %s: %s", uid, e)
                 if _dead_recipient(e):
