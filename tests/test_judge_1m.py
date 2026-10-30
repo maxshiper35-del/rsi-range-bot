@@ -345,6 +345,9 @@ def test_minute_cache_fetches_only_missing_and_requires_full_coverage(tmp_path, 
     monkeypatch.setattr(mb, "_fetch_pages", fake_fetch)
     monkeypatch.setattr(mb, "_now_ms", lambda: T0 + 2 * MIN_MS + 30_000)
     assert mb.load_window("SOL/USDT:USDT", T0, T0 + 5 * MIN_MS).shape == (2, 5)
+    # минута, закрывшаяся меньше CLOSE_GRACE_MS назад, ещё не отдаётся
+    monkeypatch.setattr(mb, "_now_ms", lambda: T0 + 2 * MIN_MS + 3_000)
+    assert mb.load_window("SOL/USDT:USDT", T0, T0 + 5 * MIN_MS).shape == (1, 5)
 
 
 def test_minute_cache_short_page_does_not_mark_window_covered(tmp_path, monkeypatch):
@@ -372,3 +375,9 @@ def test_methodology_line_in_texts(fresh_db):
     assert "минутным свечам" not in bot.format_stats(st)
     assert line in bot.format_stats(st, judge_since="2026-11-01T07:00:00+00:00")
     assert line not in bot.format_about() and line in bot.format_about("2026-11-01T07:00:00+00:00")
+    # /backtest: строка уточняет, что сам бэктест остался часовым; без даты текст прежний
+    bt = templates.trail_judge_line("2026-11-01T07:00:00+00:00", backtest=True)
+    assert "живой журнал" in bt and "этот бэктест — по часовым" in bt
+    assert "минутным" not in bot.format_backtest_summary()
+    assert bt in bot.format_backtest_summary("2026-11-01T07:00:00+00:00")
+    assert "фандинг.\n\nИтог текущих правил" in bot.format_backtest_summary()

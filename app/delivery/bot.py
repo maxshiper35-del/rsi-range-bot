@@ -742,12 +742,16 @@ def format_terms() -> str:
     )
 
 
-def format_backtest_summary() -> str:
+def format_backtest_summary(judge_since: str | None = None) -> str:
     """/backtest — честный итог бэктеста + дисклеймер в духе CFTC Rule 4.41 (статический текст).
 
     Цифры — замер 27.10.2026 (docs/measurements/2026-10-27-equity-curve-filter.md, база
     воспроизведена в 2026-10-27-1h-only-trail10-m2.md): прод-конфиг, живой судья, M2′.
-    Ротационный вотчлист — 2026-10-24-rotating-universe.md. Менять только новым замером."""
+    Ротационный вотчлист — 2026-10-24-rotating-universe.md. Менять только новым замером.
+    judge_since — дата первого сигнала с минутным судьёй трейла: с неё живой бот судит
+    выход иначе, чем этот бэктест, — строка о методике."""
+    judge_line = templates.trail_judge_line(judge_since, backtest=True)
+    judge_block = f"{judge_line}\n" if judge_line else ""
     return (
         "🧪 Бэктест стратегии — честный итог\n"
         f"{_LINE}\n"
@@ -756,7 +760,8 @@ def format_backtest_summary() -> str:
         "Метод: те же правила, что у живого бота — движку подаются только закрытые бары, "
         "исход судится по часовым свечам, выход только трейлинг-стопом, не больше 6 "
         "позиций в одну сторону. Издержки реальные: комиссия тейкера 0,055%, "
-        "проскальзывание 0,15%, фандинг.\n\n"
+        "проскальзывание 0,15%, фандинг.\n"
+        f"{judge_block}\n"
         "Итог текущих правил: 4045 сделок, +229R за 5 лет — в среднем +0,057R на сделку. "
         "Первые 4 года +170R, последний год +59R (+0,067R на сделку). Отказ от 4h выбран "
         "в том числе по этим же данным, поэтому честная проверка — только последний год "
@@ -2257,7 +2262,8 @@ def main() -> None:
     @dp.message(Command("backtest"))
     @dp.message(F.text == "🧪 Бэктест")
     async def _backtest(m):
-        await m.answer(format_backtest_summary())
+        since = await asyncio.to_thread(journal.trail_judge_1m_since)
+        await m.answer(format_backtest_summary(since))
 
     @dp.message(Command("glossary"))
     @dp.message(F.text == "📖 Глоссарий")

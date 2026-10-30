@@ -8,7 +8,8 @@
 
 Контракт `load_window`: массив минут [start, end) только если покрытие кэша ПОЛНОЕ
 (с учётом докачки), иначе None — судья не должен молча судить по неполным данным.
-Незакрытая (текущая) минута никогда не отдаётся и не кэшируется.
+Незакрытая (текущая) минута никогда не отдаётся и не кэшируется, закрытая — только через
+CLOSE_GRACE_MS после закрытия.
 """
 from __future__ import annotations
 
@@ -22,6 +23,8 @@ import numpy as np
 MIN_MS = 60_000
 PAGE = 1000                     # лимит kline Bybit за запрос
 MAX_PAGES = 12                  # ≤ 12 000 минут (8.3 суток) за один вызов
+CLOSE_GRACE_MS = 5_000          # свеча, взятая в миг закрытия, может не содержать последних
+                                # сделок биржи — а в кэш она ложится навсегда
 
 
 def cache_root() -> Path:
@@ -66,6 +69,11 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _closed_before() -> int:
+    """Минуты с ts < этого закрыты (с запасом CLOSE_GRACE_MS после закрытия)."""
+    return (_now_ms() - CLOSE_GRACE_MS) // MIN_MS * MIN_MS
+
+
 def _fetch_pages(symbol: str, s: int, e: int) -> list[list]:
     """Закрытые минуты [s, e) с биржи, since-курсором вперёд. Пустая страница — данных
     нет (до листинга / после делистинга). Исключение сети — наверх (окно не скачано)."""
@@ -73,7 +81,7 @@ def _fetch_pages(symbol: str, s: int, e: int) -> list[list]:
     from app.data.market_data import _EXCHANGE_LOCK, _bump, _exchange
 
     ex = _exchange(get_settings().exchange_id)
-    closed_before = _now_ms() // MIN_MS * MIN_MS            # минуты с ts < этого закрыты
+    closed_before = _closed_before()
     rows: list[list] = []
     since = s
     for _ in range(MAX_PAGES):
@@ -102,7 +110,7 @@ def load_window(symbol: str, start_ms: int, end_ms: int, fetch: bool = True,
     """Минуты [start_ms, end_ms) (end обрезается по последней закрытой минуте). None —
     покрытие неполное: сеть не дала окно, биржа не отдаёт минуты (символа нет), или
     fetch=False и кэша не хватает."""
-    end_ms = min(end_ms, _now_ms() // MIN_MS * MIN_MS)
+    end_ms = min(end_ms, _closed_before())
     if end_ms <= start_ms:
         return np.empty((0, 5))
     npy, js = _paths(symbol)
