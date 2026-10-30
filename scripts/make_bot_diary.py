@@ -402,10 +402,10 @@ def caption(d: Diary) -> kit.Caption:
     delta = d.close_balance - d.open_balance
     wins = sum(1 for s in d.today if s.pnl > 0)
     stops = len(d.today) - wins
-    word = "плюс" if delta > 0 else "минус"
+    word = "плюсе" if delta > 0 else "минусе"
     return kit.Caption(
-        title=(f"Робот торгует сам. День {d.n}: {money(delta, sign=True)} "
-               f"#трейдинг #крипта #робот"),
+        title=(f"Робот торгует сам. День {d.n}: сколько на счёте? "
+               "#трейдинг #крипта #робот"),
         hook=f"Робот торгует сам. День {d.n}. Сколько на счёте?",
         description=(
             f"День {d.n} дневника робота ({d.day:%d.%m.%Y}): {len(d.today)} закрытых сделок — "
