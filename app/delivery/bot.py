@@ -12,6 +12,7 @@ import functools
 import logging
 import re
 from collections import deque
+from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic as _monotonic
@@ -430,8 +431,8 @@ def _revenue(by_currency: dict) -> str:
 def format_growth(breakdown: dict, spend: dict | None = None,
                   revenue: dict | None = None, quality: dict | None = None) -> str:
     """Текст /growth — источник → приглашено → реально оплатили → % конверсии. "Оплатили"
-    здесь строго payments.status='paid' (см. journal.acquisition_breakdown) — триал/промо
-    не в счёт, иначе конверсия дашборда врала бы себе.
+    здесь — payments.paid_ever_sql (платёж или подтверждённая /grant USDT-заявка, см.
+    payments.acquisition_breakdown): триал/промо не в счёт, иначе конверсия врала бы себе.
 
     spend — расход на рекламу по меткам (/ad, ₽): метка с расходом, но без пришедших,
     тоже видна — купленный пост, который никого не привёл, и есть главный вывод.
@@ -566,7 +567,7 @@ _SETUP_CODES_REV = {v: k for k, v in _SETUP_CODES.items()}
 _ADMIN_NUMERIC_FIELDS = {
     "sub_price_stars": ("Цена подписки в Stars (целое число)", "int"),
     "sub_price_usdt": ("Цена подписки в USDT", "float"),
-    "sub_days": ("Длительность подписки в днях (можно дробное — часы = доли дня)", "float"),
+    "sub_days": ("Длительность подписки в днях (можно дробное — часы = доли дня)", "days"),
     "free_signals_per_week": ("Free-лимит сигналов в неделю (целое число)", "int"),
     "trial_days": ("Длительность триала для новых юзеров, дней (целое число)", "int"),
     "min_confidence": ("Мин. уверенность сетапа, 0..1", "unit"),
@@ -590,16 +591,25 @@ _ADMIN_NUMERIC_FIELDS = {
 
 def _parse_admin_field_value(raw: str, kind: str) -> float:
     """Парсинг+валидация ввода админа через FSM-промпт (см. AdminInput.numeric в main()).
-    Бросает исключение при некорректном значении — caller ловит и переспрашивает,
-    не роняя диалог."""
+    Бросает ValueError при некорректном значении — caller ловит и переспрашивает,
+    не роняя диалог. Не assert: под python -O проверки исчезли бы (аудит кода 30.10)."""
+    from app.delivery.tariffs import valid_sub_days
+
     v = float(raw.strip().replace(",", "."))
     if kind == "int":
-        assert v == int(v) and v >= 0
+        if not (v == int(v) and v >= 0):
+            raise ValueError(f"нужно целое ≥ 0: {raw!r}")
         return int(v)
     if kind == "unit":
-        assert 0.0 <= v <= 1.0
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"нужно число 0..1: {raw!r}")
         return v
-    assert v >= 0.0                                         # "float"
+    if kind == "days":                                      # срок подписки: 0 — оплата без доступа
+        if not valid_sub_days(v):
+            raise ValueError(f"нужен срок > 0 дней: {raw!r}")
+        return v
+    if not v >= 0.0:                                        # "float"
+        raise ValueError(f"нужно число ≥ 0: {raw!r}")
     return v
 
 
@@ -853,23 +863,6 @@ def decision_is_fresh(sig, now: datetime, max_lag_min: float = DECISION_MAX_LAG_
         created = created.replace(tzinfo=timezone.utc)
     decision = created + timedelta(minutes=SMCEngine.TF_MINUTES.get(sig.timeframe, 60))
     return (now - decision).total_seconds() <= max_lag_min * 60
-
-
-def precheckout_ok(payload: str | None, total: int, currency: str,
-                   tiers: list[tuple[float, int]]) -> bool:
-    """Пропустить ли оплату: 'sub:<дни>' должен совпасть с ВКЛЮЧЁННЫМ тарифом по дням и
-    ТЕКУЩЕЙ цене в XTR. 'unlock:' (paid media) — платформенный поток, пропускаем как раньше."""
-    p = payload or ""
-    if p.startswith("unlock:"):
-        return True
-    if currency != "XTR" or not p.startswith("sub:"):
-        return False
-    try:
-        days = float(p.split(":", 1)[1])
-    except ValueError:
-        return False
-    return any(price > 0 and abs(d - days) < 1e-6 and int(total) == int(price)
-               for d, price in tiers)
 
 
 def result_is_fresh(c: dict, now: datetime, max_age_hours: float = 12.0) -> bool:
@@ -1782,6 +1775,105 @@ def _send_raw_telegram_message(token: str, chat_id: int, text: str) -> None:
         json.loads(r.read())
 
 
+def _send_raw_alerts(token: str, admin_ids, text: str) -> None:
+    """_send_raw_telegram_message каждому админу; сбой одного не мешает остальным.
+    Синхронная — звать через asyncio.to_thread, не из event loop."""
+    for admin_id in admin_ids:
+        try:
+            _send_raw_telegram_message(token, admin_id, text)
+        except Exception:                               # noqa: BLE001 — алерт не роняет вызывающего
+            logging.getLogger("bot").exception("прямой алерт админу %s не ушёл", admin_id)
+
+
+async def notify_admins(bot, admin_ids, text: str, *, what: str,
+                        parse_mode: str | None = None) -> int:
+    """Отправить текст каждому админу. Сбой одного не мешает остальным и оставляет след в
+    логе: раньше часть отчётов админам глоталась `except: pass` — без следа даже в логе
+    (аудит кода 30.10, §3.6 п.2). -> скольким доставлено."""
+    kwargs = {"parse_mode": parse_mode} if parse_mode else {}
+    sent = 0
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(admin_id, text, **kwargs)
+            sent += 1
+        except Exception as e:                          # noqa: BLE001 — один админ не блокирует
+            logging.getLogger("bot").warning("%s -> админ %s: %s", what, admin_id, e)
+    return sent
+
+
+def spawn(coro, *, name: str | None = None) -> asyncio.Task:
+    """Фоновая задача с сильной ссылкой и логом исключения (аудит кода 30.10, §3.6 п.8).
+
+    Цикл событий держит задачи слабо: без ссылки сборщик мусора вправе снять задачу посреди
+    работы, а её исключение всплыло бы только как «Task exception was never retrieved».
+    Исключение уходит в лог как ERROR — его подхватит батч ошибок админам."""
+    task = asyncio.create_task(coro, name=name)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_bg_task_done)
+    return task
+
+
+def _bg_task_done(task: asyncio.Task) -> None:
+    _BG_TASKS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logging.getLogger("bot").error("фоновая задача %s упала: %r", task.get_name(), exc,
+                                       exc_info=exc)
+
+
+# сбой одного и того же блока обслуживания — алерт админам не чаще раза в 6 ч
+MAINT_ALERT_EVERY_S = 6 * 3600
+
+
+class MaintenanceGuard:
+    """Переборки такта обслуживания (аудит кода 30.10, §3.6 п.4).
+
+    Каждый блок — в своём try/except. Раньше устойчиво падающий ранний блок (битая метка в
+    settings, баг в предикате) навсегда выключал все следующие: активацию USDT, истечение
+    подписок, дрип, табло, недельные посты и пульс dead-man.
+
+    Сбой блока — WARNING с трейсом в лог и алерт админам не чаще раза в alert_every_s на
+    блок. Не ERROR: батч ошибок слал бы один и тот же сбой каждые 10 минут."""
+
+    def __init__(self, alert: Callable[[str], Awaitable[object]], *,
+                 alert_every_s: float = MAINT_ALERT_EVERY_S,
+                 clock: Callable[[], float] = _monotonic) -> None:
+        self._alert = alert
+        self._every = alert_every_s
+        self._clock = clock
+        self._last_alert: dict[str, float] = {}
+
+    async def run(self, blocks: list[tuple[str, Callable[[], Awaitable[object]]]]) -> list[str]:
+        """Прогнать блоки по порядку. -> имена упавших."""
+        failed = []
+        for name, fn in blocks:
+            try:
+                await fn()
+            except Exception as e:                      # noqa: BLE001 — переборка: дальше идут все
+                failed.append(name)
+                logging.getLogger("bot").warning("обслуживание: блок «%s» упал: %r", name, e,
+                                                 exc_info=True)
+                await self._maybe_alert(name, e)
+        return failed
+
+    async def _maybe_alert(self, name: str, e: Exception) -> None:
+        now = self._clock()
+        last = self._last_alert.get(name)
+        if last is not None and now - last < self._every:
+            return
+        self._last_alert[name] = now
+        try:
+            await self._alert(f"⚠️ Обслуживание: блок «{name}» падает: {e!r}\n"
+                              "Остальные блоки работают. Подробности — logs/bot.log. "
+                              f"Повтор этого алерта — не раньше чем через "
+                              f"{self._every / 3600:g} ч.")
+        except Exception:                               # noqa: BLE001 — алерт не роняет такт
+            logging.getLogger("bot").warning("обслуживание: алерт о блоке «%s» не ушёл", name,
+                                             exc_info=True)
+
+
 def _fmt_days(days: float) -> str:
     """Человекочитаемая длительность подписки: дробные дни (тестовые тарифы) -> часы."""
     if days == int(days):
@@ -1837,14 +1929,13 @@ def main() -> None:
         InlineKeyboardMarkup,
         InputPaidMediaPhoto,
         KeyboardButton,
-        LabeledPrice,
         ReplyKeyboardMarkup,
         WebAppInfo,
     )
 
     from app import db, runtime
     from app.config import get_settings
-    from app.delivery import payments
+    from app.delivery import checkout, payments, tariffs
     from app.logging_conf import get_logger
 
     log = get_logger("bot")
@@ -1910,67 +2001,42 @@ def main() -> None:
         return ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True, keyboard=[
             [KeyboardButton(text=t) for t in row] for row in main_menu_layout(is_admin)])
 
-    def _usdt_tier_price(stars: int) -> float:
-        """Цена тира в USDT: пропорция его Stars-цены к базовому тарифу × базовая
-        USDT-цена — длинные тиры в USDT без отдельных настроек (запрос владельца 02.09)."""
-        base = runtime.price_stars()
-        if base <= 0 or stars <= 0 or runtime.price_usdt() <= 0:
-            return 0.0
-        return round(runtime.price_usdt() * stars / base, 2)
-
     def _subscribe_kb() -> InlineKeyboardMarkup:
-        rows = []
-        if runtime.intro_price_stars() > 0 and runtime.intro_hours() > 0:
-            rows.append([InlineKeyboardButton(
-                text=f"⭐ {runtime.intro_price_stars()} Stars / "
-                     f"{runtime.intro_hours():g} ч — попробовать",
-                callback_data="pay_stars_intro")])
-        if runtime.week_price_stars() > 0:              # между пробными часами и месяцем
-            rows.append([InlineKeyboardButton(
-                text=f"⭐ {runtime.week_price_stars()} Stars / 7 дней",
-                callback_data="pay_stars_week")])
-        rows.append([InlineKeyboardButton(
-            text=f"⭐ {runtime.price_stars()} Stars / {_fmt_days(runtime.sub_days())}",
-            callback_data="pay_stars")])
+        """Кнопки тарифов — из реестра tariffs: те же тарифы сверяет pre_checkout."""
+        tiers = {t.key: t for t in tariffs.stars_tiers()}
+        month = tiers["month"]
+
         # длинные тиры (разовые инвойсы: нативные Stars-подписки >30 дней невозможны);
         # скидка считается от актуальной месячной цены — не соврёт при смене цен
         def _disc(price: int, months: float) -> str:
-            base = runtime.price_stars() * months
+            base = month.stars * months
             return (f" (−{round((1 - price / base) * 100)}%)"
                     if 0 < price < base else "")
 
-        q, y, lf = (runtime.quarter_price_stars(), runtime.year_price_stars(),
-                    runtime.lifetime_price_stars())
-        if q > 0:
-            rows.append([InlineKeyboardButton(
-                text=f"⭐ {q} Stars / 90 дней{_disc(q, 3)}",
-                callback_data="pay_stars_quarter")])
-        if y > 0:
-            rows.append([InlineKeyboardButton(
-                text=f"⭐ {y} Stars / год{_disc(y, 12)}",
-                callback_data="pay_stars_year")])
-        if lf > 0:
-            rows.append([InlineKeyboardButton(
-                text=f"⭐ {lf} Stars / навсегда", callback_data="pay_stars_life")])
+        texts = {
+            "intro": f"⭐ {tiers['intro'].stars} Stars / {runtime.intro_hours():g} ч — попробовать",
+            "week": f"⭐ {tiers['week'].stars} Stars / 7 дней",   # между пробными и месяцем
+            "month": f"⭐ {month.stars} Stars / {_fmt_days(month.days)}",
+            "quarter": f"⭐ {tiers['quarter'].stars} Stars / 90 дней"
+                       f"{_disc(tiers['quarter'].stars, 3)}",
+            "year": f"⭐ {tiers['year'].stars} Stars / год{_disc(tiers['year'].stars, 12)}",
+            "life": f"⭐ {tiers['life'].stars} Stars / навсегда",
+        }
+        # основной тариф — всегда (как до реестра), остальные — только включённые
+        rows = [[InlineKeyboardButton(text=texts[t.key], callback_data=t.callback)]
+                for t in tiers.values() if t.enabled or t.key == "month"]
         if payments.cryptobot_enabled():                # авто через Crypto Pay API
-            rows.append([InlineKeyboardButton(
-                text=f"💵 {runtime.price_usdt():g} USDT / {runtime.sub_days()} дн",
-                callback_data="pay_usdt")])
+            usdt = {t.key: t for t in tariffs.usdt_tiers()}
+            if usdt["month"].enabled:
+                rows.append([InlineKeyboardButton(
+                    text=f"💵 {usdt['month'].amount:g} USDT / {usdt['month'].days:g} дн",
+                    callback_data=usdt["month"].callback)])
             # длинные тиры в USDT: цена — пропорцией от Stars-цены тира к базовому
             # (скидки переносятся автоматически, отдельных настроек не нужно)
-            tier_row = []
-            if q > 0 and _usdt_tier_price(q) > 0:
-                tier_row.append(InlineKeyboardButton(
-                    text=f"💵 90д · {_usdt_tier_price(q):g}$",
-                    callback_data="pay_usdt_quarter"))
-            if y > 0 and _usdt_tier_price(y) > 0:
-                tier_row.append(InlineKeyboardButton(
-                    text=f"💵 год · {_usdt_tier_price(y):g}$",
-                    callback_data="pay_usdt_year"))
-            if lf > 0 and _usdt_tier_price(lf) > 0:
-                tier_row.append(InlineKeyboardButton(
-                    text=f"💵 ∞ · {_usdt_tier_price(lf):g}$",
-                    callback_data="pay_usdt_life"))
+            short = {"quarter": "90д", "year": "год", "life": "∞"}
+            tier_row = [InlineKeyboardButton(text=f"💵 {short[k]} · {usdt[k].amount:g}$",
+                                             callback_data=usdt[k].callback)
+                        for k in ("quarter", "year", "life") if usdt[k].enabled]
             if tier_row:
                 rows.append(tier_row)
         elif runtime.usdt_invoice_url():                # полу-ручной: ссылка на счёт + «Я оплатил»
@@ -1984,14 +2050,17 @@ def main() -> None:
     def _trial_end_kb() -> InlineKeyboardMarkup:
         """Конец триала (аудит текстов 30.10, К-24): 2 решения вместо 8 — неделя и месяц,
         остальное за «Все тарифы». «Выгоднее» — только если месяц и правда дешевле в день."""
+        tiers = {t.key: t for t in tariffs.stars_tiers()}
+        week, month = tiers["week"], tiers["month"]
         rows = []
-        week, month, days = runtime.week_price_stars(), runtime.price_stars(), runtime.sub_days()
-        if week > 0:
-            rows.append([InlineKeyboardButton(text=f"⭐ Неделя — {week}",
-                                              callback_data="pay_stars_week")])
-        better = " · выгоднее" if week > 0 and month / days < week / 7 else ""
-        rows.append([InlineKeyboardButton(text=f"⭐ {_fmt_days(days)} — {month}{better}",
-                                          callback_data="pay_stars")])
+        if week.enabled:
+            rows.append([InlineKeyboardButton(text=f"⭐ Неделя — {week.stars}",
+                                              callback_data=week.callback)])
+        better = (" · выгоднее" if week.enabled
+                  and month.stars / month.days < week.stars / week.days else "")
+        rows.append([InlineKeyboardButton(
+            text=f"⭐ {_fmt_days(month.days)} — {month.stars}{better}",
+            callback_data=month.callback)])
         rows.append([InlineKeyboardButton(text="Все тарифы", callback_data="tariffs")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -2535,54 +2604,10 @@ def main() -> None:
         await state.clear()
         await _apply_promo(m, (m.text or "").strip())
 
-    async def _send_stars_invoice(chat_id: int, days: float, stars: int,
-                                  label: str | None = None):
-        human = label or _fmt_days(days)
-        await bot.send_invoice(
-            chat_id=chat_id,
-            title="Подписка RSI Range Signals",
-            description=f"Доступ ко всем сигналам на {human}.",
-            payload=f"sub:{days}",                      # _paid парсит float — дробные дни ок
-            provider_token="",                          # Stars: провайдер не нужен
-            currency="XTR",
-            prices=[LabeledPrice(label=f"{human} доступа", amount=stars)],
-        )
-
-    async def _pay_tier(cq, days: float, stars: int, label: str | None = None):
-        """Общий путь кнопок оплаты. Гейт stars<=0: старые /subscribe-сообщения в истории
-        чата хранят кнопки выключенных тарифов — без гейта клик слал бы invoice с amount=0
-        (Bad Request) и вечный спиннер юзеру (аудит-2 [12])."""
-        if stars <= 0:
-            await cq.answer("Этот тариф сейчас недоступен — см. актуальные в /subscribe.",
-                            show_alert=True)
-            return
-        await _send_stars_invoice(cq.from_user.id, days, stars, label)
-        await cq.answer()
-
-    @dp.callback_query(F.data == "pay_stars")
+    @dp.callback_query(F.data.in_(tariffs.STARS_CALLBACKS))
     async def _pay_stars(cq):
-        await _pay_tier(cq, runtime.sub_days(), runtime.price_stars())
-
-    @dp.callback_query(F.data == "pay_stars_intro")
-    async def _pay_stars_intro(cq):
-        await _pay_tier(cq, round(runtime.intro_hours() / 24, 6), runtime.intro_price_stars())
-
-    @dp.callback_query(F.data == "pay_stars_week")
-    async def _pay_stars_week(cq):
-        await _pay_tier(cq, 7, runtime.week_price_stars(), label="7 дней")
-
-    @dp.callback_query(F.data == "pay_stars_quarter")
-    async def _pay_stars_quarter(cq):
-        await _pay_tier(cq, 90, runtime.quarter_price_stars())
-
-    @dp.callback_query(F.data == "pay_stars_year")
-    async def _pay_stars_year(cq):
-        await _pay_tier(cq, 365, runtime.year_price_stars(), label="1 год")
-
-    @dp.callback_query(F.data == "pay_stars_life")
-    async def _pay_stars_life(cq):
-        # lifetime = 36500 дней (100 лет): без спец-статуса в БД — просто далёкий paid_until
-        await _pay_tier(cq, 36500, runtime.lifetime_price_stars(), label="навсегда (lifetime)")
+        # все кнопки Stars-тарифов: срок, цена и payload — из реестра tariffs
+        await checkout.pay_stars_tier(bot, cq, tariffs.stars_tier_by_callback(cq.data))
 
     _unlock_last: dict[int, float] = {}
 
@@ -2754,59 +2779,10 @@ def main() -> None:
             parse_mode="HTML")
         await cq.answer()
 
-    async def _usdt_invoice(cq, days: float, amount: float | None, label: str):
-        """Общий путь USDT-инвойсов всех тиров (poll_cryptobot активирует по days
-        из payload, бонус-дни добавляются там же — тиры едут без изменений ядра)."""
-        try:
-            res = await asyncio.to_thread(payments.create_cryptobot_invoice,
-                                          cq.from_user.id, days, amount)
-        except Exception as e:                         # noqa: BLE001 — сеть/невалидный токен
-            log.warning("create_cryptobot_invoice %s: %s", cq.from_user.id, e)
-            res = None
-        if res is None:
-            await cq.answer("USDT временно недоступен, попробуй позже "
-                            "(или оплати Stars)", show_alert=True)
-            return
-        pay_url, _ = res
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="💵 Перейти к оплате USDT", url=pay_url)]])
-        bonus = runtime.usdt_bonus_days()
-        bonus_line = f" +{bonus} дн. бонусом за оплату в USDT." if bonus > 0 else ""
-        await bot.send_message(
-            cq.from_user.id,
-            f"Счёт на оплату в USDT создан ({label}). После оплаты подписка "
-            f"активируется автоматически (проверка раз в ~минуту).{bonus_line}",
-            reply_markup=kb)
-        await cq.answer()
-
-    @dp.callback_query(F.data == "pay_usdt")
+    @dp.callback_query(F.data.in_(tariffs.USDT_CALLBACKS))
     async def _pay_usdt(cq):
-        await _usdt_invoice(cq, runtime.sub_days(), None,
-                            f"{_fmt_days(runtime.sub_days())}")
-
-    @dp.callback_query(F.data == "pay_usdt_quarter")
-    async def _pay_usdt_quarter(cq):
-        amount = _usdt_tier_price(runtime.quarter_price_stars())
-        if amount <= 0:
-            await cq.answer("Тариф выключен.", show_alert=True)
-            return
-        await _usdt_invoice(cq, 90, amount, "90 дней")
-
-    @dp.callback_query(F.data == "pay_usdt_year")
-    async def _pay_usdt_year(cq):
-        amount = _usdt_tier_price(runtime.year_price_stars())
-        if amount <= 0:
-            await cq.answer("Тариф выключен.", show_alert=True)
-            return
-        await _usdt_invoice(cq, 365, amount, "год")
-
-    @dp.callback_query(F.data == "pay_usdt_life")
-    async def _pay_usdt_life(cq):
-        amount = _usdt_tier_price(runtime.lifetime_price_stars())
-        if amount <= 0:
-            await cq.answer("Тариф выключен.", show_alert=True)
-            return
-        await _usdt_invoice(cq, 36500, amount, "навсегда (lifetime)")
+        # все USDT-тарифы: срок и сумма — из реестра tariffs (poll_cryptobot активирует)
+        await checkout.send_usdt_invoice(bot, cq, tariffs.usdt_tier_by_callback(cq.data))
 
     @dp.callback_query(F.data == "usdt_claim")
     async def _usdt_claim(cq):
@@ -2954,52 +2930,17 @@ def main() -> None:
                 except Exception as e:                 # noqa: BLE001
                     log.warning("notify admin channel-id %s: %s", admin_id, e)
 
-    def _current_stars_tiers() -> list[tuple[float, int]]:
-        """(дни, цена⭐) включённых сейчас тарифов — те же, что строит _subscribe_kb."""
-        tiers = [(float(runtime.sub_days()), runtime.price_stars()),
-                 (7.0, runtime.week_price_stars()),
-                 (90.0, runtime.quarter_price_stars()), (365.0, runtime.year_price_stars()),
-                 (36500.0, runtime.lifetime_price_stars())]
-        if runtime.intro_hours() > 0:
-            tiers.append((round(runtime.intro_hours() / 24, 6), runtime.intro_price_stars()))
-        return tiers
-
     @dp.pre_checkout_query()
     async def _pre_checkout(q):
-        # старые инвойсы (выключенный тариф, прежняя цена, пересланные копии) иначе
-        # оплачивались бы вечно, а нечитаемый payload — сначала списание, потом фолбэк
-        # на 30 дн (аудит 05.10). Отказ — до списания, Stars не уходят.
-        ok = precheckout_ok(q.invoice_payload, q.total_amount, q.currency,
-                            _current_stars_tiers())
-        if ok:
-            await q.answer(ok=True)
-        else:
-            log.warning("pre_checkout отклонён: payload=%r amount=%s %s от %s",
-                        q.invoice_payload, q.total_amount, q.currency, q.from_user.id)
-            await q.answer(ok=False, error_message="Тариф изменился — откройте /subscribe "
-                                                   "и оплатите актуальный.")
+        # сверка с реестром tariffs: ключ тарифа, срок в минутах, текущая цена (см. checkout)
+        await checkout.answer_pre_checkout(q)
 
     @dp.message(F.successful_payment)
     async def _paid(m):
-        sp = m.successful_payment
-        try:
-            days = float(sp.invoice_payload.split(":")[1])
-        except Exception:                               # noqa: BLE001
-            # нечитаемый payload — фолбэк на АКТУАЛЬНЫЙ runtime.sub_days (не boot-time cfg)
-            # с громким следом: молча выдать 30 дн за lifetime-чардж нельзя (аудит-2 [10])
-            days = float(runtime.sub_days())
-            log.warning("successful_payment: нечитаемый payload %r от %s (charge=%s) — "
-                        "фолбэк %s дн", sp.invoice_payload, m.from_user.id,
-                        sp.telegram_payment_charge_id, days)
-        applied = await asyncio.to_thread(
-            payments.grant_subscription, m.from_user.id, "stars",
-            float(sp.total_amount), sp.currency, days, sp.telegram_payment_charge_id)
-        if applied:
-            await m.answer(f"✅ Подписка активна на {_fmt_days(days)}! Сигналы теперь приходят "
-                           f"автоматически на закрытии свечей. Статус: /subscribe")
-            await _reward_referrer(m.from_user.id, days)   # реф-награда за реальный платёж
-        else:
-            await m.answer("Этот платёж уже был учтён. Спасибо! Статус: /subscribe")
+        await checkout.process_successful_payment(
+            m, reward_referrer=_reward_referrer,
+            alert_admins=lambda text: notify_admins(bot, cfg.admin_ids, text,
+                                                    what="оплата не применилась"))
 
     @dp.message(Command("stats"))
     @dp.message(F.text == "📊 Статистика")
@@ -3138,12 +3079,15 @@ def main() -> None:
         # админ: вручную опубликовать сводку статистики в канал
         if not _is_admin(m):
             return
-        if not cfg.signals_channel:
-            await m.answer("Канал не задан (SIGNALS_CHANNEL).")
+        # канал — из runtime, как у всего остального: .env — только дефолт, а канал,
+        # заданный через /channel, иначе давал «Канал не задан» (аудит кода 30.10, §3.5)
+        channel = runtime.signals_channel()
+        if not channel:
+            await m.answer("Канал не задан (/channel или SIGNALS_CHANNEL).")
             return
         text = await asyncio.to_thread(lambda: format_channel_stats(journal.stats()))
         try:
-            await bot.send_message(runtime.signals_channel(), text)
+            await bot.send_message(channel, text)
             await m.answer("Сводка опубликована в канал.")
         except Exception as e:                         # noqa: BLE001
             await m.answer(f"Не удалось опубликовать: {e}")
@@ -3483,17 +3427,20 @@ def main() -> None:
         parts = (m.text or "").split()
         # (settings-ключ, парсер, минимум) — ВАЛИДИРУЕМ до записи: иначе строка '1k' легла
         # бы в числовую настройку и роняла runtime-getter -> мёртвая подписка/админка (аудит [6])
-        spec = {"stars": ("sub_price_stars", int, 1),
-                "usdt": ("sub_price_usdt", float, 0.0),
-                "days": ("sub_days", float, 0.0)}
+        # days: строго > 0 — /price days 0 давал платную подписку на 0 дней (аудит кода 30.10)
+        spec = {"stars": ("sub_price_stars", int, 1, "≥ 1"),
+                "usdt": ("sub_price_usdt", float, 0.0, "≥ 0"),
+                "days": ("sub_days", float, None, "> 0")}
         if len(parts) == 3 and parts[1] in spec:
-            key, parser, lo = spec[parts[1]]
+            key, parser, lo, rule = spec[parts[1]]
             try:
                 v = parser(parts[2])
-                assert v >= lo
-            except Exception:                          # noqa: BLE001
+                ok = tariffs.valid_sub_days(v) if lo is None else v >= lo
+            except ValueError:
+                ok = False
+            if not ok:
                 await m.answer(f"Неверное значение «{parts[2]}». "
-                               f"Формат: /price {parts[1]} <число ≥ {lo:g}>")
+                               f"Формат: /price {parts[1]} <число {rule}>")
                 return
             await _set(m, key, v, f"{parts[1]} = {v:g}")
         else:
@@ -3680,9 +3627,7 @@ def main() -> None:
             await m.answer("Формат: /pack или /pack 2026-10-26")
             return
         await m.answer(f"🏭 Собираю контент-пак за {day:%d.%m.%Y} — пара минут…")
-        task = asyncio.create_task(_send_content_pack([m.chat.id], day))
-        _BG_TASKS.add(task)
-        task.add_done_callback(_BG_TASKS.discard)
+        spawn(_send_content_pack([m.chat.id], day), name="content-pack")
 
     def _postmortem_build(start: datetime, end: datetime) -> tuple[list, list]:
         """Синхронно (to_thread): разборы сделок, закрытых в [start, end), и за 7 дней до end
@@ -3875,12 +3820,13 @@ def main() -> None:
         """Остались ли пришедшие: не заблокировали бота + подписаны на канал (get_chat_member;
         бот — админ канала). Сбой проверки канала — None, а не «0 в канале»."""
         by_src = await asyncio.to_thread(payments.users_by_source)
+        channel = runtime.signals_channel()             # runtime, не .env (аудит кода 30.10)
         out: dict = {}
         for src, s in by_src.items():
-            n, ok = 0, bool(cfg.signals_channel)
+            n, ok = 0, bool(channel)
             for uid in s["ids"] if ok else []:
                 try:
-                    cm = await bot.get_chat_member(cfg.signals_channel, uid)
+                    cm = await bot.get_chat_member(channel, uid)
                     if cm.status in ("member", "administrator", "creator", "restricted"):
                         n += 1
                 except TelegramBadRequest:
@@ -4035,6 +3981,9 @@ def main() -> None:
             return
         tg = int(parts[1])
         days = int(parts[2]) if len(parts) > 2 and parts[2].isdecimal() else runtime.sub_days()
+        if days <= 0:                                   # /grant 0 закрыл бы USDT-заявку без доступа
+            await m.answer("Срок должен быть больше нуля: /grant <tg_id> [дней]")
+            return
         await asyncio.to_thread(payments.admin_grant, tg, days)
         await m.answer(f"✅ Подписка выдана {tg} на {days} дн.")
         await _reward_referrer(tg, days)                   # /grant = подтверждение USDT-оплаты
@@ -4061,36 +4010,7 @@ def main() -> None:
             await m.answer("Формат: /refund <tg_id> — вернуть последний Stars-платёж "
                            "(money-back 7 дней)")
             return
-        uid = int(parts[1])
-        pay = await asyncio.to_thread(payments.find_refundable_stars_payment, uid)
-        if not pay:
-            await m.answer("Оплаченных Stars-платежей у юзера не найдено "
-                           "(или уже возвращены).")
-            return
-        try:
-            await bot.refund_star_payment(
-                user_id=uid, telegram_payment_charge_id=pay["charge_id"])
-        except Exception as e:                          # noqa: BLE001 — отказ Telegram
-            if "CHARGE_ALREADY_REFUNDED" not in str(e):
-                await m.answer(f"Telegram отказал в возврате: {e}")
-                return
-            # уже возвращён на стороне Telegram (краш между API и БД в прошлый раз) —
-            # дочиниваем БД, иначе строка вечно paid и /refund зациклен (аудит-2 [9])
-            log.warning("refund %s: уже возвращён у Telegram, дочиниваю запись #%s",
-                        uid, pay["id"])
-        applied = await asyncio.to_thread(payments.mark_refunded, pay["id"], uid,
-                                          pay["days"], runtime.referral_reward_days())
-        if not applied:                                 # параллельный /refund уже провёл
-            await m.answer(f"Платёж #{pay['id']} уже помечен возвращённым — дни не "
-                           "вычитаются повторно.")
-            return
-        await m.answer(f"↩️ Возвращено {pay['amount']:g}⭐ юзеру {uid}; "
-                       f"подписка скорректирована (−{_fmt_days(pay['days'])}).")
-        try:
-            await bot.send_message(uid, "↩️ Ваш платёж возвращён — Stars вернутся на "
-                                        "баланс Telegram. Спасибо, что попробовали нас.")
-        except Exception as e:                          # noqa: BLE001
-            log.warning("refund notify %s: %s", uid, e)
+        await checkout.refund_last_stars_payment(bot, int(parts[1]), m.answer)
 
     @dp.message(Command("review"))
     async def _review_cmd(m):
@@ -4963,7 +4883,7 @@ def main() -> None:
         except Exception as e:                             # noqa: BLE001 — таска не роняет процесс
             log.warning("игра: такт: %s", e)
 
-    async def _maintenance():
+    async def _mt_webapp_game():
         try:
             await _watch_webapp()
         except Exception as e:                         # noqa: BLE001 — сторож не роняет такт
@@ -4971,6 +4891,8 @@ def main() -> None:
         # игра «Лонг или шорт?» — следующий такт стартует, только когда прошлый закончился
         if _game_bg["task"] is None or _game_bg["task"].done():
             _game_bg["task"] = asyncio.create_task(_game_tick(), name="game")
+
+    async def _mt_backup():
         # автобэкап не подтверждён/устарел — алерт админу (троттлинг: не чаще раза в сутки)
         now_ = clock.utcnow_iso()
         if should_alert_backup_stale(runtime.last_backup_at(),
@@ -4998,6 +4920,9 @@ def main() -> None:
                 except Exception as e:                     # noqa: BLE001
                     log.warning("offsite stale алерт админу %s: %s", admin_id, e)
             await asyncio.to_thread(runtime.set_value, "last_offsite_alert_at", now_)
+
+    async def _mt_battery():
+        now_ = clock.utcnow_iso()
         # питание: Mac на батарее — бот живёт, пока не сядет (09.10: 3.5 дня простоя)
         try:
             batt = await asyncio.to_thread(_pmset_batt)
@@ -5019,6 +4944,9 @@ def main() -> None:
                 await asyncio.to_thread(runtime.set_value, "last_battery_alert_at", "")
         except Exception as e:                             # noqa: BLE001
             log.warning("battery check: %s", e)
+
+    async def _mt_poller_watch():
+        now_ = clock.utcnow_iso()
         # watchdog такта поллера: процесс жив (обслуживание тикает), но скан-цикл встал —
         # порог = 2× slack (полный пропущенный цикл + буфер, не единичный медленный тик)
         tick_stale = poller_tick_slack_seconds(runtime.timeframes()) * 2
@@ -5052,6 +4980,9 @@ def main() -> None:
                 except Exception as e:                     # noqa: BLE001
                     log.warning("data stale алерт админу %s: %s", admin_id, e)
             await asyncio.to_thread(runtime.set_value, "last_data_alert_at", now_)
+
+    async def _mt_pause():
+        now_ = clock.utcnow_iso()
         # пауза висит давно — напомнить админу (раз в сутки), чтобы молчание бота не
         # выглядело поломкой и не стоило недель без сигналов
         try:
@@ -5068,6 +4999,9 @@ def main() -> None:
                 await asyncio.to_thread(runtime.set_last_pause_reminder_at, now_)
         except Exception as e:                             # noqa: BLE001
             log.warning("pause reminder: %s", e)
+
+    async def _mt_judge():
+        now_ = clock.utcnow_iso()
         # сторож судьи: открытые сигналы, переросшие контрактный потолок жизни, значат, что
         # исход не скорится (дашборд копит фальшивый плавающий R) — алерт раз в 6ч
         try:
@@ -5089,6 +5023,8 @@ def main() -> None:
                 await asyncio.to_thread(runtime.set_value, "last_overdue_alert_at", now_)
         except Exception as e:                             # noqa: BLE001
             log.warning("overdue check: %s", e)
+
+    async def _mt_side_cooldown():
         # анти-кластерный тормоз: алерт админу ОДИН раз на вход стороны в кулдаун
         # (транзишен-детект через settings; при выходе из окна метка снимается)
         try:
@@ -5116,6 +5052,8 @@ def main() -> None:
                         runtime.set_side_cooldown_alerted, ",".join(sorted(now_in)))
         except Exception as e:                             # noqa: BLE001
             log.warning("side cooldown check: %s", e)
+
+    async def _mt_candidates_ttl():
         # TTL просроченных semiauto-кандидатов (готовим впрок — сейчас signal_mode=auto)
         try:
             expired_ids = await asyncio.to_thread(journal.expire_stale_candidates)
@@ -5123,6 +5061,8 @@ def main() -> None:
                 log.info("TTL: просрочено кандидатов: %s", expired_ids)
         except Exception as e:                             # noqa: BLE001
             log.warning("expire_stale_candidates: %s", e)
+
+    async def _mt_expire():
         # истёкшие подписки -> free + уведомление (точка максимального интента:
         # кнопки оплаты прямо в сообщении, не голый /subscribe — аудит 02.09)
         # конец триала — свой текст с личным итогом и 2 тарифами (аудит текстов 30.10, К-24),
@@ -5142,6 +5082,8 @@ def main() -> None:
                 log.warning("expire notify %s: %s", uid, e)
                 if _dead_recipient(e):
                     await asyncio.to_thread(payments.mark_blocked, uid)
+
+    async def _mt_renew_reminders():
         # напоминания о продлении (за 3 дня, единожды). mark_reminded ставится и при
         # сбое: заблокировавший бота платник ретраился каждые 60с все ~2.5 суток окна
         # (аудит 02.09; паттерн дрипа)
@@ -5156,6 +5098,8 @@ def main() -> None:
                 if _dead_recipient(e):
                     await asyncio.to_thread(payments.mark_blocked, row["tg_id"])
             await asyncio.to_thread(payments.mark_reminded, row["tg_id"])
+
+    async def _mt_usdt_activate():
         # автоактивация оплаченных USDT-инвойсов (уведомления изолированы per-юзер)
         try:
             activated = await asyncio.to_thread(payments.poll_cryptobot)
@@ -5169,6 +5113,8 @@ def main() -> None:
             except Exception as e:                     # noqa: BLE001
                 log.warning("usdt activate notify %s: %s", uid, e)
             await _reward_referrer(uid, paid_days)     # реф-награда за реальный USDT-платёж
+
+    async def _mt_usdt_claims():
         # эскалация зависших USDT-заявок (>6ч без /grant): пингуем один раз;
         # метка ставится безусловно — сбой доставки одному админу не даёт вечный повтор
         for claim in await asyncio.to_thread(payments.stale_usdt_claims, 6):
@@ -5184,6 +5130,8 @@ def main() -> None:
                 await asyncio.to_thread(payments.mark_claim_escalated, claim["id"])
             except Exception as e:                     # noqa: BLE001
                 log.warning("mark_claim_escalated #%s: %s", claim["id"], e)
+
+    async def _mt_trial_drip():
         # онбординг-дрип триала (мега-план MAX): день 1 / день 3 / за сутки до конца.
         # Оплатившие исключены в самом запросе; одна стадия на юзера за такт.
         # Протухшие (триал истёк до включения фичи) закрываются молча — без спама задним числом.
@@ -5205,6 +5153,8 @@ def main() -> None:
                 # стадию всё равно отмечаем: юзер с закрытой личкой не должен
                 # получать ретраи каждый час до конца триала
                 await asyncio.to_thread(payments.mark_trial_drip, uid, stage)
+
+    async def _mt_winback():
         # win-back: одно напоминание в первые 2 дня после истечения подписки. Персональный
         # одноразовый промокод wb<tg_id> (+7 дн, сгорает за 5) — конкретный повод вернуться
         # сейчас. Промокод выдаём ДО отправки; при сбое отправки всё равно mark_reminded,
@@ -5226,6 +5176,8 @@ def main() -> None:
             except Exception as e:                     # noqa: BLE001 — закрытая личка: не ретраить
                 log.warning("winback %s: %s", uid, e)
             await asyncio.to_thread(payments.mark_winback_reminded, uid)
+
+    async def _mt_watchlist():
         # авто-watchlist (мега-план MAX, ставка 3): раз в сутки пересобрать список по
         # ликвидности; новые символы — только через бэктест-гейт. Дефолт ВЫКЛ (флаг).
         now_iso = clock.utcnow_iso()
@@ -5266,6 +5218,8 @@ def main() -> None:
             finally:
                 # метка ставится и при сбое: не молотить биржу каждый час, повтор завтра
                 await asyncio.to_thread(runtime.set_last_watchlist_refresh_at, now_iso)
+
+    async def _mt_channel_posts():
         # живое табло: авто-обновляемый закреплённый пост статистики в канале (раз в 24ч).
         # Состояние (live_board_message_id) намеренно синхронизировано с ФАКТИЧЕСКИМ успехом
         # каждого Telegram-вызова по отдельности — иначе частичный сбой (нет прав на pin,
@@ -5374,10 +5328,8 @@ def main() -> None:
                 # видео-итог недели — админам в личку (публикация в соцсети — их решение);
                 # фоновой задачей: рендер ~30–60с не должен держать такт обслуживания
                 for admin_id in cfg.admin_ids:
-                    task = asyncio.create_task(
-                        _send_week_video(admin_id, *weekly_report_period(now_dt)))
-                    _BG_TASKS.add(task)
-                    task.add_done_callback(_BG_TASKS.discard)
+                    spawn(_send_week_video(admin_id, *weekly_report_period(now_dt)),
+                          name="week-video")
                 try:
                     rows = await asyncio.to_thread(journal.export_public_trades)
                     csv_bytes = await asyncio.to_thread(build_trackrecord_csv, rows)
@@ -5397,6 +5349,8 @@ def main() -> None:
                                               week_end.isoformat())
                 except Exception as e:                      # noqa: BLE001
                     log.warning("разбор недели: %s", e)
+
+    async def _mt_content_pack():
         # контент-пак за вчера — админам в личку, раз в сутки после 05:00 UTC (день закрыт,
         # к обеду есть что выложить). Маркер — ДО рендера: сбой не зациклит пак каждый такт,
         # повторить вручную — /pack. Фоновой задачей: рендер — минуты.
@@ -5404,16 +5358,14 @@ def main() -> None:
         p_day = (p_now - timedelta(days=1)).date().isoformat()
         if p_now.hour >= 5 and cfg.admin_ids and runtime.postmortem_last_day() != p_day:
             await asyncio.to_thread(runtime.set_postmortem_last_day, p_day)
-            task = asyncio.create_task(_send_postmortem(
-                list(cfg.admin_ids), date.fromisoformat(p_day)))
-            _BG_TASKS.add(task)
-            task.add_done_callback(_BG_TASKS.discard)
+            spawn(_send_postmortem(list(cfg.admin_ids), date.fromisoformat(p_day)),
+                  name="postmortem")
         if p_now.hour >= 5 and cfg.admin_ids and runtime.content_pack_last_day() != p_day:
             await asyncio.to_thread(runtime.set_content_pack_last_day, p_day)
-            task = asyncio.create_task(_send_content_pack(
-                list(cfg.admin_ids), date.fromisoformat(p_day)))
-            _BG_TASKS.add(task)
-            task.add_done_callback(_BG_TASKS.discard)
+            spawn(_send_content_pack(list(cfg.admin_ids), date.fromisoformat(p_day)),
+                  name="content-pack")
+
+    async def _mt_account_push():
         # «💼 счёт за вчера» юзерам — раз в сутки в утреннем окне 06–12 UTC (my_account.
         # push_due). Маркер дня — ДО рассылки: краш посреди не перешлёт всем повторно;
         # рассылка — фоновой задачей, как дайджест, чтобы не держать 60с-такт.
@@ -5422,9 +5374,9 @@ def main() -> None:
                  if runtime.account_push_enabled() else None)   # общий рубильник, дефолт выкл
         if a_day:
             await asyncio.to_thread(runtime.set_account_push_last_day, a_day)
-            task = asyncio.create_task(_send_account_pushes(a_now))
-            _BG_TASKS.add(task)
-            task.add_done_callback(_BG_TASKS.discard)
+            spawn(_send_account_pushes(a_now), name="account-push")
+
+    async def _mt_weekly_digest():
         # недельный ЛИЧНЫЙ дайджест подписчикам (ретеншн) — ВНЕ гейта канала: выключение
         # канала не должно молча убивать подписческую фичу (аудит-2 UX [4]). Отдельный
         # маркер от карточки; маркер ставим ДО рассылки: краш посреди рассылки не должен
@@ -5458,15 +5410,44 @@ def main() -> None:
                 # _maintenance блокировала бы 60с-цикл (пульс dead-man's switch, watchdog
                 # поллера, активацию оплат) на минуты (ревью 12.08). Маркер недели уже
                 # стоит — повторный вход в _maintenance рассылку не продублирует.
-                # Ссылка в _BG_TASKS: цикл событий держит задачи слабо — таску без ссылки
-                # сборщик мусора вправе прибить посреди рассылки (аудит надёжности 30.10)
-                d_task = asyncio.create_task(_send_digests(
-                    d_text, d_label, d_wk, d_st,
-                    d_start.isoformat(), d_end.isoformat()))
-                _BG_TASKS.add(d_task)
-                d_task.add_done_callback(_BG_TASKS.discard)
+                # spawn держит ссылку: таску без ссылки сборщик мусора вправе прибить
+                # посреди рассылки (аудит надёжности 30.10)
+                spawn(_send_digests(d_text, d_label, d_wk, d_st,
+                                    d_start.isoformat(), d_end.isoformat()),
+                      name="weekly-digest")
             except Exception as e:                          # noqa: BLE001
                 log.warning("недельный дайджест: %s", e)
+
+    # без этих блоков платящие не получают доступ или не теряют его вовремя: их сбой делает
+    # такт неудачным и гасит пульс dead-man (аудит кода 30.10, §3.6 п.4)
+    _MAINT_CRITICAL = frozenset({"истечение подписок", "активация USDT"})
+    _maint_guard = MaintenanceGuard(
+        lambda text: notify_admins(bot, cfg.admin_ids, text, what="алерт обслуживания"))
+
+    async def _maintenance() -> list[str]:
+        """Такт обслуживания: блоки по очереди, каждый за своей переборкой — устойчиво
+        падающий ранний блок больше не выключает следующие. -> имена упавших блоков."""
+        return await _maint_guard.run([
+            ("webapp и игра", _mt_webapp_game),
+            ("бэкап", _mt_backup),
+            ("питание", _mt_battery),
+            ("сторож поллера", _mt_poller_watch),
+            ("пауза", _mt_pause),
+            ("судья", _mt_judge),
+            ("тормоз стороны", _mt_side_cooldown),
+            ("TTL кандидатов", _mt_candidates_ttl),
+            ("истечение подписок", _mt_expire),
+            ("напоминания о продлении", _mt_renew_reminders),
+            ("активация USDT", _mt_usdt_activate),
+            ("заявки USDT", _mt_usdt_claims),
+            ("дрип триала", _mt_trial_drip),
+            ("win-back", _mt_winback),
+            ("авто-вотчлист", _mt_watchlist),
+            ("табло и недельные посты", _mt_channel_posts),
+            ("контент-пак", _mt_content_pack),
+            ("счёт за вчера", _mt_account_push),
+            ("недельный дайджест", _mt_weekly_digest),
+        ])
 
     async def _send_digests(d_text, d_label, d_wk, d_st, start_iso, end_iso):
         """Рассылка недельного дайджеста ВНЕ maintenance-цикла (create_task).
@@ -5743,10 +5724,8 @@ def main() -> None:
                     fired = await asyncio.to_thread(
                         alerts_mod.check_and_trigger, symbol,
                         max(prev, close), min(prev, close))
-                    if fired:                           # ссылка — от сборщика мусора
-                        a_task = asyncio.create_task(_push_alerts(fired))
-                        _BG_TASKS.add(a_task)
-                        a_task.add_done_callback(_BG_TASKS.discard)
+                    if fired:                           # spawn держит ссылку от сборщика мусора
+                        spawn(_push_alerts(fired), name="price-alerts")
             except Exception as e:                     # noqa: BLE001
                 log.warning("alerts %s: %s", symbol, e)
             rows = await asyncio.to_thread(journal.unfilled_open_signals, symbol)
@@ -5831,7 +5810,7 @@ def main() -> None:
         # (карточка/дайджест/табло — раз в сутки/неделю независимо от частоты цикла).
         while True:
             try:
-                await _maintenance()
+                failed = await _maintenance()
                 # executor V2 (демо BingX, флаг выкл по умолчанию): сверка журнал->биржа.
                 # Отдельный try: сбой биржи не должен глушить пульс dead-man's switch ниже.
                 executor_report: list = []
@@ -5843,19 +5822,20 @@ def main() -> None:
                             log.info("executor: %s", line)
                     except Exception:                   # noqa: BLE001 — цикл живёт всегда
                         log.exception("executor reconcile")
-                # пульс dead-man's switch ПОСЛЕ успешного цикла: упавшее обслуживание
-                # прекращает пульс -> внешний алерт (грейс healthchecks поглощает
-                # разовые сбои). Сеть/URL глотается внутри healthcheck_ping.
-                await asyncio.to_thread(healthcheck_ping, get_settings().healthcheck_url)
+                # пульс dead-man's switch ПОСЛЕ успешного цикла: сбой критичного блока
+                # (выдача и снятие доступа) прекращает пульс -> внешний алерт (грейс
+                # healthchecks поглощает разовые сбои); сбой прочих блоков пульс не гасит —
+                # о нём алертит MaintenanceGuard. Сеть/URL глотается внутри healthcheck_ping.
+                critical = _MAINT_CRITICAL.intersection(failed)
+                if critical:
+                    log.warning("пульс пропущен: упали критичные блоки %s", sorted(critical))
+                else:
+                    await asyncio.to_thread(healthcheck_ping, get_settings().healthcheck_url)
                 # алерты executor — ПОСЛЕ пульса и ОДНИМ сообщением на админа: таймауты
                 # Telegram не должны сдвигать пинг за грейс healthchecks (ревью 13.08)
                 if executor_report:
                     joined = "🤖 Executor:\n" + "\n".join(executor_report)
-                    for admin_id in cfg.admin_ids:
-                        try:
-                            await bot.send_message(admin_id, joined)
-                        except Exception:               # noqa: BLE001
-                            pass
+                    await notify_admins(bot, cfg.admin_ids, joined, what="отчёт executor")
                 # проверка решений вперёд (правила 24.10) — раз в ISO-неделю, маркер ДО отправки
                 _fy, _fw, _ = datetime.now(timezone.utc).isocalendar()
                 _fwk = f"{_fy}-W{_fw:02d}"
@@ -5868,11 +5848,9 @@ def main() -> None:
                     except Exception:                   # noqa: BLE001
                         log.exception("forward report")
                         _ftxt = None
-                    for admin_id in (cfg.admin_ids if _ftxt else ()):
-                        try:
-                            await bot.send_message(admin_id, _ftxt, parse_mode="HTML")
-                        except Exception:               # noqa: BLE001
-                            pass
+                    if _ftxt:
+                        await notify_admins(bot, cfg.admin_ids, _ftxt, parse_mode="HTML",
+                                            what="проверка решений вперёд")
                 # недельный отчёт «исполнение vs журнал» — админам. Маркер недели
                 # СТАВИТСЯ ДО отправки (принцип трек-рекорда: пропуск лучше дубля)
                 if runtime.executor_enabled():
@@ -5890,12 +5868,8 @@ def main() -> None:
                             log.exception("execution report")
                             _txt = None
                         if _txt:
-                            for admin_id in cfg.admin_ids:
-                                try:
-                                    await bot.send_message(admin_id, _txt,
-                                                           parse_mode="HTML")
-                                except Exception:       # noqa: BLE001
-                                    pass
+                            await notify_admins(bot, cfg.admin_ids, _txt, parse_mode="HTML",
+                                                what="отчёт исполнения")
                 # og-карточка дашборда (превью ссылки с эквити): раз в сутки, через
                 # общий семафор рендеров; webapp отдаёт файл по /og.png
                 try:
@@ -5921,11 +5895,7 @@ def main() -> None:
                     _ERRBUF.buf.clear()
                     err_msg = "🚨 Ошибки бота (см. журнал сервера):\n" + \
                               "\n".join(f"— {u}" for u in uniq)
-                    for admin_id in cfg.admin_ids:
-                        try:
-                            await bot.send_message(admin_id, err_msg)
-                        except Exception:               # noqa: BLE001
-                            pass
+                    await notify_admins(bot, cfg.admin_ids, err_msg, what="ERROR-буфер")
             except Exception:                          # noqa: BLE001 — цикл живёт всегда
                 log.exception("maintenance-цикл")
             await asyncio.sleep(60)
@@ -5941,15 +5911,13 @@ def main() -> None:
             return
         name = task.get_name()
         log.error("фоновая таска %s умерла: %r", name, exc)
-        for admin_id in cfg.admin_ids:
-            try:
-                _send_raw_telegram_message(
-                    cfg.tg_bot_token, admin_id,
-                    f"🔥 Фоновая таска «{name}» умерла: {exc!r}\n"
-                    f"Процесс жив, но «{name}» не работает — нужен рестарт "
-                    "(launchctl kickstart -k gui/$UID/com.rsirange.bot).")
-            except Exception:                          # noqa: BLE001 — алерт не роняет колбэк
-                log.exception("не удалось отправить алерт о смерти таски %s", name)
+        text = (f"🔥 Фоновая таска «{name}» умерла: {exc!r}\n"
+                f"Процесс жив, но «{name}» не работает — нужен рестарт "
+                "(launchctl kickstart -k gui/$UID/com.rsirange.bot).")
+        # HTTP — в потоке: синхронный urlopen (10 с × админы) прямо в колбэке замораживал
+        # event loop ровно тогда, когда сеть деградировала и таски умирали (аудит кода 30.10)
+        spawn(asyncio.to_thread(_send_raw_alerts, cfg.tg_bot_token, cfg.admin_ids, text),
+              name=f"alert-died-{name}")
 
     async def _main():
         try:

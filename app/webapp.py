@@ -719,8 +719,7 @@ def api_admin() -> Response:
     funnel_row = db.query_one(
         "SELECT COUNT(*) AS joined, "
         "SUM(trial_granted_at IS NOT NULL) AS trial_ever, "
-        "SUM(EXISTS(SELECT 1 FROM payments p WHERE p.tg_id=users.tg_id AND p.status='paid')) "
-        "  AS paid_ever, "
+        f"SUM({payments.paid_ever_sql('users')}) AS paid_ever, "
         "SUM((SELECT COUNT(*) FROM payments p WHERE p.tg_id=users.tg_id "
         "     AND p.status='paid') >= 2) AS renewed "
         "FROM users")
@@ -1044,9 +1043,7 @@ def _sub_info(uid: int) -> dict:
                              .total_seconds() / 86400), 2)
         except ValueError:
             left = None
-    paid = db.query_one("SELECT COUNT(*) AS n FROM payments WHERE tg_id=? AND status='paid'",
-                        (uid,))
-    kind = ("paid" if paid and paid["n"] else
+    kind = ("paid" if payments.has_paid_ever(uid) else
             "trial" if u is not None and u["trial_granted_at"] else
             "grant" if left else "free")
     return {"until": (until or "")[:10] or None, "days_left": left, "kind": kind,
