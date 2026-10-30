@@ -4425,6 +4425,11 @@ def main() -> None:
         bars = fetch_history(sym, tf, int(age // tf_s) + 3, exchange_id=cfg.exchange_id)
         if scale != 1.0:
             bars[["open", "high", "low", "close"]] /= scale
+        # «81,500» — 81 500 или 81.5: прочтение выбирает цена рынка в момент поста
+        picked = signal_check.resolve_reading(sig, bars, pd.Timestamp(posted))
+        if picked is None:
+            return signal_check.render_unsure(sig)
+        sig = picked
         res = signal_check.evaluate(sig, bars, pd.Timestamp(posted))
         log.info("проверка сигнала: %s %s -> %s (целей %d)", sig.coin, sig.side,
                  res.status, res.hit)

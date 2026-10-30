@@ -412,6 +412,19 @@ def test_ambiguous_bar_counts_as_stop():
     assert "считаем стоп (таких: 1)" in ca.render_audit("testsig", None, agg)
 
 
+def test_comma_thousands_resolved_by_market_or_left_out():
+    """«81,500»: прочтение выбирает цена рынка в момент поста; не решила и она — формат
+    боту непонятен, сигнал в итог не входит (а не проверяется по чужим уровням)."""
+    post = _post(1, T0, "#AAA/USDT LONG\nВход: 81,500\nСтоп: 80,900\nTP1: 83,000")
+    now = T0 + pd.Timedelta("1D")
+    hit = _bars([(81600, 81700, 81400, 81500), (81500, 83100, 81400, 83000)])
+    agg = ca.audit([post], {"AAA/USDT:USDT": hit}, now)
+    assert (agg["signals"], agg["checked"], agg["tp1"], agg["unparsed"]) == (1, 1, 1, 0)
+    far = _bars([(5.0, 5.1, 4.9, 5.0)])
+    agg = ca.audit([post], {"AAA/USDT:USDT": far}, now)
+    assert (agg["signals"], agg["checked"], agg["unparsed"]) == (0, 0, 1)
+
+
 # --- тексты и карточка ---
 
 _LEAKS = ("6226", "LTF", "1:1", "SMC", "sub-score", "суб-скор")

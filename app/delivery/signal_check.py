@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 import pandas as pd
 
@@ -70,21 +71,108 @@ class ParsedSignal:
     entry_hi: float | None
     stop: float
     targets: list[float] = field(default_factory=list)
+    # другое прочтение неоднозначных чисел («81,500» — 81 500 или 81.5): выбирает
+    # resolve_reading по цене рынка в момент поста
+    alternatives: list[ParsedSignal] = field(default_factory=list)
+    unsure: bool = False            # основное прочтение сам пост не подтверждает
 
     @property
     def symbol(self) -> str:
         return f"{self.coin}/USDT:USDT"
 
 
-def _normalize(text: str) -> str:
+# Форматы цен VIP-каналов (30.10.2026: «81,500» читалось как 81.5 — запятая-дробь применялась
+# ко всему тексту без единой точки; «$81,500.5» распадался на 81 и 500.5; «64000,65000» —
+# 64000.65). Число с разделителями внутри читается по стилю поста: «точка — дробь, запятая —
+# тысячи» (81,500.5) или наоборот (0,0345 · 81.500,5). ReDoS: начало числа — только с начала
+# серии «(?<![\d.,])», разделитель обязан стоять между цифрами.
+_SEP_NUM = re.compile(r"(?<![\d.,])\d+(?:[.,]\d+)+")
+_US = re.compile(r"\d{1,3}(?:,\d{3})+\.\d+")          # 81,500.5
+_EU = re.compile(r"\d{1,3}(?:\.\d{3})+,\d+")          # 81.500,5
+_KILO = re.compile(r"(?<![\d.,])(\d+(?:\.\d+)?)[kKкК](?!\w)")    # 81.5k -> 81500
+
+
+def _read_token(tok: str) -> tuple[str, str, str | None]:
+    """Число с разделителями -> (прочтение «точка — дробь», прочтение «запятая — дробь», улика).
+
+    Улика — стиль, который число доказывает само: 'dot' (81,500.5 · 0.0345 · 1,234,567),
+    'comma' (0,0345 · 64,25 · 1.234.567); None — само не решает: «81,500» — это 81 500 или
+    81.5, «81.500» — 81.5 или 81 500. Склеенный список («1.2,1.3» · «64000,65000») — числа
+    через «, »."""
+    if "." in tok and "," in tok:
+        if _US.fullmatch(tok):
+            v = tok.replace(",", "")
+            return v, v, "dot"
+        if _EU.fullmatch(tok):
+            v = tok.replace(".", "").replace(",", ".")
+            return v, v, "comma"
+        v = tok.replace(",", ", ")
+        return v, v, None
+    sep = "," if "," in tok else "."
+    parts = tok.split(sep)
+    head, tail = parts[0], parts[1:]
+    grouped = 1 <= len(head) <= 3 and head[0] != "0" and all(len(p) == 3 for p in tail)
+    if len(tail) > 1:                               # 1,234,567 / 1.234.567 — только тысячи
+        if grouped:
+            v = "".join(parts)
+            return v, v, "dot" if sep == "," else "comma"
+        v = tok.replace(",", ", ")
+        return v, v, None
+    frac = tail[0]
+    if grouped:                                     # ровно три цифры после — двояко
+        thousands, decimal = head + frac, f"{head}.{frac}"
+        return (thousands, decimal, None) if sep == "," else (decimal, thousands, None)
+    if sep == ".":
+        return tok, tok, "dot"
+    if len(head) >= 4 and len(frac) >= 4 and head[0] != "0":
+        v = f"{head}, {frac}"                       # 64000,65000 — список, не дробь
+        return v, v, None
+    v = f"{head}.{frac}"
+    return v, v, "comma"
+
+
+def _kilo(m: re.Match) -> str:
+    s = format(Decimal(m.group(1)) * 1000, "f")
+    return s.rstrip("0").rstrip(".") if "." in s else s
+
+
+def _readings(text: str) -> tuple[str, str | None, bool]:
+    """Нормализованный текст в двух прочтениях. -> (основное, другое | None, unsure).
+
+    Стиль поста задают числа, однозначные сами по себе: все за «точку» — основное прочтение
+    «точка — дробь», все за «запятую» — «запятая — дробь». Улик нет или они спорят — основным
+    берём «точку» (так пишет большинство каналов); если двояка при этом запятая («81,500»),
+    основное прочтение пост не подтверждает (unsure) — решит цена рынка (resolve_reading)."""
     t = text.replace(" ", " ").replace("–", "-").replace("—", "-")
-    # «0,4512» -> «0.4512», только если в тексте нет десятичных точек (иначе запятая —
-    # разделитель списка целей: «1.2, 1.3, 1.4»)
-    if not re.search(r"\d\.\d", t):
-        t = re.sub(r"(\d),(\d)", r"\1.\2", t)
-    # «64 200» -> «64200»; не трогаем «TP1 100» (перед числом буква) и «0.5 100»
-    t = re.sub(r"(?<![\w.])(\d{1,3}) (\d{3})\b", r"\1\2", t)
-    return t
+    spans = []
+    evidence = set()
+    comma_doubt = False
+    for m in _SEP_NUM.finditer(t):
+        dot, comma, ev = _read_token(m.group())
+        spans.append((m.start(), m.end(), dot, comma))
+        if ev:
+            evidence.add(ev)
+        comma_doubt = comma_doubt or (dot != comma and "," in m.group())
+    style = next(iter(evidence)) if len(evidence) == 1 else None
+
+    def build(dot_style: bool) -> str:
+        out, pos = [], 0
+        for start, end, dot, comma in spans:
+            out += [t[pos:start], dot if dot_style else comma]
+            pos = end
+        s = "".join(out) + t[pos:]
+        # «64 200» -> «64200»; не трогаем «TP1 100» (перед числом буква) и «0.5 100»
+        s = re.sub(r"(?<![\w.])(\d{1,3}) (\d{3})\b", r"\1\2", s)
+        return _KILO.sub(_kilo, s)
+
+    primary = build(style != "comma")
+    other = build(style == "comma")
+    return primary, (other if other != primary else None), style is None and comma_doubt
+
+
+def _normalize(text: str) -> str:
+    """Основное прочтение текста (см. _readings)."""
+    return _readings(text)[0]
 
 
 _PCT = re.compile(r"(?<!\d)" + _NUM + r"\s*%")                     # проценты — не цены
@@ -136,8 +224,27 @@ def _side(t: str) -> str | None:
 
 def parse_signal(text: str) -> ParsedSignal | None:
     """Монета, сторона, вход (одно число или зона), стоп, цели. Без монеты/стороны/стопа
-    или с несогласованной геометрией (стоп не по ту сторону входа) -> None."""
-    t = _normalize((text or "")[:MAX_TEXT_CHARS])
+    или с несогласованной геометрией (стоп не по ту сторону входа) -> None.
+
+    Неоднозначные числа («81,500») разбираются в обоих прочтениях: основное — результат,
+    другое — в .alternatives (выберет resolve_reading по цене рынка). Если основное не
+    сходится геометрически, верно другое — оно и возвращается."""
+    primary, other_text, unsure = _readings((text or "")[:MAX_TEXT_CHARS])
+    sig = _parse_normalized(primary)
+    other = _parse_normalized(other_text) if other_text is not None else None
+    if sig is None:
+        return other
+    if other is not None and _levels(other) != _levels(sig):
+        sig.alternatives = [other]
+        sig.unsure = unsure
+    return sig
+
+
+def _levels(s: ParsedSignal) -> tuple:
+    return s.entry_lo, s.entry_hi, s.stop, tuple(s.targets)
+
+
+def _parse_normalized(t: str) -> ParsedSignal | None:
     coin, side = _coin(t), _side(t)
     if not coin or not side:
         return None
@@ -201,6 +308,50 @@ def parse_signal(text: str) -> ParsedSignal | None:
         targets = sorted({x for x in targets if x < (lo if lo is not None else stop)},
                          reverse=True)
     return ParsedSignal(coin, side, lo, hi, stop, targets[:10])
+
+
+def _ref_price(bars: pd.DataFrame | None, posted: pd.Timestamp) -> float | None:
+    """Цена рынка в момент поста: открытие первого бара после него (иначе последнее закрытие)."""
+    if bars is None or bars.empty:
+        return None
+    after = bars[bars["dt"] >= posted]
+    v = float(after["open"].iloc[0]) if not after.empty else float(bars["close"].iloc[-1])
+    return v if v > 0 else None
+
+
+def _near_market(s: ParsedSignal, ref: float) -> bool:
+    """Вход (середина зоны) и стоп — в пределах ×2 от цены рынка: прочтения различаются в
+    тысячу раз, так что граница с запасом и на широкий стоп, и на движение до поста."""
+    levels = [s.stop]
+    if s.entry_lo is not None and s.entry_hi is not None:
+        levels.append((s.entry_lo + s.entry_hi) / 2)
+    return all(0.5 <= x / ref <= 2.0 for x in levels)
+
+
+def resolve_reading(sig: ParsedSignal, bars: pd.DataFrame | None,
+                    posted: pd.Timestamp) -> ParsedSignal | None:
+    """Выбор прочтения неоднозначных чисел по цене рынка в момент поста: подходит ровно одно
+    — оно. Рынок не рассудил: основное, если его подтверждает сам пост, иначе None — честнее
+    не проверять, чем проверить не тот сигнал. Без альтернатив — sig как есть."""
+    if not sig.alternatives:
+        return sig
+    ref = _ref_price(bars, posted)
+    if ref is not None:
+        fits = [s for s in (sig, *sig.alternatives) if _near_market(s, ref)]
+        if len(fits) == 1:
+            return fits[0]
+    return None if sig.unsure else sig
+
+
+def render_unsure(sig: ParsedSignal) -> str:
+    """Ответ, когда прочтение цен не решили ни пост, ни рынок (resolve_reading -> None)."""
+    def level(s: ParsedSignal) -> str:
+        return _price(s.entry_lo if s.entry_lo is not None else s.stop)
+    alt = sig.alternatives[0] if sig.alternatives else sig
+    return (f"🔎 Не понял формат цен в сигнале по {esc(sig.coin)}: уровень читается и как "
+            f"<code>{level(sig)}</code>, и как <code>{level(alt)}</code> (запятая — это "
+            "тысячи или дробь?), а цена монеты в момент поста не подсказала. Такой пост "
+            "проверить не могу — перешлите другой сигнал.")
 
 
 def pick_timeframe(age_s: float) -> str | None:
