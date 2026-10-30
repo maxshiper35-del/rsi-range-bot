@@ -24,7 +24,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from app import db
+from app import db, runtime
 
 DEFAULT_START_USD = 1000.0
 DEFAULT_RISK_PCT = 1.0
@@ -339,4 +339,6 @@ def to_payload(acc: Account, push: bool, items: int = 40) -> dict:
                    "d": s.closed_at.strftime("%Y-%m-%dT%H:%M")}
                   for s in reversed(acc.steps[-items:])],
         "push": push,
+        # общий рубильник утреннего отчёта: выкл — Mini App прячет переключатель (не обещать)
+        "push_on": runtime.account_push_enabled(),
     }

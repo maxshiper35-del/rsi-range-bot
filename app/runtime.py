@@ -291,6 +291,14 @@ def set_account_push_last_day(day: str) -> None:
     set_value("account_push_last_day", day)
 
 
+def account_push_enabled() -> bool:
+    """Общий рубильник утреннего «💼 счёт за вчера» (личная отписка — users.account_push).
+    Дефолт ВЫКЛ (30.10): новая ежедневная рассылка всем, включая free, в неделю конца триала
+    у 84 новичков, чьи виртуальные счета сейчас в минусе, — решение владельца. Включает
+    админ: /account push on."""
+    return bool(_num("account_push_enabled", int, 0))
+
+
 def affiliate_url() -> str:
     """Партнёрская ссылка биржи ('' = блоки скрыты) — /affiliate у админа.
     Монетизация без подписки (пункт PR-кита): реф в /about, /start и закрепе."""

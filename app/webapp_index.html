@@ -1355,8 +1355,8 @@ function renderAccount(noAnim) {
     <div class="actions"><button class="btn primary" data-acsave="1" style="flex:1">Пересчитать счёт</button>
       ${a.is_default ? "" : `<button class="btn" data-acreset="1">Сбросить</button>`}</div>
     <div class="foot-note">Личные сигналы в боте посчитают объём позиции от этих же депозита и риска.</div>
-    <div class="set" style="margin-top:14px;border-top:1px solid var(--line2);padding-top:14px"><div class="lbl">Утренний отчёт в личку<small>около 06:00 UTC — что вчерашние сделки сделали со счётом (только если они были)</small></div>
-      <div class="tgl ${a.push ? "on" : ""}" data-acpush="1" role="switch" aria-checked="${!!a.push}" aria-label="Утренний отчёт" tabindex="0"></div></div>
+    ${a.push_on === false ? "" : `<div class="set" style="margin-top:14px;border-top:1px solid var(--line2);padding-top:14px"><div class="lbl">Утренний отчёт в личку<small>около 06:00 UTC — что вчерашние сделки сделали со счётом (только если они были)</small></div>
+      <div class="tgl ${a.push ? "on" : ""}" data-acpush="1" role="switch" aria-checked="${!!a.push}" aria-label="Утренний отчёт" tabindex="0"></div></div>`}
   </section>`);
   h += sec(`<div class="foot">Это расчёт по опубликованным сделкам, не реальный счёт: сложный процент от текущего баланса, комиссии и проскальзывание не учтены, сделки до твоего прихода не входят. ⚠ Не финансовый совет. Прошлые результаты не определяют будущие.</div>`);
   app.innerHTML = h;

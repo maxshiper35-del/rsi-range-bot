@@ -197,3 +197,20 @@ def test_push_recipients_opt_out_and_blocked(fresh_db):
     assert M.push_enabled(2) is False
     M.set_push(2, True)
     assert M.push_recipients() == [1, 2]
+
+
+def test_account_push_master_switch_default_off(fresh_db):
+    """30.10: утренний пуш всем — решение владельца; по умолчанию выкл, включает /account push on.
+    Mini App получает push_on и прячет переключатель, пока рубильник выкл."""
+    from datetime import datetime, timezone
+
+    from app import runtime
+    from app.delivery import my_account, payments
+    assert runtime.account_push_enabled() is False
+    payments.register_user(1)
+    acc = my_account.account_for(1, now=datetime(2026, 10, 30, 7, tzinfo=timezone.utc))
+    assert acc is not None
+    assert my_account.to_payload(acc, True)["push_on"] is False
+    runtime.set_value("account_push_enabled", 1)
+    assert runtime.account_push_enabled() is True
+    assert my_account.to_payload(acc, True)["push_on"] is True

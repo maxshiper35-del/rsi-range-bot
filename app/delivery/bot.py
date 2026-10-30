@@ -1443,8 +1443,7 @@ USER_COMMANDS = [
     ("promo", "применить промокод: /promo <код>"),
     ("referral", "пригласить друга и получить дни подписки"),
     ("depo", "твой объём в каждом сигнале: /depo <депозит$> [риск%]"),
-    ("account", "мой счёт в $ по всем сигналам с твоего прихода "
-                "(/account off — без утреннего отчёта)"),
+    ("account", "мой счёт в $ по всем сигналам с твоего прихода"),
     ("mycard", "карточка твоего итога по отмеченным сделкам"),
     ("alert", "бесплатный прайс-алерт: /alert BTC 65000"),
     ("check", "проверить чужой сигнал: перешлите пост из любого канала"),
@@ -2309,6 +2308,16 @@ def main() -> None:
 
     @dp.message(Command("account"))
     async def _account_cmd(m):
+        parts = (m.text or "").split()
+        if len(parts) >= 2 and parts[1].lower() == "push" and _is_admin(m):
+            # общий рубильник утреннего отчёта (runtime.account_push_enabled, дефолт выкл)
+            if len(parts) == 3 and parts[2].lower() in ("on", "off"):
+                await asyncio.to_thread(runtime.set_value, "account_push_enabled",
+                                        1 if parts[2].lower() == "on" else 0)
+            state = "включён" if runtime.account_push_enabled() else "выключен"
+            await m.answer(f"Утренний «💼 счёт за вчера» всем: {state}. "
+                           "/account push on | off")
+            return
         action = parse_account_args(m.text)
         if action is None:
             await m.answer("Формат: <code>/account</code> — счёт; <code>/account off</code> "
@@ -2321,6 +2330,10 @@ def main() -> None:
         on = action == "on"
         await asyncio.to_thread(payments.register_user, m.from_user.id, m.from_user.username)
         await asyncio.to_thread(my_account.set_push, m.from_user.id, on)
+        if not runtime.account_push_enabled():
+            # рубильник выкл — не обещать отчёт, которого не будет; выбор юзера сохранён
+            await m.answer("Утренний отчёт пока не рассылается — счёт всегда тут: /account.")
+            return
         await m.answer("🔔 Утренний отчёт включён: около 06:00 UTC — что вчерашние сделки "
                        "сделали с твоим счётом (если они были)." if on else
                        "🔕 Утренний отчёт выключен. Счёт — по-прежнему тут: /account. "
@@ -5316,7 +5329,8 @@ def main() -> None:
         # push_due). Маркер дня — ДО рассылки: краш посреди не перешлёт всем повторно;
         # рассылка — фоновой задачей, как дайджест, чтобы не держать 60с-такт.
         a_now = datetime.now(timezone.utc)
-        a_day = my_account.push_due(a_now, runtime.account_push_last_day())
+        a_day = (my_account.push_due(a_now, runtime.account_push_last_day())
+                 if runtime.account_push_enabled() else None)   # общий рубильник, дефолт выкл
         if a_day:
             await asyncio.to_thread(runtime.set_account_push_last_day, a_day)
             task = asyncio.create_task(_send_account_pushes(a_now))
