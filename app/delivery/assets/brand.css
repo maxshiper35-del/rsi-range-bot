@@ -1,0 +1,66 @@
+/* RSI Range — бренд-токены карточек, v5 «терминал» (docs/design/design-system.md).
+   Общий блок для ВСЕХ PNG-шаблонов graphics.py (и для любого нового шаблона):
+   graphics.brand_css() = @font-face (встроенные WOFF2, base64) + этот файл.
+   Палитра совпадает с Mini App v7 (app/webapp_index.html): одна тёмная семья,
+   один бренд-акцент (оранжевый — только знак бренда и warn, данные им не красим),
+   пара роста/падения #1f9e6e/#f6465d (AA на --bg и --panel, вторичное кодирование
+   знаками +/−, заливкой/контуром — не только цветом). */
+:root{
+  color-scheme:dark;
+  /* поверхность: одна семья — нейтрали Mini App v7 (bg, s1, s2, s3) */
+  --bg:#08090b; --panel:#0f1115; --panel-2:#15181d; --line:#1c2026; --grid:#15181d;
+  /* текст (контраст к --bg): ink ×17, ink-2 ×8.6 — весь читаемый вторичный текст,
+     ink-3 ×4.2 — оси, подписи от 17px, декор; не для мелкого основного текста */
+  --ink:#eef0f3; --ink-2:#a3abb6; --ink-3:#6c7480;
+  /* семантика исхода */
+  --pos:#1f9e6e; --neg:#f6465d; --zero:#3a414a;
+  --pos-bg:rgba(31,158,110,.14); --neg-bg:rgba(246,70,93,.13);
+  /* единственный акцент */
+  --acc:#f7a600; --acc-bg:rgba(247,166,0,.12);
+  /* шрифты: встроенные сабсеты, офлайн и одинаково на маке и на сервере */
+  --sans:"RR Sans",Inter,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:"RR Mono","IBM Plex Mono",ui-monospace,Menlo,monospace;
+  /* типошкала (CSS px при ширине карточки 1200; рендер @2x) */
+  --t-hero:164px; --t-d1:56px; --t-d2:38px; --t-title:26px; --t-body:19px;
+  --t-meta:16px; --t-label:13px;
+  /* отступы: сетка 4/8 */
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px; --s7:48px; --s8:64px;
+  /* радиусы: плотнее, чем в Mini App (карточка в ленте ужата ×0.33) */
+  --r-sm:6px; --r:10px; --r-lg:16px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:var(--bg)}
+body{font-family:var(--sans);color:var(--ink);-webkit-font-smoothing:antialiased;
+  text-rendering:geometricPrecision;font-variant-numeric:tabular-nums}
+
+/* знак + словесный знак: оранжевый квадрат и «RSI RANGE» моноширинным */
+.rr-wm{display:inline-flex;align-items:center;gap:12px;font:700 21px/1 var(--mono);
+  letter-spacing:.16em;text-transform:uppercase;color:var(--ink);white-space:nowrap}
+.rr-wm::before{content:"";flex:0 0 auto;width:16px;height:16px;border-radius:3px;
+  background:var(--acc)}
+.rr-handle{font:500 16px/1 var(--sans);letter-spacing:0;text-transform:none;color:var(--ink-2)}
+
+/* надзаголовок / подпись метрики */
+.rr-label{font:600 var(--t-label)/1.25 var(--sans);letter-spacing:.14em;
+  text-transform:uppercase;color:var(--ink-2);font-feature-settings:"case" 1}
+
+/* числа: всегда моно; знак исхода — цветом И символом +/− */
+.rr-num{font-family:var(--mono);font-weight:700;letter-spacing:-.03em;
+  font-variant-numeric:tabular-nums}
+.rr-pos{color:var(--pos)} .rr-neg{color:var(--neg)} .rr-zero{color:var(--ink)}
+
+/* панель терминала: заливка + hairline, без теней и градиентов */
+.rr-panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg)}
+
+/* сторона сделки */
+.rr-side{display:inline-flex;align-items:center;gap:7px;padding:7px 12px 7px 10px;
+  border-radius:var(--r);font:700 15px/1 var(--mono);letter-spacing:.08em}
+.rr-side.long{background:var(--pos-bg);color:var(--pos);box-shadow:inset 0 0 0 1px rgba(31,158,110,.5)}
+.rr-side.short{background:var(--neg-bg);color:var(--neg);box-shadow:inset 0 0 0 1px rgba(246,70,93,.5)}
+
+/* единый футер: «@бот · исход по ценам биржи · Не финансовый совет» + штамп */
+.rr-foot{display:flex;align-items:center;justify-content:space-between;gap:var(--s5);
+  padding-top:var(--s4);border-top:1px solid var(--line);
+  font:500 var(--t-meta)/1.35 var(--sans);color:var(--ink-2)}
+.rr-foot b{color:var(--ink);font-weight:600}
+.rr-foot .rr-stamp{font:400 15px/1.35 var(--mono);color:var(--ink-2);white-space:nowrap}
