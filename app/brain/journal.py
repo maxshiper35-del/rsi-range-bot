@@ -166,9 +166,15 @@ def _trail_rule() -> dict | None:
     act = runtime.trail_activate_r()
     if act <= 0:
         return None
-    return {"activate_r": act, "distance_r": runtime.trail_distance_r(),
-            "tp_exit": not runtime.trail_only_exit(),
-            "max_hold_hours": runtime.trail_max_hold_hours()}
+    rule: dict = {"activate_r": act, "distance_r": runtime.trail_distance_r(),
+                  "tp_exit": not runtime.trail_only_exit(),
+                  "max_hold_hours": runtime.trail_max_hold_hours()}
+    # версия судьи (30.10): "1m" — выход по минутным свечам (app.brain.judge_1m). Без ключа —
+    # часовой судья, как у всех прежних сигналов. Ключ входит в config_version через это же
+    # правило, поэтому когорты forward_check разных судей не смешиваются
+    if runtime.trail_judge_1m():
+        rule["judge"] = "1m"
+    return rule
 
 
 def _config_version() -> str | None:
@@ -744,9 +750,100 @@ def _trail_of(row) -> dict | None:
     except (TypeError, ValueError):
         be_trig, be_lock = 0.0, 0.0
     # tp_exit отсутствует в снапшотах первой версии трейлинга -> True (тейк закрывал сделку)
+    # judge: "1m" — минутный судья (30.10), иначе часовой — так судились все прежние сигналы
     return {"activate_r": act, "distance_r": dist,
             "tp_exit": bool(t.get("tp_exit", True)), "max_hold_hours": max_hold,
-            "be_trigger_r": be_trig, "be_lock_r": be_lock}
+            "be_trigger_r": be_trig, "be_lock_r": be_lock,
+            "judge": "1m" if t.get("judge") == "1m" else "1h"}
+
+
+def trail_judge_1m_since() -> str | None:
+    """created_at первого опубликованного сигнала, который судится по минутным свечам
+    (trail.judge="1m" в снапшоте), либо None — для строки о методике в /stats, /about,
+    /trackrecord. Тени и кандидаты не считаются: дата должна быть датой публичного журнала."""
+    row = db.query_one(
+        "SELECT MIN(created_at) AS a FROM signals WHERE snapshot_json LIKE ? "
+        "AND status NOT IN ('rejected', 'candidate')", ('%"judge": "1m"%',))
+    return row["a"] if row and row["a"] else None
+
+
+# провайдер минуток: (symbol, start_ms, end_ms) -> np.ndarray (n, 5) | None. Подменяется в
+# тестах; по умолчанию — кэш + докачка с биржи (app.data.minute_bars.load_window)
+_MINUTE_BARS = None
+
+
+def _minutes(symbol: str, start_ms: int, end_ms: int):
+    if _MINUTE_BARS is not None:
+        return _MINUTE_BARS(symbol, start_ms, end_ms)
+    from app.data.minute_bars import load_window
+    from app.logging_conf import get_logger
+    return load_window(symbol, start_ms, end_ms, log=get_logger("journal"))
+
+
+def _iso_ms(ms: int) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat()
+
+
+def _outcome_from_minutes(row, trail: dict, state: dict | None = None) -> tuple | None:
+    """Исход сигнала с trail.judge="1m" — минутным судьёй (app.brain.judge_1m) по закрытым
+    минутам с закрытия решающего бара. Тот же контракт ответа, что у _outcome_from_bars:
+    -> (status, event, result_r|None, exit_price|None, fill_dt_iso|None, exit_dt_iso|None)
+       | None (ждём: входа нет / данных нет / минутки недоступны).
+
+    Минуток нет (сеть, биржа) — сделка остаётся open до следующего такта, WARNING в лог; по
+    часовому бару такой сигнал не судится никогда. Зафиксированный ранее вход (стрим) не
+    истекает: если минутки касания не показывают, ждём и предупреждаем."""
+    import pandas as pd
+
+    from app.brain.judge_1m import HOUR_MS, MIN_MS, judge_path
+    from app.brain.smc_setups import SMCEngine
+    from app.logging_conf import get_logger
+
+    log = get_logger("journal")
+    entry, stop, side = row["entry"], row["stop"], row["side"]
+    if abs(entry - stop) <= 0:
+        return None
+    created = pd.to_datetime(row["created_at"], utc=True)
+    decision_ms = (int(created.value // 1_000_000)
+                   + SMCEngine.TF_MINUTES.get(row["timeframe"], 60) * MIN_MS)
+    fill_until_ms = decision_ms + int(MAX_WAIT_HOURS * HOUR_MS)
+    now_ms = int(clock.utcnow().timestamp() * 1000) // MIN_MS * MIN_MS
+    if now_ms <= decision_ms:
+        return None
+    bars = _minutes(row["symbol"], decision_ms, now_ms)
+    if bars is None or len(bars) == 0:
+        log.warning("сигнал #%s %s: минуток для судьи нет (окно %s–%s) — ждём следующий такт",
+                    row["id"], row["symbol"], _iso_ms(decision_ms), _iso_ms(now_ms))
+        return None
+    v = judge_path(entry, stop, side, bars, decision_ms=decision_ms,
+                   fill_until_ms=fill_until_ms, act_r=trail["activate_r"],
+                   dist_r=trail["distance_r"], max_hold_h=trail["max_hold_hours"],
+                   tp=row["tp1"], tp_exit=trail["tp_exit"],
+                   be_trigger_r=trail.get("be_trigger_r", 0.0),
+                   be_lock_r=trail.get("be_lock_r", 0.0), gap_open=True)
+    persisted_fill = row["filled_at"] if "filled_at" in row.keys() else None
+    if v.event == "waiting":
+        return None
+    if v.event == "nofill":
+        if persisted_fill:
+            log.warning("сигнал #%s %s: вход зафиксирован %s, а минутки касания входа не "
+                        "показывают — не истекаем, ждём", row["id"], row["symbol"],
+                        persisted_fill)
+            return None
+        return ("expired", "expired", None, None, None, _iso_ms(fill_until_ms))
+    assert v.fill_ms is not None
+    fill_iso = _iso_ms(v.fill_ms)
+    if v.event == "open":
+        if state is not None:
+            state["stop"] = v.level_price
+        return ("open", None, None, None, fill_iso, None)
+    assert v.exit_ms is not None
+    exit_iso = _iso_ms(v.exit_ms)
+    if v.event == "tp":
+        return ("tp1", "tp1", v.r, v.exit_price, fill_iso, exit_iso)
+    # stopped | trail | timeout — статус 'stopped', событие — как у часового судьи
+    return ("stopped", v.event, v.r, v.exit_price, fill_iso, exit_iso)
 
 
 def _setup_of(row) -> str:
@@ -780,11 +877,17 @@ def update_outcomes_from_bars(bars_by_symbol: dict) -> list:
     rows = db.query("SELECT * FROM signals WHERE (status='open' AND result_r IS NULL) "
                     "OR (status='rejected' AND result_r IS NULL AND closed_at IS NULL)")
     for row in rows:
-        df = bars_by_symbol.get(row["symbol"])
-        if df is None:
-            continue
         st: dict = {}
-        res = _outcome_from_bars(row, df, state=st)
+        trail = _trail_of(row)
+        if trail is not None and trail["judge"] == "1m":
+            # минутный судья (30.10): свои минутки, часовые бары такта не нужны — сделка
+            # судится и когда символ выпал из вотчлиста
+            res = _outcome_from_minutes(row, trail, state=st)
+        else:
+            df = bars_by_symbol.get(row["symbol"])
+            if df is None:
+                continue
+            res = _outcome_from_bars(row, df, state=st)
         if res is None:
             continue
         status, event, result_r, exit_price, fill_dt, exit_dt = res
