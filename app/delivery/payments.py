@@ -247,6 +247,24 @@ def grant_trial(tg_id: int, days: float) -> bool:
     return True
 
 
+def trial_summary(tg_id: int) -> dict | None:
+    """Итог триала для сообщения о его конце (аудит текстов 30.10, К-24): сколько полных
+    сигналов юзер получил за доступ и чем закрылись закрытые (как в /stats: tp*/stopped с
+    result_r). None — триала не было или были оплаты: им обычное «подписка закончилась»."""
+    u = get_user(tg_id)
+    if u is None or not u["trial_granted_at"] or not u["paid_until"]:
+        return None
+    if db.query_one("SELECT 1 FROM payments WHERE tg_id=? AND status='paid'", (tg_id,)):
+        return None
+    rows = db.query(
+        "SELECT s.status, s.result_r FROM deliveries d JOIN signals s ON s.id=d.signal_id "
+        "WHERE d.tg_id=? AND d.kind IN ('full','unlock') AND d.created_at >= ? "
+        "AND d.created_at <= ?", (tg_id, u["trial_granted_at"], u["paid_until"]))
+    closed = [float(r["result_r"]) for r in rows
+              if r["status"] in ("tp1", "tp2", "tp3", "stopped") and r["result_r"] is not None]
+    return {"signals": len(rows), "closed": len(closed), "total_r": round(sum(closed), 2)}
+
+
 def create_promo(code: str, days: int, max_uses: int | None = None,
                  expires_at: str | None = None) -> None:
     """Создать промокод на +days подписки. code сохраняется как есть (регистр — на совести

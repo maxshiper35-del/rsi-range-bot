@@ -134,6 +134,28 @@ def test_trial_last_day_says_what_stays_free_before_price():
     assert "полных сигналов" not in no_free and "Журнал как есть" not in no_free
 
 
+def test_trial_ended_personal_result_and_honest_sign():
+    """К-24 (аудит текстов 30.10): личный итог в R и $, минус не прячем, правда о бесплатном."""
+    up = templates.render_trial_ended({"signals": 23, "closed": 11, "total_r": 4.2}, 7)
+    assert "Пробный доступ закончился" in up and "сигналов 23, закрылось 11" in up
+    assert "<b>+4.2R</b>" in up and "≈ +42$ при риске $10" in up and "до комиссий" in up
+    assert "7 полных сигналов в неделю" in up and "/check" in up and "минус" not in up
+    down = templates.render_trial_ended({"signals": 9, "closed": 6, "total_r": -2.0}, 7,
+                                        depo=(1000.0, 2.0))
+    assert "<b>-2.0R</b>" in down and "≈ -40$ на депозит $1 000 при риске 2%" in down
+    assert "вышли в минус" in down and "/stats" in down
+    pending = templates.render_trial_ended({"signals": 3, "closed": 0, "total_r": 0.0}, 0)
+    assert "закрытых пока нет" in pending and "полных сигналов" not in pending
+    assert "R</b>" not in templates.render_trial_ended({"signals": 0, "closed": 0,
+                                                        "total_r": 0.0}, 7)
+
+
+def test_access_ended_says_what_stays_free():
+    txt = templates.render_access_ended(7)
+    assert "бесплатный режим: 7 полных сигналов в неделю и итоги всех сделок" in txt
+    assert "полных сигналов" not in templates.render_access_ended(0)
+
+
 def test_render_winback_has_promo_and_proof():
     stats = {"trades": 30, "winrate": 0.5, "expectancy_r": 0.1}
     txt = templates.render_winback("wb123", days=7, valid_days=5, stats=stats)

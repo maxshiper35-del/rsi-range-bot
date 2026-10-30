@@ -787,6 +787,40 @@ def test_free_quota_ignores_deliveries_during_access(fresh_db):
     assert payments.free_full_last_week(950) == 1                     # бесплатные — считаются
 
 
+def test_trial_summary(fresh_db):
+    """К-24: итог триала — только полные доставки за доступ, закрытые — как в /stats;
+    оплатившим и не-триалу — None (им обычное «подписка закончилась»)."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import db
+    from app.delivery import payments
+    now = datetime.now(timezone.utc)
+
+    def mk_signal(sid, status, r):
+        db.execute(
+            "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+            "confidence, snapshot_json, status, result_r, created_at) "
+            "VALUES (?, 'BTC/USDT:USDT', 'LONG', '1h', 100, 90, 2.0, 0.7, '{}', ?, ?, ?)",
+            (sid, status, r, f"2026-10-2{sid}T00:00:00+00:00"))
+
+    for sid, status, r in ((1, "stopped", -1.0), (2, "tp1", 2.5), (3, "open", None),
+                           (4, "expired", None), (5, "stopped", -1.0)):
+        mk_signal(sid, status, r)
+    assert payments.grant_trial(960, 5) is True
+    for sid in (1, 2, 3, 4):
+        payments.record_delivery(960, sid, "full")
+    payments.record_delivery(960, 5, "teaser")                         # тизер — не в итоге
+    db.execute("UPDATE users SET trial_granted_at=? WHERE tg_id=?",
+               ((now - timedelta(days=5)).isoformat(), 960))
+    assert payments.trial_summary(960) == {"signals": 4, "closed": 2, "total_r": 1.5}
+
+    payments.register_user(961)
+    assert payments.trial_summary(961) is None                         # триала не было
+    assert payments.grant_trial(962, 5) is True
+    payments.grant_subscription(962, "stars", 150, "XTR", 7, "w962")
+    assert payments.trial_summary(962) is None                         # оплатил в триал
+
+
 def test_expire_overdue_respects_concurrent_payment(fresh_db):
     """Аудит-2 [6]: понижение — условный UPDATE; юзер с будущим paid_until (оплатил между
     SELECT и UPDATE) не понижается."""
