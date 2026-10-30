@@ -4441,7 +4441,7 @@ def main() -> None:
     # --- проверка канала целиком: @username -> аудит последних сигналов (29.10.2026) ---
     # С рекламы «перешли сигнал» не переслал никто из 84 (29.10): набрать @канал проще, чем
     # найти пост и переслать. Логика и тексты — в channel_audit; здесь сеть, лимит, отправка.
-    from app.delivery import channel_audit
+    from app.delivery import channel_audit, channel_rating
     _audit_log: dict = {}                       # tg_id -> [monotonic аудитов за сутки]
 
     def _run_audit(posts) -> dict:
@@ -4503,6 +4503,12 @@ def main() -> None:
                                      "Попробуйте через пару минут.")
                 return
         log.info("аудит канала @%s: %s", name, channel_audit.log_line(agg))
+        # канал с содержательной выборкой — кандидат в рейтинг (активирует админ /rating add)
+        try:
+            if await asyncio.to_thread(channel_rating.candidate_from_audit, name, agg, uid):
+                log.info("рейтинг: кандидат @%s из /audit %s", name, uid)
+        except Exception as e:                  # noqa: BLE001 — кандидаты не ломают аудит
+            log.warning("рейтинг: кандидат @%s: %s", name, e)
         if channel_audit.card_worthy(agg):
             html = channel_audit.audit_card_html(name, page.title, agg,
                                                  bot=bot_info["username"] or "rsirange_bot")
@@ -4529,6 +4535,95 @@ def main() -> None:
             await m.answer(channel_audit.HELP, parse_mode="HTML")
             return
         await _audit_channel(m, name)
+
+    # --- рейтинг сигнальных каналов (30.10.2026): бот сам раз в сутки проверяет публичные
+    # каналы тем же аудитом и ведёт анонимную таблицу (channel_rating). Публично — буквы,
+    # имена каналов видит только админ.
+    async def _rate_channel(ch: dict) -> str:
+        """Один канал: превью t.me -> аудит -> строка обхода. Синхронная сеть — в потоках.
+        -> строка для лога/админа; сбой пишется в канал и не прерывает обход."""
+        name = ch["username"]
+        try:
+            html = await asyncio.to_thread(channel_audit.fetch_tme_html, name)
+            subs = channel_rating.parse_subscribers(html)
+            page = await asyncio.to_thread(channel_audit.fetch_channel, name)
+            agg = await asyncio.to_thread(_run_audit, page.posts)
+        except channel_audit.ChannelUnavailable:
+            await asyncio.to_thread(channel_rating.record_error, ch["id"], "нет публичного канала")
+            return f"@{name}: нет публичного канала"
+        except Exception as e:                  # noqa: BLE001 — сеть t.me / биржи: завтра снова
+            await asyncio.to_thread(channel_rating.record_error, ch["id"], repr(e))
+            return f"@{name}: {type(e).__name__}"
+        res = await asyncio.to_thread(channel_rating.record_run, ch["id"], agg, page.title, subs)
+        return f"@{name} -> {res['letter']}: {channel_audit.log_line(agg)}"
+
+    async def _rating_cycle(limit: int, pause_s: float = channel_rating.PAUSE_BETWEEN_S
+                            ) -> list[str]:
+        """Обход каналов, которым пора: не больше limit за раз, с паузой между каналами."""
+        due = await asyncio.to_thread(channel_rating.due_channels, clock.utcnow_iso(), limit)
+        lines = []
+        for i, ch in enumerate(due):
+            if i:
+                await asyncio.sleep(pause_s)
+            async with _check_sem:
+                line = await _rate_channel(ch)
+            log.info("рейтинг: %s", line)
+            lines.append(line)
+        return lines
+
+    @dp.message(Command("rating"), F.chat.type == "private")
+    async def _rating_cmd(m):
+        parts = (m.text or "").split()
+        sub = parts[1].lower() if len(parts) > 1 else ""
+        if sub and _is_admin(m):
+            if sub in ("add", "rm") and len(parts) > 2:
+                name = channel_audit.parse_channel_ref(parts[2], bare=True)
+                if name is None:
+                    await m.answer("Формат: /rating add @имя | /rating rm @имя")
+                    return
+                if sub == "add":
+                    await asyncio.to_thread(channel_rating.add_channel, name,
+                                            f"admin:{m.from_user.id}")
+                    await m.answer(f"@{templates.esc(name)} в обходе: проверится в ближайшем "
+                                   "такте обслуживания. Сейчас — /rating run")
+                else:
+                    ok = await asyncio.to_thread(channel_rating.set_status, name, "paused")
+                    await m.answer(f"@{templates.esc(name)}: "
+                                   f"{'снят с обхода' if ok else 'такого нет'}")
+                return
+            if sub == "run":
+                wait = await m.answer("Проверяю каналы, которым пора… это минуты.")
+                lines = await _rating_cycle(limit=channel_rating.MAX_PER_TICK,
+                                            pause_s=channel_rating.PAUSE_MANUAL_S)
+                await wait.edit_text("\n".join(lines) or "Сейчас никому не пора "
+                                     "(каждый канал — не чаще раза в сутки).")
+                return
+            if sub == "names":
+                await m.answer(channel_rating.render_admin_names(
+                    await asyncio.to_thread(channel_rating.all_channels)))
+                return
+            if sub == "card":
+                rows = await asyncio.to_thread(channel_rating.latest_rows)
+                if not rows:
+                    await m.answer("Карточке не из чего собраться: обходов ещё не было.")
+                    return
+                html = channel_rating.rating_card_html(
+                    rows, channel_rating.week_label(clock.utcnow_iso()),
+                    bot=bot_info["username"] or "rsirange_bot")
+                try:
+                    png = await _render_png(graphics.render_html_to_png, html, 1080, 2, ".card")
+                except Exception as e:          # noqa: BLE001 — Chromium: сообщим, не упадём
+                    await m.answer(f"Карточка не отрисовалась: {type(e).__name__}")
+                    return
+                await m.answer_photo(BufferedInputFile(png, filename="rating.png"),
+                                     caption="Рейтинг сигнальных каналов · анонимно · "
+                                             "Не финансовый совет")
+                return
+            await m.answer(channel_rating.ADMIN_HELP)
+            return
+        rows = await asyncio.to_thread(channel_rating.latest_rows)
+        await m.answer(channel_rating.render_rating(rows), parse_mode="HTML",
+                       disable_web_page_preview=True)
 
     @dp.callback_query(F.data == "audit_again")
     async def _audit_again(cq):
@@ -5489,6 +5584,21 @@ def main() -> None:
             except Exception as e:                          # noqa: BLE001
                 log.warning("недельный дайджест: %s", e)
 
+    _rating_state: dict = {"task": None}
+
+    async def _mt_channel_rating():
+        # рейтинг каналов: раз в такт — не больше MAX_PER_TICK каналов, которым пора (раз в
+        # сутки каждому), с паузой между ними: t.me и биржа — с общего IP бота. Первый список
+        # сеется один раз. Фоновой задачей: обход — минуты, такт обслуживания — секунды;
+        # второй обход не стартует, пока идёт первый.
+        await asyncio.to_thread(channel_rating.seed_channels)
+        task = _rating_state["task"]
+        if task is not None and not task.done():
+            return
+        if await asyncio.to_thread(channel_rating.due_channels, clock.utcnow_iso(), 1):
+            _rating_state["task"] = spawn(_rating_cycle(channel_rating.MAX_PER_TICK),
+                                          name="channel-rating")
+
     # без этих блоков платящие не получают доступ или не теряют его вовремя: их сбой делает
     # такт неудачным и гасит пульс dead-man (аудит кода 30.10, §3.6 п.4)
     _MAINT_CRITICAL = frozenset({"истечение подписок", "активация USDT"})
@@ -5518,6 +5628,7 @@ def main() -> None:
             ("контент-пак", _mt_content_pack),
             ("счёт за вчера", _mt_account_push),
             ("недельный дайджест", _mt_weekly_digest),
+            ("рейтинг каналов", _mt_channel_rating),
         ])
 
     async def _send_digests(d_text, d_label, d_wk, d_st, start_iso, end_iso):
