@@ -39,3 +39,10 @@ data/backups-server/
 data/*.bak
 data/og.png
 data/content/
+
+# YouTube API: ключи и отдельное окружение (scripts/youtube_api.py)
+data/secrets/
+.venv-yt/
+# кэши исследований
+data/cache_tf/
+data/cache_research/
