@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import pathlib
 import shutil
+import sys
 import tempfile
 
 import pytest
@@ -27,6 +28,30 @@ try:
     dotenv.load_dotenv = lambda *a, **k: False      # type: ignore[assignment]
 except ImportError:                                 # pragma: no cover — dotenv в зависимостях
     pass
+
+
+# Жёсткий страж поверх DB_PATH: открыть data/signals.db (и её -wal/-shm) в тестовом процессе
+# не может никто — ни app.db при пустом DB_PATH (_env считает пустую дефолтом), ни скрипт с
+# дефолтным --db data/signals.db, ни сырой sqlite3/open/shutil. Audit-хук срабатывает ДО
+# открытия файла (в свежем worktree не остаётся и пустого signals.db) и не обходится ранним
+# `from sqlite3 import connect`. Матч по форме пути, а не по корню репо: из worktree боевая
+# база основного checkout достижима как ../../../data/signals.db. pytest.fail бросает
+# BaseException — `except Exception` в коде под тестом его не проглотит.
+def _forbid_real_db(event: str, args: tuple) -> None:
+    if event not in ("sqlite3.connect", "open"):
+        return
+    raw = args[0]
+    if not isinstance(raw, (str, bytes, os.PathLike)):
+        return                                      # open(fd) — не путь
+    target = os.fsdecode(raw)
+    if "signals.db" not in target:                  # быстрый выход: хук видит каждый open
+        return
+    path = pathlib.Path(target.removeprefix("file:").split("?")[0]).resolve()   # и URI sqlite
+    if path.parent.name == "data" and path.name.startswith("signals.db"):
+        pytest.fail(f"тест открывает боевую БД {path} — нужна фикстура fresh_db или tmp_path")
+
+
+sys.addaudithook(_forbid_real_db)
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MIGRATIONS = REPO_ROOT / "migrations"

@@ -85,3 +85,18 @@ def test_tests_never_touch_repo_db_or_dotenv():
     db_path = get_settings().db_path.resolve()
     assert repo / "data" not in db_path.parents, db_path
     assert dotenv.load_dotenv() is False                 # заглушка conftest, не чтение .env
+
+
+def test_real_db_cannot_be_opened(tmp_path, monkeypatch):
+    """Жёсткий страж conftest (audit-хук): data/signals.db не открыть ни sqlite3 (путь, URI),
+    ни open — и файл не создаётся. Проверка в tmp_path: сломанный страж не дотянется до
+    настоящей БД."""
+    (tmp_path / "data").mkdir()
+    monkeypatch.chdir(tmp_path)
+    attempts = (lambda: sqlite3.connect("data/signals.db"),
+                lambda: sqlite3.connect("file:data/signals.db?mode=ro", uri=True),
+                lambda: open("data/signals.db-wal", "wb"))
+    for attempt in attempts:
+        with pytest.raises(pytest.fail.Exception, match="боевую БД"):
+            attempt()
+    assert not any((tmp_path / "data").iterdir())
