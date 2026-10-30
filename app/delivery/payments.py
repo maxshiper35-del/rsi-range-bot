@@ -247,6 +247,14 @@ def grant_trial(tg_id: int, days: float) -> bool:
     return True
 
 
+# «Платил» = Stars или авто-USDT (payments.status='paid') ИЛИ ручная USDT-оплата, подтверждённая
+# /grant: admin_grant закрывает заявку «Я оплатил», но строку в payments не пишет (аудит кода
+# 30.10 — без второго условия такие платники выпадали из напоминаний о продлении). Алиас — u.
+_PAID_EVER_SQL = ("(EXISTS(SELECT 1 FROM payments p WHERE p.tg_id=u.tg_id AND p.status='paid') "
+                  "OR EXISTS(SELECT 1 FROM usdt_claims c WHERE c.tg_id=u.tg_id "
+                  "AND c.resolved_at IS NOT NULL))")
+
+
 def trial_summary(tg_id: int) -> dict | None:
     """Итог триала для сообщения о его конце (аудит текстов 30.10, К-24): сколько полных
     сигналов юзер получил за доступ и чем закрылись закрытые (как в /stats: tp*/stopped с
@@ -254,7 +262,7 @@ def trial_summary(tg_id: int) -> dict | None:
     u = get_user(tg_id)
     if u is None or not u["trial_granted_at"] or not u["paid_until"]:
         return None
-    if db.query_one("SELECT 1 FROM payments WHERE tg_id=? AND status='paid'", (tg_id,)):
+    if db.query_one(f"SELECT 1 FROM users u WHERE u.tg_id=? AND {_PAID_EVER_SQL}", (tg_id,)):
         return None
     rows = db.query(
         "SELECT s.status, s.result_r FROM deliveries d JOIN signals s ON s.id=d.signal_id "
@@ -481,8 +489,7 @@ def due_for_reminder(days: int = 3, min_left_hours: int = 12) -> list:
     horizon = (_now_dt() + timedelta(days=days)).isoformat()
     return db.query(
         "SELECT u.tg_id, u.paid_until FROM users u WHERE u.tier='paid' AND u.paid_until > ? "
-        "AND u.paid_until <= ? AND u.renew_reminded_at IS NULL "
-        "AND EXISTS(SELECT 1 FROM payments p WHERE p.tg_id=u.tg_id AND p.status='paid')",
+        f"AND u.paid_until <= ? AND u.renew_reminded_at IS NULL AND {_PAID_EVER_SQL}",
         (floor_, horizon))
 
 

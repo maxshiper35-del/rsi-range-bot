@@ -760,9 +760,12 @@ def test_due_for_reminder_only_payers(fresh_db):
     payments.grant_subscription(942, "stars", 500, "XTR", 30, "m942")  # платил
     assert payments.grant_trial(943, 5) is True                        # триал, потом оплатил
     payments.grant_subscription(943, "stars", 150, "XTR", 7, "w943")
+    payments.register_user(944)
+    payments.record_usdt_claim(944)                                    # USDT вручную + /grant
+    payments.admin_grant(944, 30)
     soon = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
-    db.execute("UPDATE users SET paid_until=? WHERE tg_id IN (940, 941, 942, 943)", (soon,))
-    assert sorted(r["tg_id"] for r in payments.due_for_reminder(3)) == [942, 943]
+    db.execute("UPDATE users SET paid_until=? WHERE tg_id IN (940, 941, 942, 943, 944)", (soon,))
+    assert sorted(r["tg_id"] for r in payments.due_for_reminder(3)) == [942, 943, 944]
 
 
 def test_free_quota_ignores_deliveries_during_access(fresh_db):
@@ -819,6 +822,10 @@ def test_trial_summary(fresh_db):
     assert payments.grant_trial(962, 5) is True
     payments.grant_subscription(962, "stars", 150, "XTR", 7, "w962")
     assert payments.trial_summary(962) is None                         # оплатил в триал
+    assert payments.grant_trial(963, 5) is True
+    payments.record_usdt_claim(963)
+    payments.admin_grant(963, 30)
+    assert payments.trial_summary(963) is None                         # USDT вручную + /grant
 
 
 def test_expire_overdue_respects_concurrent_payment(fresh_db):
