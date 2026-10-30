@@ -137,7 +137,9 @@ def test_format_stats_and_calc():
     assert "Объём" in calc and "Плечо" in calc
 
 
-def test_format_about_contains_disclaimer_parts():
+def test_format_about_contains_disclaimer_parts(fresh_db):
+    # fresh_db: format_about читает runtime (реф-ссылку) из БД — без фикстуры тест брал
+    # data/signals.db из cwd (в основном чекауте — боевую БД, в чистом worktree — пустую)
     txt = bot.format_about()
     assert "НЕ инвестиционный совет" in txt
     assert "/backtest" in txt
@@ -242,7 +244,7 @@ def test_should_refresh_board():
                                     "2026-01-02T00:00:00+00:00", hours=48) is False
 
 
-def test_format_channel_live_board():
+def test_format_channel_live_board(fresh_db):
     empty = bot.format_channel_live_board({"trades": 0, "open": 0}, {})
     assert "живое табло" in empty and "копятся" in empty
 
@@ -1371,3 +1373,15 @@ def test_check_hook_sources_get_howto():
     assert "«Переслать»" in bot.CHECK_HOWTO and "время публикации" in bot.CHECK_HOWTO
     btn = bot.check_demo_markup().inline_keyboard[0][0]
     assert btn.callback_data == "check_demo"
+
+
+def test_channel_audit_entry_points():
+    """Проверка канала целиком (29.10): команда в /help, подсказка «пришлите @username» в
+    инструкции рекламы-проверки и в /check, под итогом — подписка + «другой канал»."""
+    from app.delivery import signal_check
+
+    assert "audit" in dict(bot.USER_COMMANDS)
+    assert "/audit — проверить сигнальный канал целиком" in bot.format_help(False)
+    assert "@username канала" in bot.CHECK_HOWTO and "@username канала" in signal_check.HELP
+    rows = bot.audit_markup().inline_keyboard
+    assert rows[0][0].url == bot.CHANNEL_URL and rows[1][0].callback_data == "audit_again"

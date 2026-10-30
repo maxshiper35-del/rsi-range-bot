@@ -63,7 +63,9 @@ def test_htf_bars_include_candle_closed_exactly_at_decision(monkeypatch):
         raise AssertionError("не нашли бар на границе 4h")
 
 
-def test_prod_config_mirrors_runtime(monkeypatch):
+def test_prod_config_mirrors_runtime(monkeypatch, fresh_db):
+    # fresh_db: _prod_config читает и не подменённые здесь настройки runtime из БД — без
+    # фикстуры тест зависел от data/signals.db в cwd (боевой БД в основном чекауте)
     from app import runtime
     monkeypatch.setattr(runtime, "enabled_setups", lambda: ("6226", "LTF"))
     monkeypatch.setattr(runtime, "min_stop_pct", lambda: 1.3)
@@ -77,7 +79,7 @@ def test_prod_config_mirrors_runtime(monkeypatch):
     assert args.window == 199                                 # limit=200 минус формирующийся
 
 
-def test_prod_config_set_overrides(monkeypatch):
+def test_prod_config_set_overrides(monkeypatch, fresh_db):
     from app import runtime
     monkeypatch.setattr(runtime, "enabled_setups", lambda: ("6226", "LTF"))
     monkeypatch.setattr(runtime, "min_stop_pct", lambda: 1.3)
