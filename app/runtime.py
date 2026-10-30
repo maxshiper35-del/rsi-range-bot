@@ -6,6 +6,8 @@ runtime.py — настройки, правимые из Telegram без рес�
 """
 from __future__ import annotations
 
+import math
+
 from app import clock, db
 from app.config import get_settings
 
@@ -384,8 +386,14 @@ def price_usdt() -> float:
 
 def sub_days() -> float:
     """Длительность подписки в днях. float (не int) — админ может выставить дробный срок
-    (напр. тестовая подписка на несколько часов: /price days 0.2083333333333333)."""
-    return _num("sub_days", float, lambda: get_settings().sub_days)
+    (напр. тестовая подписка на несколько часов: /price days 0.2083333333333333).
+    Ноль, минус и не-числа — как битое значение: дефолт (аудит кода 30.10 — две из трёх
+    точек ввода пропускали 0, а 0 дней — это оплата без доступа)."""
+    v = _num("sub_days", float, lambda: get_settings().sub_days)
+    if math.isfinite(v) and v > 0:
+        return v
+    d = float(get_settings().sub_days)
+    return d if math.isfinite(d) and d > 0 else 30.0
 
 
 def free_per_week() -> int:

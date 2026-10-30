@@ -10,6 +10,7 @@ USDT через CryptoBot — задел на будущее (создание �
 """
 from __future__ import annotations
 
+import math
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -33,6 +34,13 @@ REFERRAL_MIN_PAID_DAYS = 7.0
 
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _check_days(days: float) -> None:
+    """Срок оплаченного доступа: конечный и больше нуля (аудит кода 30.10 — /price days и
+    админ-FSM пропускали 0, а /grant 0 закрывал USDT-заявку без доступа)."""
+    if not math.isfinite(float(days)) or float(days) <= 0:
+        raise ValueError(f"срок подписки должен быть > 0 дней, получено {days!r}")
 
 
 def register_user(tg_id: int, username: str | None = None, lang: str = "ru") -> None:
@@ -108,7 +116,9 @@ def grant_subscription(tg_id: int, method: str, amount: float, currency: str,
 
     paid_until продлевается от максимума (сейчас, текущий paid_until) на days.
     Дедуп по UNIQUE(method, invoice_id) — повторный вебхук/апдейт не начисляет дважды.
+    Неположительный срок — ValueError: платёж без доступа хуже громкого сбоя.
     """
+    _check_days(days)
     if db.query_one("SELECT 1 FROM payments WHERE method=? AND invoice_id=? AND status='paid'",
                     (method, invoice_id)):
         return False
@@ -130,7 +140,7 @@ def due_for_trial_drip(trial_days: float) -> list:
     Пороги от trial_granted_at: стадия 1 — через 1 день (как читать сигнал),
     стадия 2 — через 3 дня (проверь трек-рекорд сам), стадия 3 — за сутки до конца
     триала (trial_days-1, но не раньше стадии 2). Оплатившие исключаются НАВСЕГДА
-    (реальный платёж в payments) — им продавать нечего; заблокировавшие бота тоже.
+    (paid_ever_sql) — им продавать нечего; заблокировавшие бота тоже.
     Одна стадия за вызов на юзера (следующая — следующим тактом)."""
     thresholds = [(1, 1.0), (2, 3.0), (3, max(trial_days - 1.0, 3.5))]
     now = _now_dt()
@@ -138,7 +148,7 @@ def due_for_trial_drip(trial_days: float) -> list:
     rows = db.query(
         "SELECT u.tg_id, u.trial_granted_at, u.trial_drip_stage FROM users u "
         "WHERE u.trial_granted_at IS NOT NULL AND u.trial_drip_stage < 3 AND u.is_active=1 "
-        "AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.tg_id=u.tg_id AND p.status='paid')")
+        f"AND NOT {_PAID_EVER_SQL}")
     for r in rows:
         granted = datetime.fromisoformat(r["trial_granted_at"])
         age_days = (now - granted).total_seconds() / 86400
@@ -247,12 +257,29 @@ def grant_trial(tg_id: int, days: float) -> bool:
     return True
 
 
-# «Платил» = Stars или авто-USDT (payments.status='paid') ИЛИ ручная USDT-оплата, подтверждённая
-# /grant: admin_grant закрывает заявку «Я оплатил», но строку в payments не пишет (аудит кода
-# 30.10 — без второго условия такие платники выпадали из напоминаний о продлении). Алиас — u.
-_PAID_EVER_SQL = ("(EXISTS(SELECT 1 FROM payments p WHERE p.tg_id=u.tg_id AND p.status='paid') "
-                  "OR EXISTS(SELECT 1 FROM usdt_claims c WHERE c.tg_id=u.tg_id "
-                  "AND c.resolved_at IS NOT NULL))")
+def paid_ever_sql(alias: str = "u") -> str:
+    """SQL-условие «платил хоть раз» для строки users под алиасом alias — ЕДИНСТВЕННОЕ
+    определение платящего (аудит кода 30.10): напоминания о продлении, итог триала, дрип,
+    рефералка, /growth, админка и «Мой счёт» считают по нему.
+
+    «Платил» = Stars или авто-USDT (payments.status='paid') ИЛИ ручная USDT-оплата,
+    подтверждённая /grant: admin_grant закрывает заявку «Я оплатил», но строку в payments не
+    пишет — без второго условия такие платники выпадали из напоминаний о продлении."""
+    if not alias.isidentifier():
+        raise ValueError(f"алиас таблицы users: {alias!r}")
+    return (f"(EXISTS(SELECT 1 FROM payments p WHERE p.tg_id={alias}.tg_id "
+            "AND p.status='paid') "
+            f"OR EXISTS(SELECT 1 FROM usdt_claims c WHERE c.tg_id={alias}.tg_id "
+            "AND c.resolved_at IS NOT NULL))")
+
+
+_PAID_EVER_SQL = paid_ever_sql("u")
+
+
+def has_paid_ever(tg_id: int) -> bool:
+    """Платил ли юзер хоть раз — см. paid_ever_sql."""
+    return db.query_one(f"SELECT 1 FROM users u WHERE u.tg_id=? AND {_PAID_EVER_SQL}",
+                        (tg_id,)) is not None
 
 
 def trial_summary(tg_id: int) -> dict | None:
@@ -262,7 +289,7 @@ def trial_summary(tg_id: int) -> dict | None:
     u = get_user(tg_id)
     if u is None or not u["trial_granted_at"] or not u["paid_until"]:
         return None
-    if db.query_one(f"SELECT 1 FROM users u WHERE u.tg_id=? AND {_PAID_EVER_SQL}", (tg_id,)):
+    if has_paid_ever(tg_id):
         return None
     rows = db.query(
         "SELECT s.status, s.result_r FROM deliveries d JOIN signals s ON s.id=d.signal_id "
@@ -535,11 +562,12 @@ def create_cryptobot_invoice(tg_id: int, days: float, amount: float | None = Non
 
     if not runtime.cryptobot_token():
         return None
+    _check_days(days)
     amount = amount if amount is not None else runtime.price_usdt()
     register_user(tg_id)
     res = _cryptobot_call("createInvoice", {
         "asset": "USDT", "amount": str(amount),
-        "description": f"Подписка RSI Range Signals на {days} дней",
+        "description": f"Подписка RSI Range Signals на {days:g} дней",
         "payload": f"{tg_id}:{days}",
         # сутки на оплату: без expires_in инвойсы вечные — pending-хвост рос бы
         # безгранично, а старый инвойс оплачивался бы по устаревшей цене (аудит-2 [7])
@@ -601,6 +629,7 @@ def admin_grant(tg_id: int, days: int) -> bool:
     закрывает все открытые заявки юзера. Для чистых подарков (giveaway) завести
     отдельную команду, не закрывающую заявки.
     """
+    _check_days(days)
     register_user(tg_id)
     with db.transaction() as conn:
         # атомарно с выдачей: при падении между операциями не получим
@@ -717,8 +746,8 @@ def set_referrer(tg_id: int, referrer_id: int) -> bool:
     with db.transaction() as conn:
         cur = conn.execute(
             "UPDATE users SET invited_by=?, updated_at=? WHERE tg_id=? AND invited_by IS NULL "
-            "AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.tg_id=? AND p.status='paid')",
-            (referrer_id, clock.utcnow_iso(), tg_id, tg_id))
+            f"AND NOT {paid_ever_sql('users')}",
+            (referrer_id, clock.utcnow_iso(), tg_id))
         return cur.rowcount == 1
 
 
@@ -871,14 +900,13 @@ def set_acquisition_source(tg_id: int, source: str) -> None:
 
 def acquisition_breakdown() -> dict:
     """Разбивка по acquisition_source для /growth: сколько приглашено, сколько РЕАЛЬНО
-    оплатили. "Оплатили" — EXISTS в payments(status='paid'), НЕ paid_until IS NOT NULL:
-    триал (grant_trial) и промокоды (redeem_promo) тоже ставят paid_until, но не пишут в
-    payments — иначе конверсия дашборда считала бы бесплатный триал платежом.
+    оплатили. "Оплатили" — paid_ever_sql, НЕ paid_until IS NOT NULL: триал (grant_trial) и
+    промокоды (redeem_promo) тоже ставят paid_until, но не пишут в payments — иначе
+    конверсия дашборда считала бы бесплатный триал платежом.
     -> {source: {"total": int, "paid": int}}, source="—" — без метки (органика)."""
     rows = db.query(
         "SELECT COALESCE(acquisition_source, '—') AS source, COUNT(*) AS total, "
-        "SUM(CASE WHEN EXISTS (SELECT 1 FROM payments p WHERE p.tg_id = users.tg_id "
-        "AND p.status='paid') THEN 1 ELSE 0 END) AS paid "
+        f"SUM(CASE WHEN {paid_ever_sql('users')} THEN 1 ELSE 0 END) AS paid "
         "FROM users GROUP BY source ORDER BY total DESC")
     return {r["source"]: {"total": r["total"], "paid": r["paid"]} for r in rows}
 
@@ -918,7 +946,7 @@ def admin_revoke(tg_id: int) -> None:
 
 def subscriber_breakdown() -> dict:
     """Честная разбивка АКТИВНЫХ подписок (paid_until в будущем):
-    paying — есть хотя бы один оплаченный платёж (реальные деньги);
+    paying — платил хоть раз (paid_ever_sql: платёж или подтверждённая /grant USDT-заявка);
     granted — tier='paid' без платежей и без триала (ручной /grant);
     trial   — выдан триал, платежей нет.
     Раньше «платных» = tier='paid' — триал ставит тот же tier, и владелец видел
@@ -933,8 +961,7 @@ def subscriber_breakdown() -> dict:
         "SUM(CASE WHEN NOT has_pay AND trial_granted_at IS NOT NULL THEN 1 ELSE 0 END) "
         "  AS trial "
         "FROM (SELECT u.tier, u.trial_granted_at, "
-        "      EXISTS(SELECT 1 FROM payments p WHERE p.tg_id=u.tg_id AND p.status='paid') "
-        "        AS has_pay FROM users u WHERE u.paid_until > ?)", (now,))
+        f"      {_PAID_EVER_SQL} AS has_pay FROM users u WHERE u.paid_until > ?)", (now,))
     return {k: int((r[k] if r else 0) or 0) for k in ("paying", "granted", "trial")}
 
 

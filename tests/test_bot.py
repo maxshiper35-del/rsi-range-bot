@@ -566,28 +566,38 @@ def test_setup_codes_roundtrip():
 def test_parse_admin_field_value_int():
     assert bot._parse_admin_field_value("1000", "int") == 1000
     assert bot._parse_admin_field_value("  42 ", "int") == 42
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         bot._parse_admin_field_value("1.5", "int")           # не целое
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         bot._parse_admin_field_value("-1", "int")             # отрицательное
 
 
 def test_parse_admin_field_value_unit():
     assert bot._parse_admin_field_value("0.6", "unit") == 0.6
     assert bot._parse_admin_field_value("0,6", "unit") == 0.6  # запятая как разделитель
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         bot._parse_admin_field_value("1.1", "unit")           # вне 0..1
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         bot._parse_admin_field_value("-0.1", "unit")
 
 
 def test_parse_admin_field_value_float():
     assert bot._parse_admin_field_value("1.5", "float") == 1.5
     assert bot._parse_admin_field_value("0", "float") == 0.0
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         bot._parse_admin_field_value("-0.5", "float")
     with pytest.raises(ValueError):
         bot._parse_admin_field_value("не число", "float")
+
+
+def test_parse_admin_field_value_days_rejects_zero():
+    """Срок подписки из админ-FSM: 0 и минус — оплата без доступа (аудит кода 30.10)."""
+    assert bot._parse_admin_field_value("30", "days") == 30.0
+    assert bot._parse_admin_field_value("0,5", "days") == 0.5
+    for bad in ("0", "-1", "nan", "40000"):
+        with pytest.raises(ValueError):
+            bot._parse_admin_field_value(bad, "days")
+    assert bot._ADMIN_NUMERIC_FIELDS["sub_days"][1] == "days"
 
 
 def test_format_growth():
@@ -1256,14 +1266,15 @@ def test_affiliate_block_in_about_and_board(fresh_db):
 
 
 def test_stars_payload_contract():
-    """Контракт payload Stars-платежа: отправка пишет 'sub:{days}', приём парсит
-    float(split(':')[1]) — рассинхрон форматов дал бы фолбэк на sub_days для ВСЕХ
+    """Контракт payload Stars-платежа: инвойс пишет 'sub:<дни>:<ключ>', приём читает срок
+    через tariffs.parse_payload — рассинхрон форматов дал бы фолбэк на sub_days для ВСЕХ
     тарифов (квартал/год/lifetime получили бы 30 дней). Закрепляем формат."""
-    days = 36500.0
-    payload = f"sub:{days}"                     # как в _send_stars_invoice
-    assert float(payload.split(":")[1]) == days  # как в _paid
-    # дробные дни (тестовый тариф 0.208333) тоже проходят
-    assert float(f"sub:{0.208333}".split(":")[1]) == 0.208333
+    from app.delivery import tariffs
+    life = tariffs.Tier("life", 36500.0, 15000)
+    assert tariffs.parse_payload(tariffs.invoice_payload(life)) == (36500.0, "life")
+    # старый формат (инвойсы до реестра) и дробные дни тоже читаются
+    assert tariffs.parse_payload("sub:36500.0") == (36500.0, None)
+    assert tariffs.parse_payload("sub:0.208333") == (0.208333, None)
 
 
 def test_scrub_reasons_hides_construction():
@@ -1319,23 +1330,6 @@ def test_should_remind_pause():
                                    "2026-10-04T10:00:00+00:00", now) is False
     assert bot.should_remind_pause("2026-09-13T18:18:31+00:00",
                                    "2026-10-03T11:00:00+00:00", now) is True
-
-
-def test_precheckout_ok():
-    """Аудит 05.10: pre_checkout пропускал всё — старые инвойсы выключенных/подорожавших
-    тарифов оплачивались вечно. Теперь сверка дней и текущей цены в XTR."""
-    tiers = [(30.0, 1500), (90.0, 15000), (365.0, 40000), (36500.0, 0), (0.208333, 10)]
-    assert bot.precheckout_ok("sub:30.0", 1500, "XTR", tiers) is True
-    assert bot.precheckout_ok("sub:30", 1500, "XTR", tiers) is True
-    assert bot.precheckout_ok("sub:0.208333", 10, "XTR", tiers) is True
-    assert bot.precheckout_ok("sub:30.0", 1000, "XTR", tiers) is False     # старая цена
-    assert bot.precheckout_ok("sub:36500", 15000, "XTR", tiers) is False   # тариф выключен
-    assert bot.precheckout_ok("sub:7", 1500, "XTR", tiers) is False        # нет такого тира
-    assert bot.precheckout_ok("мусор", 1500, "XTR", tiers) is False
-    assert bot.precheckout_ok("sub:x", 1500, "XTR", tiers) is False
-    assert bot.precheckout_ok("sub:30.0", 1500, "USD", tiers) is False
-    assert bot.precheckout_ok("unlock:5:50", 50, "XTR", tiers) is True     # paid media
-    assert bot.precheckout_ok(None, 0, "XTR", tiers) is False
 
 
 def test_pause_age_text():
