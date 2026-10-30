@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import math
 import re
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
@@ -312,6 +313,16 @@ def format_kelly_line() -> str:
             "Полный Келли агрессивен и растёт на шуме — больше половины не берут.")
 
 
+def _calc_num(x: float, digits: int = 6) -> str:
+    """Число для /calc фиксированной записью: {:g} уходил в экспоненту — объём мелких альтов
+    «2.94118e+07», депозит «1e+06» (аудит кода 30.10). ~6 значащих цифр, целую часть не режем:
+    объём копируют в форму ордера."""
+    if not math.isfinite(x) or x == 0:
+        return f"{x:g}"
+    dec = max(0, digits - 1 - math.floor(math.log10(abs(x))))
+    return f"{x:.{dec}f}".rstrip("0").rstrip(".") if dec else f"{x:.0f}"
+
+
 def format_calc(deposit: float, risk_pct: float, entry: float, stop: float,
                 max_leverage: int = 20) -> str:
     """Текст /calc: калькулятор позиции через risk.calculate_position."""
@@ -321,12 +332,12 @@ def format_calc(deposit: float, risk_pct: float, entry: float, stop: float,
     lines = [
         "🧮 Калькулятор позиции",
         "────────────────────",
-        f"Депозит: {deposit:g}  |  риск: {risk_pct:g}%",
-        f"Вход: {entry:g}  |  стоп: {stop:g}",
-        f"Объём: {pos['position_qty']:g}",
-        f"Номинал: {pos['notional_usd']:g}$",
-        f"Плечо: ×{pos['implied_leverage']:g}",
-        f"Убыток по стопу: {pos['loss_if_stop']:g}$",
+        f"Депозит: {_calc_num(deposit)}  |  риск: {risk_pct:g}%",
+        f"Вход: {_cornix_price(entry)}  |  стоп: {_cornix_price(stop)}",
+        f"Объём: {_calc_num(pos['position_qty'])}",
+        f"Номинал: {_calc_num(pos['notional_usd'])}$",
+        f"Плечо: ×{_calc_num(pos['implied_leverage'], 4)}",
+        f"Убыток по стопу: {_calc_num(pos['loss_if_stop'])}$",
     ]
     if pos.get("warning"):
         lines.append(f"⚠️ {pos['warning']}")
@@ -1579,6 +1590,32 @@ def main_menu_layout(is_admin: bool = False) -> list:
     ]
 
 
+MENU_TEXTS = frozenset(t for adm in (False, True) for row in main_menu_layout(adm) for t in row)
+
+
+def menu_resets_dialog(menu_texts: frozenset):
+    """Outer-middleware сообщений: кнопка меню или команда посреди пошагового ввода
+    (калькулятор, промокод, ввод в админке) сначала закрывает диалог, а затем идёт в свой
+    обычный хэндлер — с первого нажатия.
+
+    Аудит кода 30.10, §3.6 п. 7: в aiogram 3 хэндлер без state-фильтра срабатывает в любом
+    состоянии. Кнопки, зарегистрированные ДО FSM-шагов («О боте», «Бэктест», «Подписка»…),
+    отвечали, а диалог оставался — следующий свободный текст уходил как промокод или число
+    калькулятора. Кнопки ПОСЛЕ шагов ловил _fsm_menu_escape, и их приходилось нажимать
+    дважды. Команды проходили мимо шагов, но диалог тоже не закрывали. Сброс идёт до разбора
+    хэндлеров: FSMContextMiddleware уже положил state/raw_state, и StateFilter шагов видит
+    обнулённое состояние."""
+    async def _mw(handler, event, data):
+        text = getattr(event, "text", None) or ""
+        if data.get("raw_state") is not None and (text in menu_texts or text.startswith("/")):
+            state = data.get("state")
+            if state is not None:
+                await state.clear()
+            data["raw_state"] = None
+        return await handler(event, data)
+    return _mw
+
+
 BOT_DESCRIPTION = (
     "Сигналы по крипто-фьючерсам (SMC) с честной статистикой: публикуем 100% исходов, "
     "включая убыточные. Проверяемый CSV-трек-рекорд: sha256 + офлайн-верификатор "
@@ -1854,6 +1891,8 @@ def main() -> None:
     logging.getLogger().addHandler(_ERRBUF)   # ERROR из любых наших логгеров -> DM админам
     bot = Bot(token=cfg.tg_bot_token)
     dp = Dispatcher()
+    # кнопка меню или команда посреди пошагового ввода закрывает диалог (аудит кода 30.10)
+    dp.message.outer_middleware(menu_resets_dialog(MENU_TEXTS))
     # username бота для deep-link CTA под постами канала; заполняется в _main() после
     # get_me() — до этого кнопки просто нет (channel_cta_markup(None) -> None)
     bot_info: dict = {"username": None}
@@ -2530,8 +2569,6 @@ def main() -> None:
 
     @dp.message(PromoState.code, ~F.text.startswith("/"))
     async def _promo_step_code(m, state: FSMContext):
-        if await _fsm_menu_escape(m, state):
-            return
         await state.clear()
         await _apply_promo(m, (m.text or "").strip())
 
@@ -2843,23 +2880,9 @@ def main() -> None:
             lambda: format_calc(dep, risk, entry, stop, cfg.max_leverage)
             + format_kelly_line()))
 
-    # кнопка "Калькулятор" — пошаговый FSM-ввод вместо одной строки с 4 числами.
-    # ~F.text.startswith("/") на каждом шаге: если юзер вместо ответа набрал команду
-    # (передумал/нажал другую кнопку) — состояние НЕ перехватывает её молча, команда
-    # проходит в свой обычный хендлер (aiogram пробует следующий подходящий хендлер)
-    _MENU_TEXTS = frozenset(t for row in (main_menu_layout(False) + main_menu_layout(True))
-                            for t in row)
-
-    async def _fsm_menu_escape(m, state: FSMContext) -> bool:
-        """Кнопка меню посреди пошагового ввода — выход из состояния, а не «Не понял число»
-        (аудит-2 UX [6]: половина меню зарегистрирована ПОСЛЕ FSM-шагов и попадала в ловушку
-        «Статистика -> Не понял число» без выхода). -> True, если перехвачено."""
-        if (m.text or "") in _MENU_TEXTS:
-            await state.clear()
-            await m.answer("Ввод отменён — нажмите кнопку ещё раз.")
-            return True
-        return False
-
+    # кнопка "Калькулятор" — пошаговый FSM-ввод вместо одной строки с 4 числами. Кнопка
+    # меню или команда посреди ввода закрывает диалог ещё до шагов (menu_resets_dialog);
+    # ~F.text.startswith("/") на шагах — страховка, если middleware не подключён
     @dp.message(Command("cancel"))
     async def _cancel(m, state: FSMContext):
         await state.clear()
@@ -2873,8 +2896,6 @@ def main() -> None:
 
     @dp.message(CalcStates.deposit, ~F.text.startswith("/"))
     async def _calc_step_deposit(m, state: FSMContext):
-        if await _fsm_menu_escape(m, state):
-            return
         try:
             dep = float((m.text or "").replace(",", "."))
             assert dep > 0
@@ -2887,8 +2908,6 @@ def main() -> None:
 
     @dp.message(CalcStates.risk, ~F.text.startswith("/"))
     async def _calc_step_risk(m, state: FSMContext):
-        if await _fsm_menu_escape(m, state):
-            return
         try:
             risk = float((m.text or "").replace(",", "."))
             assert risk > 0
@@ -2901,8 +2920,6 @@ def main() -> None:
 
     @dp.message(CalcStates.entry, ~F.text.startswith("/"))
     async def _calc_step_entry(m, state: FSMContext):
-        if await _fsm_menu_escape(m, state):
-            return
         try:
             entry = float((m.text or "").replace(",", "."))
             assert entry > 0
@@ -2915,8 +2932,6 @@ def main() -> None:
 
     @dp.message(CalcStates.stop, ~F.text.startswith("/"))
     async def _calc_step_stop(m, state: FSMContext):
-        if await _fsm_menu_escape(m, state):
-            return
         try:
             stop = float((m.text or "").replace(",", "."))
             assert stop > 0
@@ -4259,8 +4274,6 @@ def main() -> None:
     @dp.message(AdminInput.numeric, ~F.text.startswith("/"))
     async def _admin_numeric_receive(m, state: FSMContext):
         if not _is_admin(m):
-            return
-        if await _fsm_menu_escape(m, state):            # заброшенный промпт не съедает число
             return
         data = await state.get_data()
         field, kind = str(data.get("field", "")), str(data.get("kind", ""))
