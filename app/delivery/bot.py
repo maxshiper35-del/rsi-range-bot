@@ -5139,9 +5139,8 @@ def main() -> None:
             try:
                 summ = await asyncio.to_thread(payments.trial_summary, uid)
                 if summ is not None:
-                    depo = await asyncio.to_thread(payments.depo_prefs, uid)
                     await _send_retry(uid, templates.render_trial_ended(
-                        summ, runtime.free_per_week(), depo), parse_mode="HTML",
+                        summ, runtime.free_per_week()), parse_mode="HTML",
                         reply_markup=_trial_end_kb())
                 else:
                     await _send_retry(uid, templates.render_access_ended(runtime.free_per_week()),

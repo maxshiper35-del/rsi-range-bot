@@ -135,14 +135,15 @@ def test_trial_last_day_says_what_stays_free_before_price():
 
 
 def test_trial_ended_personal_result_and_honest_sign():
-    """К-24 (аудит текстов 30.10): личный итог в R и $, минус не прячем, правда о бесплатном."""
+    """К-24 (аудит текстов 30.10): личный итог в R по журналу, минус не прячем, правда о
+    бесплатном; без суммы в $ и с оговоркой о реальной торговле (замер 30.10)."""
     up = templates.render_trial_ended({"signals": 23, "closed": 11, "total_r": 4.2}, 7)
     assert "Пробный доступ закончился" in up and "сигналов 23, закрылось 11" in up
-    assert "<b>+4.2R</b>" in up and "≈ +42$ при риске $10" in up and "до комиссий" in up
+    assert "итог по журналу <b>+4.2R</b>" in up and "до комиссий" in up and "$" not in up
+    assert "в реальной торговле" in up and "Прибыль не обещаем" in up
     assert "7 полных сигналов в неделю" in up and "/check" in up and "минус" not in up
-    down = templates.render_trial_ended({"signals": 9, "closed": 6, "total_r": -2.0}, 7,
-                                        depo=(1000.0, 2.0))
-    assert "<b>-2.0R</b>" in down and "≈ -40$ на депозит $1 000 при риске 2%" in down
+    down = templates.render_trial_ended({"signals": 9, "closed": 6, "total_r": -2.0}, 7)
+    assert "<b>-2.0R</b>" in down and "$" not in down
     assert "вышли в минус" in down and "/stats" in down
     pending = templates.render_trial_ended({"signals": 3, "closed": 0, "total_r": 0.0}, 0)
     assert "закрытых пока нет" in pending and "полных сигналов" not in pending
