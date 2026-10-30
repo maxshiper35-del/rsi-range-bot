@@ -1052,6 +1052,16 @@ def unlock_verdict(row, price: int) -> str:
     return "ok"
 
 
+def signal_action_loader(is_admin: bool):
+    """Загрузчик строки сигнала для кнопок «📈 График»/«🧮 Риск» (id из callback_data).
+
+    Админ видит любой сигнал (тени, кандидатов — для разбора). Остальным — только
+    публичный журнал: id в callback_data подделывается, а тени/кандидаты (их уровни не
+    публикуются никому) по перебору id уходили бы любому подписчику и триальщику
+    (аудит безопасности 30.10.2026)."""
+    return journal.signal_row if is_admin else journal.public_signal_row
+
+
 def build_signal_chart_data(sig: Signal, sid: int, df: pd.DataFrame,
                             updated_label: str, max_bars: int = 56) -> dict:
     """Собрать вход для graphics.build_signal_chart_html из Signal + свежих баров.
@@ -2511,13 +2521,16 @@ def main() -> None:
             return None, None
         sid = int(sid_s)
         uid = cq.from_user.id
-        if uid not in cfg.admin_ids \
+        is_admin = uid in cfg.admin_ids
+        if not is_admin \
                 and not await asyncio.to_thread(payments.is_paid, uid) \
                 and not await asyncio.to_thread(payments.delivered_full, uid, sid):
             await cq.answer("Доступно получателям полного сигнала — /subscribe.",
                             show_alert=True)
             return None, None
-        row = await asyncio.to_thread(journal.signal_row, sid)
+        # тень/кандидат для не-админа — «не найден», как и несуществующий id: сам факт
+        # существования непубликуемого сигнала тоже не раскрываем
+        row = await asyncio.to_thread(signal_action_loader(is_admin), sid)
         if row is None:
             await cq.answer("Сигнал не найден.", show_alert=True)
             return None, None
@@ -4270,7 +4283,10 @@ def main() -> None:
     @dp.message(F.forward_origin, F.chat.type == "private")
     async def _check_forward(m):
         from app.delivery import signal_check
-        sig = signal_check.parse_signal(m.text or m.caption or "")
+        # разбор — в потоке: текст присылает кто угодно, и до лимита 20/сутки (лимит
+        # считает только распознанные сигналы). Синхронный разбор на event loop при
+        # квадратичном regex замораживал ВЕСЬ бот на 5 с за сообщение (аудит 30.10.2026)
+        sig = await asyncio.to_thread(signal_check.parse_signal, m.text or m.caption or "")
         if sig is None:
             await m.answer("Не нашёл в посте сигнал: нужны монета, LONG/SHORT, вход "
                            "(или «по рынку») и стоп. Подробнее — /check")

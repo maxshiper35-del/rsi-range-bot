@@ -135,6 +135,52 @@ def test_wrong_side_targets_dropped():
     assert s.targets == [110]
 
 
+# --- ReDoS: разбор чужого текста обязан быть линейным (аудит безопасности 30.10.2026) ---
+# Каждый вход — ~4 КБ (потолок текста Telegram). ДО фикса: 0.35–5.5 с на ОДНО сообщение,
+# причём синхронно на event loop бота (весь бот стоял); после — единицы миллисекунд.
+_N = 4096
+_ADVERSARIAL = {
+    "число-простыня в строке стопа": "BTC/USDT LONG\nstop " + "1" * (_N - 30),
+    "число-простыня строкой-значением": "BTC/USDT LONG\nstop 1\n" + "1" * (_N - 30),
+    "число-простыня во входе": "BTC/USDT LONG\nentry " + "9" * (_N - 30) + "\nstop 1",
+    "пробелы после числа (value-строка)": "BTC/USDT LONG\nstop 1\n1" + " " * (_N - 40) + "x",
+    "пробелы после тикера (пара)": "AA" + " " * (_N - 10) + "x long",
+    "пробелы после ключа (номер позиции)": "BTC/USDT LONG\nstop" + " " * (_N - 30) + "x",
+    "пробелы после coin:": "SHORT coin" + " " * (_N - 20) + "!",
+    "сверхдлинный текст": "BTC/USDT LONG\nentry 100\nstop 90\n" + "1" * (3 * _N),
+}
+
+
+@pytest.mark.parametrize("name", list(_ADVERSARIAL))
+def test_parse_is_fast_on_adversarial_input(name):
+    import time
+    txt = _ADVERSARIAL[name]
+    best = float("inf")
+    for _ in range(3):                      # минимум из трёх — без шума GC/загрузки машины
+        t0 = time.perf_counter()
+        sc.parse_signal(txt)
+        best = min(best, time.perf_counter() - t0)
+    assert best < 0.2, f"{name}: {best * 1000:.0f} мс — квадратичный regex вернулся?"
+
+
+def test_regex_rewrite_keeps_semantics():
+    """Линейные шаблоны распознают ровно то же, что прежние (дифференциальный фаззинг
+    90 тыс. текстов при фиксе — 0 расхождений); здесь — закреплённые крайние случаи."""
+    # проценты, R-мультипликаторы, соотношения и плечо — не цены
+    assert sc._nums("TP 65300 (50%) +1.5R 1:3.5 x10 20x 64000") == [65300.0, 64000.0]
+    assert sc._nums("5-3R 7") == [5.0, 7.0]
+    assert sc._nums("1.2.3% 4") == [1.0, 4.0]
+    # тикер: через дефис с пробелами, слитно, через слэш, по ключевому слову
+    assert sc._coin("ETH - USDT long") == "ETH"
+    assert sc._coin("SOLUSDT short") == "SOL"
+    assert sc._coin("S / USDT long") == "S"
+    assert sc._coin("монета - ADA шорт") == "ADA"
+    # номер позиции после ключевого слова и строка-значение со скобкой
+    assert sc._INDEX.sub(" ", " № 2) 1.55") == "  1.55"
+    assert sc._VALUE_LINE.fullmatch("• 0.3150 - 0.3100 (3.0R)  ")
+    assert not sc._VALUE_LINE.fullmatch("1 x")
+
+
 # --- прогон по барам ---
 
 LONG = sc.ParsedSignal("BTC", "LONG", 100.0, 100.0, 90.0, [110.0, 120.0])

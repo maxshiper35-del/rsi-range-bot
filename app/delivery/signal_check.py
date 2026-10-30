@@ -22,7 +22,16 @@ import pandas as pd
 from app.delivery.templates import _price, esc
 
 MAX_AGE_DAYS = 180
+# потолок длины разбираемого текста: Telegram сам не даёт больше 4096 символов (текст) —
+# страховка на случай нового вызывающего кода, а не ограничение для реальных постов
+MAX_TEXT_CHARS = 4096
 
+# ReDoS (аудит безопасности 30.10.2026): разбор идёт по тексту, присланному КЕМ УГОДНО
+# (пересланный пост), поэтому ни один шаблон не должен быть квадратичным по длине строки.
+# Было: «\d+…» без якоря в re.sub пробовал каждую позицию внутри длинного числа (4 КБ
+# цифр — 5.3 с на ОДНО сообщение), а пары «\s*X?\s*» перебирали все разбиения пробелов.
+# Правила: число матчится только с начала серии цифр — «(?<!\d)», необязательный
+# разделитель вместе со своими пробелами — «(?:\s*X)?». Язык совпадений тот же.
 _NUM = r"\d+(?:\.\d+)?"
 _SKIP_LINE = re.compile(r"плеч|leverage|cross|isolated|кросс|изол|маржа|margin|риск|risk|депо|"
                         r"r/r|\brr\b|соотнош|уверенн|confidence", re.I)
@@ -34,19 +43,19 @@ _TP_KW = re.compile(r"take[ -]?profit|\btp\d?\b|\bтп\d?\b|take|тейк|цел
                     r"profit", re.I)
 _KINDS = (("stop", _STOP_KW), ("tp", _TP_KW), ("entry", _ENTRY_KW))
 # номер позиции сразу после ключевого слова: «Target 1: 1.55», «Entry 2) 63500»
-_INDEX = re.compile(r"^\s*№?\s*\d\s*(?:[:)=]|\.(?=\s))")
+_INDEX = re.compile(r"^\s*(?:№\s*)?\d\s*(?:[:)=]|\.(?=\s))")
 # строка-значение под заголовком секции (Cornix): «1) 64000», «• 0.3150 - 0.3100»
 _ITEM = r"^[\s•·*>→\-]*\d+[).]\s+"
 _VALUE_LINE = re.compile(r"[\s•·*>→\-]*(?:\d+[).]\s+)?" + _NUM
-                         + r"(?:\s*[-/,;]\s*" + _NUM + r")*\s*(?:\(.*\))?\s*")
+                         + r"(?:\s*[-/,;]\s*" + _NUM + r")*\s*(?:\(.*\)\s*)?")
 _LONG = re.compile(r"\blong\b|лонг|\bbuy\b|покупк|🟢|📈", re.I)
 _SHORT = re.compile(r"\bshort\b|шорт|\bsell\b|продаж|🔴|📉", re.I)
 _MARKET = re.compile(r"по рынку|market|по текущ", re.I)
 # «S/USDT» — однобуквенный тикер только через «/»; слитно («SUSDT») — от двух символов
-_PAIR = re.compile(r"\b(?:([A-Z0-9]{1,15})\s*/|([A-Z0-9]{2,15})\s*-?)\s*(?:USDT|USDC|USD|PERP)\b",
-                   re.I)
+_PAIR = re.compile(r"\b(?:([A-Z0-9]{1,15})\s*/|([A-Z0-9]{2,15})(?:\s*-)?)\s*"
+                   r"(?:USDT|USDC|USD|PERP)\b", re.I)
 _TAG = re.compile(r"[#$]([A-Za-z0-9]{2,15})\b")
-_COIN_KW = re.compile(r"(?:монета|coin|pair|пара|тикер|ticker)\s*[:\-]?\s*[#$]?"
+_COIN_KW = re.compile(r"(?:монета|coin|pair|пара|тикер|ticker)\s*(?:[:\-]\s*)?[#$]?"
                       r"([A-Za-z0-9]{2,15})\b", re.I)
 _NOT_COIN = {"LONG", "SHORT", "BUY", "SELL", "SIGNAL", "SIGNALS", "FUTURES", "SPOT", "VIP",
              "TP", "SL", "ENTRY", "USDT", "USD", "CRYPTO", "TRADE", "TRADING", "SCALP",
@@ -78,12 +87,16 @@ def _normalize(text: str) -> str:
     return t
 
 
+_PCT = re.compile(r"(?<!\d)" + _NUM + r"\s*%")                     # проценты — не цены
+_RMULT = re.compile(r"[+-]?(?<!\d)" + _NUM + r"\s*R\b")             # R-мультипликаторы «(3.0R)»
+_RATIO = re.compile(r"(?<!\d)\d+\s*:\s*" + _NUM)                     # соотношения «1:3.0»
+_LEVERAGE = re.compile(r"(?<![A-Za-zА-Яа-я])[xх×]\s*\d+|(?<!\d)\d+\s*[xх×](?![A-Za-zА-Яа-я])",
+                       re.I)                                         # плечо «x10» / «10x»
+
+
 def _nums(s: str) -> list[float]:
-    s = re.sub(_NUM + r"\s*%", " ", s)                # проценты — не цены
-    s = re.sub(r"[+-]?" + _NUM + r"\s*R\b", " ", s)   # R-мультипликаторы «(3.0R)»
-    s = re.sub(r"\d+\s*:\s*" + _NUM, " ", s)           # соотношения «1:3.0»
-    s = re.sub(r"(?<![A-Za-zА-Яа-я])[xх×]\s*\d+|\d+\s*[xх×](?![A-Za-zА-Яа-я])", " ", s,
-               flags=re.I)                              # плечо «x10» / «10x»
+    for rx in (_PCT, _RMULT, _RATIO, _LEVERAGE):
+        s = rx.sub(" ", s)
     return [float(x) for x in re.findall(_NUM, s)]
 
 
@@ -124,7 +137,7 @@ def _side(t: str) -> str | None:
 def parse_signal(text: str) -> ParsedSignal | None:
     """Монета, сторона, вход (одно число или зона), стоп, цели. Без монеты/стороны/стопа
     или с несогласованной геометрией (стоп не по ту сторону входа) -> None."""
-    t = _normalize(text or "")
+    t = _normalize((text or "")[:MAX_TEXT_CHARS])
     coin, side = _coin(t), _side(t)
     if not coin or not side:
         return None
