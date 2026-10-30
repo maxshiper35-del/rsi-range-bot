@@ -10,6 +10,11 @@
 # новый туннель получает новый URL и сам вписывает его в webapp_url.
 cd "/Users/mac/bot ctypto" || exit 1
 LOG=logs/tunnel.log
+# адрес quick-tunnel — всегда слова через дефис (foo-bar-baz.trycloudflare.com). Без
+# требования дефиса шаблон ловил и https://api.trycloudflare.com из текста ОШИБКИ
+# cloudflared («failed to request quick Tunnel: Post "https://api.trycloudflare.com/…"») —
+# 29.10 03:41 он ушёл в webapp_url, кнопка «Дашборд» вела на API Cloudflare (аудит 30.10)
+URL_RE='https://[a-z0-9]+(-[a-z0-9]+)+\.trycloudflare\.com'
 # ротация: ретрай-спам надувал лог на мегабайты — начинаем такт с чистого листа,
 # предыдущий хвост держим в tunnel.log.1 для разбора
 [[ -f "$LOG" ]] && mv "$LOG" "$LOG.1"
@@ -19,7 +24,7 @@ CF=$!
 trap 'kill "$CF" 2>/dev/null' EXIT
 URL=""
 for i in {1..60}; do
-  URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG" | head -1)
+  URL=$(grep -oE "$URL_RE" "$LOG" | grep -v '^https://api\.' | head -1)
   [[ -n "$URL" ]] && break
   sleep 1
 done

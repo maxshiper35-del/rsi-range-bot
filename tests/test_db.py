@@ -69,3 +69,19 @@ def test_migration_atomicity_partial_failure_rolls_back(fresh_db, tmp_path):
     assert "atomicity_test" in tables
     applied = {r["name"] for r in db.query("SELECT name FROM schema_migrations")}
     assert "999_broken.sql" in applied
+
+
+def test_tests_never_touch_repo_db_or_dotenv():
+    """Страж изоляции (аудит надёжности 30.10): без fresh_db тесты ходят в сессионную
+    временную БД, а не в data/signals.db (в основном checkout — живая прод-база), и
+    боевой .env в тестовый процесс не подтягивается."""
+    import pathlib
+
+    import dotenv
+
+    from app.config import get_settings
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    db_path = get_settings().db_path.resolve()
+    assert repo / "data" not in db_path.parents, db_path
+    assert dotenv.load_dotenv() is False                 # заглушка conftest, не чтение .env

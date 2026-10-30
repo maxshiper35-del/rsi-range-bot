@@ -8,6 +8,7 @@ SMC-интеграция реализована чистыми функциям�
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 from collections import deque
@@ -79,6 +80,26 @@ DATAOG_DIR = Path("data")
 async def _render_png(fn, *args):
     async with _RENDER_SEM:
         return await asyncio.to_thread(fn, *args)
+
+
+async def call_with_flood_retry(make_call, *, max_wait: float = 60.0, sleep=None):
+    """Один повтор после 429 (flood control) — для ПУБЛИЧНЫХ постов канала и /announce.
+
+    Лимит Telegram на один чат/канал ~20 сообщений в минуту, а массовое закрытие
+    (коррелированные стопы, до 12 позиций при лимите 6 на сторону) даёт залп постов-
+    итогов: 13.07 было 16 постов за минуту. Без повтора TelegramRetryAfter сразу уходил
+    в фолбэк фото->текст (тот же флуд-контроль) и пост-итог терялся НАСОВСЕМ — а в залпе
+    стопов теряются именно минусы, публичный трек-рекорд выглядел бы отобранным (аудит
+    надёжности 30.10). make_call — фабрика корутины (повтор требует новой); ждём столько,
+    сколько велел Telegram (с потолком max_wait), второй отказ уходит наверх."""
+    from aiogram.exceptions import TelegramRetryAfter
+
+    sleep = sleep or asyncio.sleep
+    try:
+        return await make_call()
+    except TelegramRetryAfter as e:
+        await sleep(min(float(e.retry_after), max_wait) + 1.0)
+        return await make_call()
 
 
 def _side_capacity_ok(side_value: str, symbol: str) -> bool:
@@ -1156,6 +1177,27 @@ def should_alert_poller_stale(last_tick_at: str | None, last_alert_at: str | Non
     return (now - datetime.fromisoformat(last_alert_at)).total_seconds() >= rethrottle_hours * 3600
 
 
+def should_alert_data_stale(last_ok_at: str | None, last_tick_at: str | None,
+                            last_alert_at: str | None, now_iso: str, stale_seconds: float,
+                            uptime_seconds: float, rethrottle_hours: int = 6) -> bool:
+    """Сторож СЛЕПОТЫ (аудит надёжности 30.10): такты поллера идут, но ни один не получил
+    баров биржи дольше stale_seconds — Bybit лежит, бан или гео-блок IP. До этого сторожа
+    такое было тишиной: тик ставится при пробуждении, поэтому и watchdog поллера, и пульс
+    healthchecks зелёные, а сбои фетча — только WARNING в логе (в DM админам идут ERROR).
+    Тик сам устарел — молчим: это дело should_alert_poller_stale, один алерт на причину.
+    Тиков ещё не было — тоже молчим (свежая БД/старт). Метки данных нет вовсе при живых
+    тиках после грейса аптайма — тревога: хоть один удачный такт успел бы её поставить."""
+    from datetime import datetime
+
+    if last_tick_at is None:
+        return False
+    tick_age = (datetime.fromisoformat(now_iso) - datetime.fromisoformat(last_tick_at))
+    if tick_age.total_seconds() >= stale_seconds:
+        return False
+    return should_alert_poller_stale(last_ok_at, last_alert_at, now_iso, stale_seconds,
+                                     uptime_seconds, rethrottle_hours)
+
+
 _healthcheck_ok_logged = False
 
 
@@ -1646,12 +1688,18 @@ def poller_tick_slack_seconds(timeframes: list) -> float:
     return max(youngest * 1.15, youngest + 300)
 
 
+_NOT_SHOWN = object()
+
+
 def format_health(uptime_seconds: float, last_tick_at: str | None,
                   last_backup_at: str | None, db_size_bytes: int, wal_mode: str,
-                  tick_slack_seconds: float = 3700.0) -> str:
+                  tick_slack_seconds: float = 3700.0, *,
+                  data_ok_at: object = _NOT_SHOWN) -> str:
     """/health — быстрый живой чек: аптайм, последний тик поллера, бэкап, БД, WAL.
     tick_slack_seconds — см. poller_tick_slack_seconds (дефолт — старое поведение
-    под 15m, для обратной совместимости вызовов без явного расчёта)."""
+    под 15m, для обратной совместимости вызовов без явного расчёта). data_ok_at —
+    метка последнего такта, получившего бары биржи (строка показывается, если передана):
+    тик без данных = поллер жив, но слеп (аудит надёжности 30.10)."""
     from datetime import datetime
 
     now = datetime.now(timezone.utc)
@@ -1662,11 +1710,18 @@ def format_health(uptime_seconds: float, last_tick_at: str | None,
                           .total_seconds() > tick_slack_seconds) else "✅ "
     backup_warn = "⚠️ " if (not last_backup_at or (now - datetime.fromisoformat(last_backup_at))
                             .total_seconds() > 26 * 3600) else "✅ "
+    data_line = ""
+    if data_ok_at is not _NOT_SHOWN:
+        data_iso = data_ok_at if isinstance(data_ok_at, str) and data_ok_at else None
+        data_warn = "⚠️ " if (not data_iso or (now - datetime.fromisoformat(data_iso))
+                              .total_seconds() > tick_slack_seconds) else "✅ "
+        data_line = f"{data_warn}Бары биржи получены: {_fmt_age(data_iso, now)}\n"
     return (
         "❤️ Health check\n"
         "────────────────────\n"
         f"Аптайм процесса: {up_h:.1f}ч\n"
         f"{tick_warn}Последний тик poller: {tick_age}\n"
+        f"{data_line}"
         f"{backup_warn}Последний бэкап: {backup_age}\n"
         f"БД: {db_size_bytes / 1024:.0f} KB, journal_mode={wal_mode}"
     )
@@ -3238,7 +3293,8 @@ def main() -> None:
         uptime, wal, size = await asyncio.to_thread(_collect)
         slack = poller_tick_slack_seconds(runtime.timeframes())
         await m.answer(format_health(uptime, runtime.last_poller_tick_at(),
-                                     runtime.last_backup_at(), size, wal, slack))
+                                     runtime.last_backup_at(), size, wal, slack,
+                                     data_ok_at=runtime._raw("last_poll_ok_at")))
 
     @dp.message(Command("pause"))
     async def _pause(m):
@@ -4078,16 +4134,21 @@ def main() -> None:
         channel = runtime.signals_channel()
         if channel and runtime.channel_enabled():
             try:
-                await bot.send_message(channel, text)
+                await call_with_flood_retry(lambda: bot.send_message(channel, text))
                 n += 1
             except Exception as e:                     # noqa: BLE001
                 log.warning("announce channel: %s", e)
+        # как рассылка сигнала: повтор после 429, пауза между отправками, мёртвых — в
+        # blocked. Раньше 429 молча съедал сообщение получателю (аудит надёжности 30.10)
         for uid in await asyncio.to_thread(payments.active_subscriber_ids):
             try:
-                await bot.send_message(uid, text)
+                await _send_retry(uid, text)
                 n += 1
             except Exception as e:                     # noqa: BLE001
                 log.warning("announce %s: %s", uid, e)
+                if _dead_recipient(e):
+                    await asyncio.to_thread(payments.mark_blocked, uid)
+            await asyncio.sleep(0.05)
         await m.answer(f"📣 Отправлено получателям: {n}")
 
     @dp.callback_query(F.data.startswith("adm_"))
@@ -4612,18 +4673,28 @@ def main() -> None:
                 photo = await _render_png(_chart_for_id, sid)
             except Exception as e:                     # noqa: BLE001 — биржа/рендер
                 log.warning("карта поста #%s: %s", sid, e)
+        # каждый вызов — через повтор после 429: залп итогов при массовом закрытии упирается
+        # в лимит канала, и без повтора пост-итог терялся насовсем (аудит надёжности 30.10)
+        def _text_post():
+            return bot.send_message(channel, text, parse_mode="HTML", reply_markup=kb)
+
         if photo is None:
-            return await bot.send_message(channel, text, parse_mode="HTML", reply_markup=kb)
-        file = BufferedInputFile(photo, filename=f"signal_{sid}.png")
+            return await call_with_flood_retry(_text_post)
+        png: bytes = photo
+
+        def _file():                                   # свежий объект загрузки на попытку
+            return BufferedInputFile(png, filename=f"signal_{sid}.png")
+
         try:
             if caption_fits(text):
-                return await bot.send_photo(channel, file, caption=text, parse_mode="HTML",
-                                            reply_markup=kb)
-            await bot.send_photo(channel, file)        # подпись не влезла — фото отдельно
+                return await call_with_flood_retry(lambda: bot.send_photo(
+                    channel, _file(), caption=text, parse_mode="HTML", reply_markup=kb))
+            # подпись не влезла — фото отдельно
+            await call_with_flood_retry(lambda: bot.send_photo(channel, _file()))
         except Exception as e:                         # noqa: BLE001 — сбой ОТПРАВКИ фото
             # тоже откат на текст: раньше терялся весь пост (аудит-2 UX [10])
             log.warning("фото поста #%s: %s", sid, e)
-        return await bot.send_message(channel, text, parse_mode="HTML", reply_markup=kb)
+        return await call_with_flood_retry(_text_post)
 
     def _watchlist_gate(symbol: str) -> tuple:
         # бэктест-гейт кандидата в авто-watchlist: 6 мес 1h на включённых сетапах
@@ -4963,6 +5034,24 @@ def main() -> None:
                 except Exception as e:                     # noqa: BLE001
                     log.warning("poller stale алерт админу %s: %s", admin_id, e)
             await asyncio.to_thread(runtime.set_last_poller_alert_at, now_)
+        # сторож слепоты: такты идут, а бары биржи не приходят (Bybit лежит/бан/гео-блок IP)
+        # — сигналов и судейства открытых нет, а пульс healthchecks зелёный (аудит 30.10)
+        last_data = runtime._raw("last_poll_ok_at")
+        if should_alert_data_stale(last_data, runtime.last_poller_tick_at(),
+                                   runtime._raw("last_data_alert_at"), now_, tick_stale,
+                                   uptime_s):
+            data_age = _fmt_age(last_data, datetime.now(timezone.utc))
+            text = (f"⚠️ Биржа данных не отдаёт бары (последний удачный такт: {data_age}). "
+                    "Такты идут, но ни один символ не загрузился — новых сигналов и "
+                    "судейства открытых сделок нет; пульс healthchecks при этом зелёный. "
+                    "Вероятно, Bybit недоступен или ограничил IP: logs/bot.log, строки "
+                    "«poll …» и «такт: …». Открытые позиции на бирже держат свои стопы.")
+            for admin_id in cfg.admin_ids:
+                try:
+                    await bot.send_message(admin_id, text)
+                except Exception as e:                     # noqa: BLE001
+                    log.warning("data stale алерт админу %s: %s", admin_id, e)
+            await asyncio.to_thread(runtime.set_value, "last_data_alert_at", now_)
         # пауза висит давно — напомнить админу (раз в сутки), чтобы молчание бота не
         # выглядело поломкой и не стоило недель без сигналов
         try:
@@ -5369,9 +5458,13 @@ def main() -> None:
                 # _maintenance блокировала бы 60с-цикл (пульс dead-man's switch, watchdog
                 # поллера, активацию оплат) на минуты (ревью 12.08). Маркер недели уже
                 # стоит — повторный вход в _maintenance рассылку не продублирует.
-                asyncio.create_task(_send_digests(
+                # Ссылка в _BG_TASKS: цикл событий держит задачи слабо — таску без ссылки
+                # сборщик мусора вправе прибить посреди рассылки (аудит надёжности 30.10)
+                d_task = asyncio.create_task(_send_digests(
                     d_text, d_label, d_wk, d_st,
                     d_start.isoformat(), d_end.isoformat()))
+                _BG_TASKS.add(d_task)
+                d_task.add_done_callback(_BG_TASKS.discard)
             except Exception as e:                          # noqa: BLE001
                 log.warning("недельный дайджест: %s", e)
 
@@ -5513,9 +5606,9 @@ def main() -> None:
                         channel, c["id"], templates.render_fill(c, show_price), want_chart)
                     log.info("сигнал #%s: пост filled OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] == "expired":
-                    msg = await bot.send_message(channel, templates.render_expired(c),
-                                                 parse_mode="HTML",
-                                                 reply_markup=_channel_kb("chres"))
+                    msg = await call_with_flood_retry(functools.partial(
+                        bot.send_message, channel, templates.render_expired(c),
+                        parse_mode="HTML", reply_markup=_channel_kb("chres")))
                     log.info("сигнал #%s: пост expired OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] in ("tp1", "tp2", "tp3", "stopped"):
                     want_chart = lifecycle_chart_wanted(
@@ -5621,8 +5714,10 @@ def main() -> None:
                     fired = await asyncio.to_thread(
                         alerts_mod.check_and_trigger, symbol,
                         max(prev, close), min(prev, close))
-                    if fired:
-                        asyncio.create_task(_push_alerts(fired))
+                    if fired:                           # ссылка — от сборщика мусора
+                        a_task = asyncio.create_task(_push_alerts(fired))
+                        _BG_TASKS.add(a_task)
+                        a_task.add_done_callback(_BG_TASKS.discard)
             except Exception as e:                     # noqa: BLE001
                 log.warning("alerts %s: %s", symbol, e)
             rows = await asyncio.to_thread(journal.unfilled_open_signals, symbol)
