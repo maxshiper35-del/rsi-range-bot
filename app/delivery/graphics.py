@@ -33,9 +33,9 @@ _ASSETS = Path(__file__).parent / "assets"
 # Цвета для SVG (атрибуты SVG не понимают var()) — зеркало токенов assets/brand.css;
 # синхронность сторожит tests/test_graphics.py.
 POS, NEG, ACC = "#1f9e6e", "#f6465d", "#f7a600"
-INK, INK2, INK3 = "#eaecef", "#8a94a1", "#5c6672"
-BG, PANEL, LINE, GRID, ZERO = "#0b0e11", "#14181d", "#232a32", "#1b2027", "#3a424c"
-_MINUS = "−"       # типографский минус «−»: по ширине равен плюсу (дефис короче)
+INK, INK2, INK3 = "#eef0f3", "#a3abb6", "#6c7480"
+BG, PANEL, LINE, GRID, ZERO = "#08090b", "#0f1115", "#1c2026", "#15181d", "#3a414a"
+_MINUS = chr(0x2212)  # типографский минус «−»: по ширине равен плюсу (дефис короче)
 
 # (CSS-семейство, вес, файл в assets/fonts). RR Sans = Inter 3.019, RR Mono = IBM Plex
 # Mono 2.3 (у Plex Reserved Font Name — изменённый сабсет обязан носить другое имя).
@@ -442,10 +442,10 @@ _CHART_STYLE = """
   /* SVG рисуется ровно во внутреннюю ширину карточки (_CHART_W); width:100% — страховка:
      при любом изменении полей теги цены сожмутся вместе с графиком, а не вылезут за край */
   .chart-card svg { display: block; width: 100%; height: auto; }
-  svg .ck { font: 400 13px var(--mono); fill: #8a94a1; }
+  svg .ck { font: 400 13px var(--mono); fill: var(--ink-3); }
   svg .tg-l { font: 700 12px var(--sans); letter-spacing: .07em; }
   svg .tg-p { font: 700 15px var(--mono); }
-  svg .mk-l { font: 600 12px var(--sans); letter-spacing: .06em; fill: #8a94a1; }
+  svg .mk-l { font: 600 12px var(--sans); letter-spacing: .06em; fill: var(--ink-2); }
 """
 
 _CHART_BODY = Template("""
@@ -795,9 +795,9 @@ _GAME_STYLE = """
   .game-note b { color: var(--ink); font-weight: 600; }
   svg text { font-family: var(--sans); }
   /* моно-пробел разрядов («82 000») шире цифры — поджимаем, чтобы число читалось целым */
-  svg .ck { font: 400 13px var(--mono); fill: #8a94a1; word-spacing: -3px; }
+  svg .ck { font: 400 13px var(--mono); fill: var(--ink-3); word-spacing: -3px; }
   svg .gz { font: 700 23px var(--sans); }
-  svg .gl { font: 600 13px var(--sans); letter-spacing: .06em; fill: #8a94a1; }
+  svg .gl { font: 600 13px var(--sans); letter-spacing: .06em; fill: var(--ink-2); }
   svg .gp { font: 700 15px var(--mono); word-spacing: -3px; }
 """
 
@@ -1101,39 +1101,40 @@ def render_dashboard_png(data: dict) -> bytes:
 # ---------------------------------------------------------------------------
 
 _ACCOUNT_STYLE = """
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:#0a0c0f; color:#edeff2; -webkit-font-smoothing:antialiased;
-         font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,sans-serif; }
+  /* токены и встроенные шрифты — из brand_css() (на сервере нет SF/Segoe: без них карточка
+     рисовалась бы запасным шрифтом); раскладка и свечение — как в Mini App v7 */
+  body { background:var(--bg); color:var(--ink); font-family:var(--sans); }
   .card { width:1080px; padding:60px 64px 44px; background:
-          radial-gradient(900px 420px at 85% -10%, rgba(247,166,0,.07), transparent 60%), #0a0c0f; }
+          radial-gradient(900px 420px at 85% -10%, rgba(247,166,0,.07), transparent 60%), var(--bg); }
   .head { display:flex; justify-content:space-between; align-items:center; }
-  .brand { display:flex; align-items:center; gap:14px; font:700 24px/1 ui-monospace,"SF Mono",Menlo,monospace;
+  .brand { display:flex; align-items:center; gap:14px; font:700 24px/1 var(--mono);
            letter-spacing:.16em; }
-  .brand i { width:14px; height:14px; border-radius:4px; background:#f7a600; }
-  .tag { font-size:20px; color:#6b7480; }
-  .lbl { margin-top:54px; font-size:21px; color:#a1a9b4; letter-spacing:.02em; }
+  .brand i { width:14px; height:14px; border-radius:4px; background:var(--acc); }
+  .tag { font-size:20px; color:var(--ink-3); }
+  .lbl { margin-top:54px; font-size:21px; color:var(--ink-2); letter-spacing:.02em; }
   .bal { font-size:132px; font-weight:700; letter-spacing:-.035em; line-height:1.02; margin-top:6px; }
   .row { display:flex; align-items:center; gap:18px; margin-top:18px; }
-  .pill { font-size:30px; font-weight:650; padding:9px 20px; border-radius:999px; }
-  .pill.pos { color:#1f9e6e; background:rgba(31,158,110,.14); }
-  .pill.neg { color:#f6465d; background:rgba(246,70,93,.14); }
-  .pill.zero { color:#a1a9b4; background:rgba(255,255,255,.06); }
-  .sub { font-size:22px; color:#6b7480; }
-  .chart { margin-top:38px; height:300px; border-radius:22px; background:#111419;
-           border:1px solid rgba(255,255,255,.06); padding:18px 18px 12px; }
+  .pill { font-size:30px; font-weight:650; padding:9px 20px; border-radius:999px;
+          white-space:nowrap; flex:none; }   /* Inter шире SF — без nowrap пилюля ломалась */
+  .pill.pos { color:var(--pos); background:var(--pos-bg); }
+  .pill.neg { color:var(--neg); background:var(--neg-bg); }
+  .pill.zero { color:var(--ink-2); background:rgba(255,255,255,.06); }
+  .sub { font-size:20px; line-height:1.35; color:var(--ink-3); }
+  .chart { margin-top:38px; height:300px; border-radius:22px; background:var(--panel);
+           border:1px solid var(--line); padding:18px 18px 12px; }
   .chart svg { width:100%; height:100%; display:block; }
   .tiles { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-top:16px; }
-  .tile { background:#111419; border:1px solid rgba(255,255,255,.06); border-radius:20px;
+  .tile { background:var(--panel); border:1px solid var(--line); border-radius:20px;
           padding:20px 22px; }
-  .tile .k { display:block; font-size:18px; color:#6b7480; }
+  .tile .k { display:block; font-size:18px; color:var(--ink-3); }
   .tile b { display:block; font-size:38px; font-weight:650; margin-top:8px; letter-spacing:-.01em; }
-  .y { margin-top:16px; font-size:23px; color:#a1a9b4; background:#111419; border-radius:20px;
-       border:1px solid rgba(255,255,255,.06); padding:18px 22px; }
-  .y b { color:#edeff2; }
-  .pos { color:#1f9e6e; } .neg { color:#f6465d; }
+  .y { margin-top:16px; font-size:23px; color:var(--ink-2); background:var(--panel); border-radius:20px;
+       border:1px solid var(--line); padding:18px 22px; }
+  .y b { color:var(--ink); }
+  .pos { color:var(--pos); } .neg { color:var(--neg); }
   .foot { display:flex; justify-content:space-between; gap:30px; margin-top:34px; padding-top:22px;
-          border-top:1px solid rgba(255,255,255,.07); font-size:17px; color:#6b7480; line-height:1.5; }
-  .foot b { color:#a1a9b4; font-weight:600; white-space:nowrap; }
+          border-top:1px solid var(--line); font-size:17px; color:var(--ink-3); line-height:1.5; }
+  .foot b { color:var(--ink-2); font-weight:600; white-space:nowrap; }
 """
 
 _ACCOUNT_BODY = Template("""
@@ -1192,7 +1193,7 @@ def _balance_svg(series: list, w: int = 916, h: int = 270) -> str:
         f'stroke-linejoin="round" stroke-linecap="round" clip-path="url(#up)"/>'
         f'<polyline points="{pts}" fill="none" stroke="#f6465d" stroke-width="3.5" '
         f'stroke-linejoin="round" stroke-linecap="round" clip-path="url(#dn)"/>'
-        f'<circle cx="{x(n)}" cy="{y(series[-1])}" r="7" fill="{end_col}" stroke="#111419" '
+        f'<circle cx="{x(n)}" cy="{y(series[-1])}" r="7" fill="{end_col}" stroke="{PANEL}" '
         f'stroke-width="4"/></svg>')
 
 
@@ -1219,7 +1220,7 @@ def build_account_card_html(data: dict) -> str:
         winrate=f"{round(data['wins'] / trades * 100)}%" if trades else "—",
         dd=f"−{data['max_dd_pct']:.1f}%" if data["max_dd_pct"] >= 0.05 else "0%",
         yesterday=yesterday, bot=_esc(data.get("bot") or "rsirange_bot"))
-    return f"<style>{_ACCOUNT_STYLE}</style>{body}"
+    return f"<style>{brand_css()}{_ACCOUNT_STYLE}</style>{body}"
 
 
 def render_account_card(data: dict) -> bytes:
