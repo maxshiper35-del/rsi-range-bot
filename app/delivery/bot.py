@@ -8,6 +8,7 @@ SMC-интеграция реализована чистыми функциям�
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 from collections import deque
@@ -79,6 +80,26 @@ DATAOG_DIR = Path("data")
 async def _render_png(fn, *args):
     async with _RENDER_SEM:
         return await asyncio.to_thread(fn, *args)
+
+
+async def call_with_flood_retry(make_call, *, max_wait: float = 60.0, sleep=None):
+    """Один повтор после 429 (flood control) — для ПУБЛИЧНЫХ постов канала и /announce.
+
+    Лимит Telegram на один чат/канал ~20 сообщений в минуту, а массовое закрытие
+    (коррелированные стопы, до 12 позиций при лимите 6 на сторону) даёт залп постов-
+    итогов: 13.07 было 16 постов за минуту. Без повтора TelegramRetryAfter сразу уходил
+    в фолбэк фото->текст (тот же флуд-контроль) и пост-итог терялся НАСОВСЕМ — а в залпе
+    стопов теряются именно минусы, публичный трек-рекорд выглядел бы отобранным (аудит
+    надёжности 30.10). make_call — фабрика корутины (повтор требует новой); ждём столько,
+    сколько велел Telegram (с потолком max_wait), второй отказ уходит наверх."""
+    from aiogram.exceptions import TelegramRetryAfter
+
+    sleep = sleep or asyncio.sleep
+    try:
+        return await make_call()
+    except TelegramRetryAfter as e:
+        await sleep(min(float(e.retry_after), max_wait) + 1.0)
+        return await make_call()
 
 
 def _side_capacity_ok(side_value: str, symbol: str) -> bool:
@@ -3934,16 +3955,21 @@ def main() -> None:
         channel = runtime.signals_channel()
         if channel and runtime.channel_enabled():
             try:
-                await bot.send_message(channel, text)
+                await call_with_flood_retry(lambda: bot.send_message(channel, text))
                 n += 1
             except Exception as e:                     # noqa: BLE001
                 log.warning("announce channel: %s", e)
+        # как рассылка сигнала: повтор после 429, пауза между отправками, мёртвых — в
+        # blocked. Раньше 429 молча съедал сообщение получателю (аудит надёжности 30.10)
         for uid in await asyncio.to_thread(payments.active_subscriber_ids):
             try:
-                await bot.send_message(uid, text)
+                await _send_retry(uid, text)
                 n += 1
             except Exception as e:                     # noqa: BLE001
                 log.warning("announce %s: %s", uid, e)
+                if _dead_recipient(e):
+                    await asyncio.to_thread(payments.mark_blocked, uid)
+            await asyncio.sleep(0.05)
         await m.answer(f"📣 Отправлено получателям: {n}")
 
     @dp.callback_query(F.data.startswith("adm_"))
@@ -4339,18 +4365,28 @@ def main() -> None:
                 photo = await _render_png(_chart_for_id, sid)
             except Exception as e:                     # noqa: BLE001 — биржа/рендер
                 log.warning("карта поста #%s: %s", sid, e)
+        # каждый вызов — через повтор после 429: залп итогов при массовом закрытии упирается
+        # в лимит канала, и без повтора пост-итог терялся насовсем (аудит надёжности 30.10)
+        def _text_post():
+            return bot.send_message(channel, text, parse_mode="HTML", reply_markup=kb)
+
         if photo is None:
-            return await bot.send_message(channel, text, parse_mode="HTML", reply_markup=kb)
-        file = BufferedInputFile(photo, filename=f"signal_{sid}.png")
+            return await call_with_flood_retry(_text_post)
+        png: bytes = photo
+
+        def _file():                                   # свежий объект загрузки на попытку
+            return BufferedInputFile(png, filename=f"signal_{sid}.png")
+
         try:
             if caption_fits(text):
-                return await bot.send_photo(channel, file, caption=text, parse_mode="HTML",
-                                            reply_markup=kb)
-            await bot.send_photo(channel, file)        # подпись не влезла — фото отдельно
+                return await call_with_flood_retry(lambda: bot.send_photo(
+                    channel, _file(), caption=text, parse_mode="HTML", reply_markup=kb))
+            # подпись не влезла — фото отдельно
+            await call_with_flood_retry(lambda: bot.send_photo(channel, _file()))
         except Exception as e:                         # noqa: BLE001 — сбой ОТПРАВКИ фото
             # тоже откат на текст: раньше терялся весь пост (аудит-2 UX [10])
             log.warning("фото поста #%s: %s", sid, e)
-        return await bot.send_message(channel, text, parse_mode="HTML", reply_markup=kb)
+        return await call_with_flood_retry(_text_post)
 
     def _watchlist_gate(symbol: str) -> tuple:
         # бэктест-гейт кандидата в авто-watchlist: 6 мес 1h на включённых сетапах
@@ -5094,9 +5130,13 @@ def main() -> None:
                 # _maintenance блокировала бы 60с-цикл (пульс dead-man's switch, watchdog
                 # поллера, активацию оплат) на минуты (ревью 12.08). Маркер недели уже
                 # стоит — повторный вход в _maintenance рассылку не продублирует.
-                asyncio.create_task(_send_digests(
+                # Ссылка в _BG_TASKS: цикл событий держит задачи слабо — таску без ссылки
+                # сборщик мусора вправе прибить посреди рассылки (аудит надёжности 30.10)
+                d_task = asyncio.create_task(_send_digests(
                     d_text, d_label, d_wk, d_st,
                     d_start.isoformat(), d_end.isoformat()))
+                _BG_TASKS.add(d_task)
+                d_task.add_done_callback(_BG_TASKS.discard)
             except Exception as e:                          # noqa: BLE001
                 log.warning("недельный дайджест: %s", e)
 
@@ -5204,9 +5244,9 @@ def main() -> None:
                         channel, c["id"], templates.render_fill(c, show_price), want_chart)
                     log.info("сигнал #%s: пост filled OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] == "expired":
-                    msg = await bot.send_message(channel, templates.render_expired(c),
-                                                 parse_mode="HTML",
-                                                 reply_markup=_channel_kb("chres"))
+                    msg = await call_with_flood_retry(functools.partial(
+                        bot.send_message, channel, templates.render_expired(c),
+                        parse_mode="HTML", reply_markup=_channel_kb("chres")))
                     log.info("сигнал #%s: пост expired OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] in ("tp1", "tp2", "tp3", "stopped"):
                     want_chart = lifecycle_chart_wanted(
@@ -5312,8 +5352,10 @@ def main() -> None:
                     fired = await asyncio.to_thread(
                         alerts_mod.check_and_trigger, symbol,
                         max(prev, close), min(prev, close))
-                    if fired:
-                        asyncio.create_task(_push_alerts(fired))
+                    if fired:                           # ссылка — от сборщика мусора
+                        a_task = asyncio.create_task(_push_alerts(fired))
+                        _BG_TASKS.add(a_task)
+                        a_task.add_done_callback(_BG_TASKS.discard)
             except Exception as e:                     # noqa: BLE001
                 log.warning("alerts %s: %s", symbol, e)
             rows = await asyncio.to_thread(journal.unfilled_open_signals, symbol)

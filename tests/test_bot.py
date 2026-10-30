@@ -468,6 +468,72 @@ def test_should_alert_data_stale_blind_poller():
     assert f(data_old, tick_fresh, old_alert, now_iso, stale_s, up_long) is True
 
 
+def _retry_after(seconds: int):
+    from aiogram.exceptions import TelegramRetryAfter
+    from aiogram.methods import SendMessage
+
+    return TelegramRetryAfter(method=SendMessage(chat_id=-100, text="x"),
+                              message="Too Many Requests", retry_after=seconds)
+
+
+def test_call_with_flood_retry_waits_and_retries_once():
+    """429 на посте канала (залп итогов при массовом закрытии) — ждём, сколько велел
+    Telegram, и повторяем: раньше пост-итог (обычно минус) терялся насовсем."""
+    import asyncio
+
+    calls, slept = [], []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    async def post():
+        calls.append(1)
+        if len(calls) == 1:
+            raise _retry_after(7)
+        return "msg"
+
+    assert asyncio.run(bot.call_with_flood_retry(post, sleep=fake_sleep)) == "msg"
+    assert len(calls) == 2 and slept == [8.0]                 # retry_after + 1с запаса
+
+
+def test_call_with_flood_retry_caps_wait_and_gives_up_after_second_429():
+    import asyncio
+
+    import pytest
+    from aiogram.exceptions import TelegramRetryAfter
+
+    slept = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    async def always_flood():
+        raise _retry_after(600)
+
+    with pytest.raises(TelegramRetryAfter):
+        asyncio.run(bot.call_with_flood_retry(always_flood, max_wait=60.0, sleep=fake_sleep))
+    assert slept == [61.0]                                    # потолок, не 10 минут
+
+
+def test_call_with_flood_retry_other_errors_not_retried():
+    import asyncio
+
+    import pytest
+
+    calls = []
+
+    async def fake_sleep(s):                                  # pragma: no cover — не должен
+        raise AssertionError("не 429 — без ожидания")
+
+    async def broken():
+        calls.append(1)
+        raise RuntimeError("chat not found")
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(bot.call_with_flood_retry(broken, sleep=fake_sleep))
+    assert calls == [1]
+
+
 def test_format_health_data_freshness_line():
     from datetime import datetime, timedelta, timezone
 
