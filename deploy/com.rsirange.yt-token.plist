@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd-агент: сторож токена YouTube API (scripts/youtube_token_watch.py), раз в сутки в 09:30.
+  Приложение в тестовом режиме Google — refresh-токен живёт 7 дней; сторож обновляет его и за
+  2 дня до истечения напоминает админам в Telegram.
+  Отдельное окружение .venv-yt (библиотеки Google не ставим в окружение прод-бота).
+  Установка:
+    cp deploy/com.rsirange.yt-token.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.rsirange.yt-token.plist
+  Логи — logs/yt-token.log.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rsirange.yt-token</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mac/bot ctypto/.venv-yt/bin/python</string>
+        <string>scripts/youtube_token_watch.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/mac/bot ctypto</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mac/bot ctypto/logs/yt-token.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mac/bot ctypto/logs/yt-token.log</string>
+</dict>
+</plist>
