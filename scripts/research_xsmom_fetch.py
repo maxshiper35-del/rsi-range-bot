@@ -19,16 +19,29 @@ import csv
 import json
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 API = "https://api.bybit.com"
 CACHE = Path("/Users/mac/bot ctypto/data/cache_research/xsmom")
 START_MS = 1_606_780_800_000          # 2020-12-01 00:00 UTC — запас под 4-недельный lookback
-MIN_INTERVAL = 0.34                   # ≤ ~3 запроса в секунду
-_last = [0.0]
+MIN_INTERVAL = 0.34                   # ≤ ~3 запроса в секунду на ВСЕ потоки вместе
+_next = [0.0]
+_lock = threading.Lock()
+
+
+def _slot() -> None:
+    """Общий для потоков темп: следующий запрос не раньше MIN_INTERVAL после предыдущего."""
+    with _lock:
+        now = time.monotonic()
+        at = max(now, _next[0])
+        _next[0] = at + MIN_INTERVAL
+    if at > now:
+        time.sleep(at - now)
 
 
 def _get(path: str, params: dict) -> dict:
@@ -36,10 +49,7 @@ def _get(path: str, params: dict) -> dict:
     qs = "&".join(f"{k}={v}" for k, v in params.items())
     url = f"{API}{path}?{qs}"
     for attempt in range(8):
-        wait = MIN_INTERVAL - (time.monotonic() - _last[0])
-        if wait > 0:
-            time.sleep(wait)
-        _last[0] = time.monotonic()
+        _slot()
         try:
             with urllib.request.urlopen(url, timeout=20) as r:
                 d = json.load(r)
@@ -78,21 +88,22 @@ def fetch_klines(sym: str) -> int:
     if out.exists():
         return -1
     rows: dict[int, list[str]] = {}
-    end = int(time.time() * 1000)
-    while True:
+    # Проход ВПЕРЁД окнами по 1000 дней. API отдаёт не больше 1000 свечей ВНУТРИ окна, которое
+    # кончается в end. Для символа, снятого раньше начала окна (end − 1000 дней), ответ пуст.
+    # Поэтому прежняя пагинация «назад от сейчас» обрезала историю делистнутых по 2024-02-04,
+    # а снятые раньше приходили пустыми (найдено 30.10).
+    now = int(time.time() * 1000)
+    span = 1000 * 86_400_000
+    w0 = START_MS
+    while w0 < now:
+        w1 = min(w0 + span - 1, now)
         d = _get("/v5/market/kline", {"category": "linear", "symbol": sym, "interval": "D",
-                                      "start": START_MS, "end": end, "limit": 1000})
+                                      "start": w0, "end": w1, "limit": 1000})
         if d.get("retCode") != 0:
             break                                   # символа нет в API — пустой файл
-        lst = d["result"]["list"]
-        if not lst:
-            break
-        for k in lst:
+        for k in d["result"]["list"]:
             rows[int(k[0])] = k
-        oldest = min(int(k[0]) for k in lst)
-        if len(lst) < 1000 or oldest <= START_MS:
-            break
-        end = oldest - 1
+        w0 = w1 + 1
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(".tmp")
     with tmp.open("w", newline="") as f:
@@ -104,13 +115,13 @@ def fetch_klines(sym: str) -> int:
     return len(rows)
 
 
-def fetch_funding(sym: str, start_ms: int) -> int:
-    """История фандинга символа с start_ms -> CSV ts,rate."""
+def fetch_funding(sym: str, start_ms: int, end_ms: int | None = None) -> int:
+    """История фандинга символа в [start_ms, end_ms] -> CSV ts,rate."""
     out = CACHE / "funding" / f"{sym}.csv"
     if out.exists():
         return -1
     rows: dict[int, str] = {}
-    end = int(time.time() * 1000)
+    end = end_ms or int(time.time() * 1000)
     while True:
         d = _get("/v5/market/funding/history", {"category": "linear", "symbol": sym,
                                                 "startTime": start_ms, "endTime": end,
@@ -137,26 +148,79 @@ def fetch_funding(sym: str, start_ms: int) -> int:
     return len(rows)
 
 
+def missing() -> None:
+    """Символы архива, чьих свечей API не отдаёт: период торгов и объём архива сделок
+    (сумма размеров дневных файлов) — оценка, могли ли они попасть в топ-50 по обороту."""
+    out = {}
+    empty = [f.stem for f in sorted((CACHE / "klines").glob("*.csv"))
+             if sum(1 for _ in f.open()) <= 1]
+    for sym in empty:
+        time.sleep(0.5)
+        try:
+            with urllib.request.urlopen(f"https://public.bybit.com/trading/{sym}/",
+                                        timeout=30) as r:
+                h = r.read().decode()
+        except (urllib.error.URLError, TimeoutError):
+            continue
+        days = sorted(re.findall(rf'href="{sym}(\d{{4}}-\d{{2}}-\d{{2}})\.csv\.gz"', h))
+        mid_bytes = None
+        if days:
+            # активность — размер файла сделок за средний день торгов (HEAD, без скачивания)
+            mid = days[len(days) // 2]
+            time.sleep(0.5)
+            req = urllib.request.Request(
+                f"https://public.bybit.com/trading/{sym}/{sym}{mid}.csv.gz", method="HEAD")
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    mid_bytes = int(r.headers.get("Content-Length") or 0)
+            except (urllib.error.URLError, TimeoutError):
+                pass
+        out[sym] = {"first": days[0] if days else None, "last": days[-1] if days else None,
+                    "days": len(days), "mid_day": days[len(days) // 2] if days else None,
+                    "mid_bytes": mid_bytes}
+    (CACHE / "missing_symbols.json").write_text(json.dumps(out, indent=1))
+    print(f"без свечей в API: {len(empty)}; описано: {len(out)}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["klines", "funding"])
+    ap.add_argument("what", choices=["klines", "funding", "missing"])
     ap.add_argument("--symbols-file", help="JSON {символ: старт_мс} для funding")
     a = ap.parse_args()
     CACHE.mkdir(parents=True, exist_ok=True)
+    if a.what == "missing":
+        missing()
+        return
     if a.what == "klines":
         syms = all_symbols()
-        print(f"символов: {len(syms)}", flush=True)
-        for i, s in enumerate(syms, 1):
+        print(f"символов: {len(syms)}, 3 потока", flush=True)
+        cnt = [0]
+
+        def kjob(s: str) -> None:
             n = fetch_klines(s)
-            if i % 50 == 0 or n == 0:
-                print(f"{i}/{len(syms)} {s}: {n}", flush=True)
+            with _lock:
+                cnt[0] += 1
+                if cnt[0] % 50 == 0 or n == 0:
+                    print(f"{cnt[0]}/{len(syms)} {s}: {n}", flush=True)
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            list(ex.map(kjob, syms))
     else:
         todo = json.loads(Path(a.symbols_file).read_text())
-        print(f"фандинг: {len(todo)} символов", flush=True)
-        for i, (s, st) in enumerate(sorted(todo.items()), 1):
-            n = fetch_funding(s, int(st))
-            if i % 25 == 0:
-                print(f"{i}/{len(todo)} {s}: {n}", flush=True)
+        print(f"фандинг: {len(todo)} символов, 3 потока", flush=True)
+        done = [0]
+
+        def job(item: tuple) -> None:
+            s, win = item
+            st, en = (win, None) if isinstance(win, int) else (int(win[0]), int(win[1]))
+            n = fetch_funding(s, st, en)
+            with _lock:
+                done[0] += 1
+                if done[0] % 25 == 0:
+                    print(f"{done[0]}/{len(todo)} {s}: {n}", flush=True)
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            list(ex.map(job, sorted(todo.items())))
     print("готово", flush=True)
 
 
