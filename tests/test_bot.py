@@ -137,7 +137,9 @@ def test_format_stats_and_calc():
     assert "Объём" in calc and "Плечо" in calc
 
 
-def test_format_about_contains_disclaimer_parts():
+def test_format_about_contains_disclaimer_parts(fresh_db):
+    # fresh_db: format_about читает runtime (реф-ссылку) из БД — без фикстуры тест брал
+    # data/signals.db из cwd (в основном чекауте — боевую БД, в чистом worktree — пустую)
     txt = bot.format_about()
     assert "НЕ инвестиционный совет" in txt
     assert "/backtest" in txt
@@ -242,7 +244,7 @@ def test_should_refresh_board():
                                     "2026-01-02T00:00:00+00:00", hours=48) is False
 
 
-def test_format_channel_live_board():
+def test_format_channel_live_board(fresh_db):
     empty = bot.format_channel_live_board({"trades": 0, "open": 0}, {})
     assert "живое табло" in empty and "копятся" in empty
 
@@ -439,6 +441,115 @@ def test_should_alert_poller_stale():
     # троттлинг истёк (>6ч)
     old = (now - timedelta(hours=7)).isoformat()
     assert bot.should_alert_poller_stale(stale, old, now_iso, slack, up_long) is True
+
+
+def test_should_alert_data_stale_blind_poller():
+    """Сторож слепоты (аудит 30.10): тик свежий, а бары биржи не приходят — тревога;
+    тик сам протух — молчим (это алерт should_alert_poller_stale, один на причину)."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    stale_s = 2 * 4140.0                                    # 2x slack для 1h,4h — как в боте
+    up_long = stale_s + 100
+    tick_fresh = (now - timedelta(minutes=10)).isoformat()
+    data_fresh = (now - timedelta(minutes=11)).isoformat()
+    data_old = (now - timedelta(hours=5)).isoformat()
+    tick_old = (now - timedelta(hours=5)).isoformat()
+
+    f = bot.should_alert_data_stale
+    assert f(data_fresh, tick_fresh, None, now_iso, stale_s, up_long) is False   # всё живо
+    assert f(data_old, tick_fresh, None, now_iso, stale_s, up_long) is True      # слепота
+    assert f(None, tick_fresh, None, now_iso, stale_s, up_long) is True    # меток данных нет
+    assert f(data_old, tick_old, None, now_iso, stale_s, up_long) is False       # поллер завис
+    assert f(data_old, None, None, now_iso, stale_s, up_long) is False           # тиков не было
+    assert f(data_old, tick_fresh, None, now_iso, stale_s, stale_s - 1) is False  # грейс старта
+    recent = (now - timedelta(hours=1)).isoformat()
+    assert f(data_old, tick_fresh, recent, now_iso, stale_s, up_long) is False   # троттлинг
+    old_alert = (now - timedelta(hours=7)).isoformat()
+    assert f(data_old, tick_fresh, old_alert, now_iso, stale_s, up_long) is True
+
+
+def _retry_after(seconds: int):
+    from aiogram.exceptions import TelegramRetryAfter
+    from aiogram.methods import SendMessage
+
+    return TelegramRetryAfter(method=SendMessage(chat_id=-100, text="x"),
+                              message="Too Many Requests", retry_after=seconds)
+
+
+def test_call_with_flood_retry_waits_and_retries_once():
+    """429 на посте канала (залп итогов при массовом закрытии) — ждём, сколько велел
+    Telegram, и повторяем: раньше пост-итог (обычно минус) терялся насовсем."""
+    import asyncio
+
+    calls, slept = [], []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    async def post():
+        calls.append(1)
+        if len(calls) == 1:
+            raise _retry_after(7)
+        return "msg"
+
+    assert asyncio.run(bot.call_with_flood_retry(post, sleep=fake_sleep)) == "msg"
+    assert len(calls) == 2 and slept == [8.0]                 # retry_after + 1с запаса
+
+
+def test_call_with_flood_retry_caps_wait_and_gives_up_after_second_429():
+    import asyncio
+
+    import pytest
+    from aiogram.exceptions import TelegramRetryAfter
+
+    slept = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    async def always_flood():
+        raise _retry_after(600)
+
+    with pytest.raises(TelegramRetryAfter):
+        asyncio.run(bot.call_with_flood_retry(always_flood, max_wait=60.0, sleep=fake_sleep))
+    assert slept == [61.0]                                    # потолок, не 10 минут
+
+
+def test_call_with_flood_retry_other_errors_not_retried():
+    import asyncio
+
+    import pytest
+
+    calls = []
+
+    async def fake_sleep(s):                                  # pragma: no cover — не должен
+        raise AssertionError("не 429 — без ожидания")
+
+    async def broken():
+        calls.append(1)
+        raise RuntimeError("chat not found")
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(bot.call_with_flood_retry(broken, sleep=fake_sleep))
+    assert calls == [1]
+
+
+def test_format_health_data_freshness_line():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    fresh = (now - timedelta(minutes=5)).isoformat()
+    old = (now - timedelta(hours=4)).isoformat()
+    slack = bot.poller_tick_slack_seconds(["1h", "4h"])
+    assert "Бары биржи" not in bot.format_health(3600.0, fresh, fresh, 1024, "wal", slack)
+    ok = bot.format_health(3600.0, fresh, fresh, 1024, "wal", slack, data_ok_at=fresh)
+    assert "✅ Бары биржи получены: 5м назад" in ok
+    blind = bot.format_health(3600.0, fresh, fresh, 1024, "wal", slack, data_ok_at=old)
+    assert "⚠️ Бары биржи получены" in blind and "✅ Последний тик poller" in blind
+    never = bot.format_health(3600.0, fresh, fresh, 1024, "wal", slack, data_ok_at=None)
+    assert "⚠️ Бары биржи получены: нет данных" in never
 
 
 def test_setup_codes_roundtrip():
@@ -753,10 +864,22 @@ def test_main_menu_layout_user():
     flat = [t for row in user for t in row]
     for label in ("📊 Статистика", "📄 Трек-рекорд", "📈 Дашборд", "🧮 Калькулятор",
                   "💳 Подписка", "🤝 Пригласить", "ℹ️ О боте", "🧪 Бэктест", "📖 Глоссарий",
-                  "🎟 Промокод", "❓ Помощь"):
+                  "🎟 Промокод", "❓ Помощь", "💼 Мой счёт"):
         assert label in flat, label
     assert "🛠 Админ-панель" not in flat                # админ-кнопки не текут юзерам
     assert all(len(row) <= 2 for row in user)           # компактные ряды по 1-2 кнопки
+    assert "💼 Мой счёт" in user[0]                     # деньги — на виду (ретеншн 28.10)
+    assert len(flat) == len(set(flat))                  # без дублей кнопок
+
+
+def test_parse_account_args():
+    assert bot.parse_account_args("/account") == "show"
+    assert bot.parse_account_args("/account off") == "off"
+    assert bot.parse_account_args("/account ВЫКЛ") == "off"
+    assert bot.parse_account_args("/account on") == "on"
+    assert bot.parse_account_args("/account 500") is None   # депозит — через /depo
+    assert bot.parse_account_args("/account on now") is None
+    assert "account" in dict(bot.USER_COMMANDS)
 
 
 def test_main_menu_layout_admin():
@@ -802,6 +925,30 @@ def test_unlock_verdict():
         assert bot.unlock_verdict({"status": st, "result_r": r}, 50) == "closed"
     for verdict in ("not_found", "closed", "disabled"):
         assert verdict in bot._UNLOCK_DENIALS
+
+
+def test_signal_action_loader_hides_shadows_from_non_admins(fresh_db):
+    """Кнопки «📈 График»/«🧮 Риск»: callback_data `sigcalc:<id>` подделывается, и любой
+    подписчик/триальщик перебором id получал вход и стоп теней (аудит 30.10.2026).
+    Не-админу — только публичный журнал; админ по-прежнему видит и тени."""
+    from app.brain import journal
+    from app.core.signal_engine import Side
+    from app.core.signal_engine import Signal as _Signal
+
+    def _s(sym, created):
+        return _Signal(symbol=sym, side=Side.LONG, timeframe="1h", entry=100.0, stop=95.0,
+                       take_profits=[110.0], risk_reward=2.0, confidence=0.7,
+                       reasons=["тест"], created_at=created,
+                       indicators_snapshot={"setup": "LTF-BB"})
+
+    sid_pub = journal.record_signal(_s("BTC/USDT:USDT", "2026-10-29T10:00:00+00:00"))
+    sid_shadow = journal.record_shadow(_s("ETH/USDT:USDT", "2026-10-29T11:00:00+00:00"),
+                                       reason="late_entry")
+    sid_cand = journal.record_candidate(_s("SOL/USDT:USDT", "2026-10-29T12:00:00+00:00"))
+    user, admin = bot.signal_action_loader(False), bot.signal_action_loader(True)
+    assert user(sid_pub)["id"] == sid_pub
+    assert user(sid_shadow) is None and user(sid_cand) is None
+    assert admin(sid_shadow)["id"] == sid_shadow and admin(sid_cand)["id"] == sid_cand
 
 
 def test_milestone_reached():
@@ -1371,3 +1518,15 @@ def test_check_hook_sources_get_howto():
     assert "«Переслать»" in bot.CHECK_HOWTO and "время публикации" in bot.CHECK_HOWTO
     btn = bot.check_demo_markup().inline_keyboard[0][0]
     assert btn.callback_data == "check_demo"
+
+
+def test_channel_audit_entry_points():
+    """Проверка канала целиком (29.10): команда в /help, подсказка «пришлите @username» в
+    инструкции рекламы-проверки и в /check, под итогом — подписка + «другой канал»."""
+    from app.delivery import signal_check
+
+    assert "audit" in dict(bot.USER_COMMANDS)
+    assert "/audit — проверить сигнальный канал целиком" in bot.format_help(False)
+    assert "@username канала" in bot.CHECK_HOWTO and "@username канала" in signal_check.HELP
+    rows = bot.audit_markup().inline_keyboard
+    assert rows[0][0].url == bot.CHANNEL_URL and rows[1][0].callback_data == "audit_again"

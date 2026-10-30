@@ -186,6 +186,40 @@ def test_render_dashboard_png():
     assert png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 10_000
 
 
+def _account_card(**kw):
+    from datetime import datetime, timezone
+
+    from app.delivery import my_account
+    rows = [{"id": i, "symbol": "BTC/USDT:USDT", "side": "LONG", "timeframe": "1h",
+             "status": "tp1" if r > 0 else "stopped", "result_r": r,
+             "created_at": "2026-10-28T10:00:00+00:00",
+             "closed_at": f"2026-10-29T0{i}:00:00+00:00"} for i, r in enumerate(kw["rs"])]
+    acc = my_account.compute_account(
+        rows, start_usd=kw.get("start", 1000.0), risk_pct=1.0,
+        joined_at="2026-10-28T09:00:00+00:00", is_default=kw.get("default", True),
+        now=datetime(2026, 10, 30, 6, tzinfo=timezone.utc))
+    return my_account.card_data(acc, "rsirange_bot")
+
+
+def test_build_account_card_html_money_and_honesty():
+    html = graphics.build_account_card_html(_account_card(rs=[2.0, -1.0, 1.0]))
+    assert "$1 020" in html and "+$20" in html and "<svg" in html
+    assert 'class="pill pos"' in html and "по умолчанию" in html
+    assert "не реальный счёт" in html and "Не финансовый совет" in html
+    for leak in ("6226", "LTF", "1:1", "setup"):
+        assert leak not in html
+    down = graphics.build_account_card_html(_account_card(rs=[-1.0, -1.0], default=False))
+    assert 'class="pill neg"' in down and "−2.0%" in down and "по умолчанию" not in down
+    empty = graphics.build_account_card_html(_account_card(rs=[]))
+    assert "<svg" not in empty and "кривая появится" in empty
+
+
+def test_render_account_card_png():
+    pytest.importorskip("playwright")
+    png = graphics.render_account_card(_account_card(rs=[2.0, -1.0, 1.0, 0.5]))
+    assert png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 10_000
+
+
 def test_build_og_card_html():
     html = graphics.build_og_card_html(9.2, 228, [1.0, -1.0, 2.0])
     assert "+9.2R" in html and "228 закрытых" in html and "#1f9e6e" in html

@@ -420,6 +420,46 @@ def test_export_public_trades_excludes_candidate_and_rejected(fresh_db):
     assert sid_cand and sid_rej                          # использованы (не мусорные id)
 
 
+def test_public_signal_row_hides_shadows_and_candidates(fresh_db):
+    """Аудит безопасности 30.10.2026: id из callback_data подделывается — юзер-поверхности
+    по id отдают только публичный журнал. Тени, кандидаты semiauto (живые, отклонённые,
+    TTL-истёкшие) -> None; граница совпадает с export_public_trades (CSV /trackrecord)."""
+    from app import db
+    from app.brain import journal
+    sid_open = journal.record_signal(_sig(symbol="BTC/USDT:USDT"))
+    sid_closed = journal.record_signal(_sig(symbol="ETH/USDT:USDT",
+                                            created_at="2026-01-01T00:15:00+00:00"))
+    db.execute("UPDATE signals SET status='stopped', result_r=-1.0 WHERE id=?", (sid_closed,))
+    sid_shadow = journal.record_shadow(_sig(symbol="SOL/USDT:USDT",
+                                            created_at="2026-01-01T00:30:00+00:00"))
+    sid_late = journal.record_shadow(_sig(symbol="XRP/USDT:USDT",
+                                          created_at="2026-01-01T00:45:00+00:00"),
+                                     reason="late_entry")
+    db.execute("UPDATE signals SET result_r=2.0 WHERE id=?", (sid_late,))   # закрытая тень
+    sid_cand = journal.record_candidate(_sig(symbol="ADA/USDT:USDT",
+                                             created_at="2026-01-01T01:00:00+00:00"))
+    sid_rej = journal.record_candidate(_sig(symbol="DOT/USDT:USDT",
+                                            created_at="2026-01-01T01:15:00+00:00"))
+    journal.reject_candidate(sid_rej)
+    sid_ttl = journal.record_candidate(_sig(symbol="WLD/USDT:USDT",
+                                            created_at="2020-01-01T00:00:00+00:00"))
+    assert sid_ttl in journal.expire_stale_candidates()            # TTL -> expired, не публиковался
+    sid_conf = journal.record_candidate(_sig(symbol="LINK/USDT:USDT",
+                                             created_at="2026-01-01T01:30:00+00:00"))
+    assert journal.confirm_candidate(sid_conf)                     # подтверждён -> публичный
+
+    hidden = {sid_shadow, sid_late, sid_cand, sid_rej, sid_ttl}
+    public = {sid_open, sid_closed, sid_conf}
+    for sid in hidden:
+        assert journal.signal_row(sid) is not None                 # строка есть...
+        assert journal.public_signal_row(sid) is None, sid         # ...но наружу не отдаётся
+    for sid in public:
+        assert journal.public_signal_row(sid)["id"] == sid
+    assert journal.public_signal_row(999999) is None
+    # паритет с публичным CSV: одна граница публикации на все поверхности
+    assert {r["id"] for r in journal.export_public_trades()} == public
+
+
 def test_record_ledger_hash(fresh_db):
     from app.brain import journal
     journal.record_ledger_hash(5, "deadbeef")

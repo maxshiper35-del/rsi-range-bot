@@ -3,12 +3,30 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shutil
+import tempfile
 
 import pytest
 
 # Секреты не нужны для тестов, но config.get_settings() требует токен (fail-fast).
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 os.environ.setdefault("ENV", "test")
+
+# Тесты НИКОГДА не трогают боевые data/signals.db и .env (аудит надёжности 30.10). Тесты
+# без fresh_db (форматтеры, читающие runtime) ходили в БД по дефолтному относительному
+# пути: в основной checkout — это ЖИВАЯ прод-база (pre-commit гоняет полный pytest на
+# каждом коммите), в свежем worktree — пустой файл и «no such table». А load_dotenv() из
+# get_settings находит .env, поднимаясь от app/ вверх, — из любого worktree это боевой
+# .env основного checkout (адреса пульса, ключи бирж — в окружение тестового процесса).
+# Принудительно: внешний DB_PATH тестам не указ; per-test fresh_db перекрывает его своим.
+_SESSION_DIR = pathlib.Path(tempfile.mkdtemp(prefix="rsirange-tests-"))
+os.environ["DB_PATH"] = str(_SESSION_DIR / "session.db")
+try:
+    import dotenv
+
+    dotenv.load_dotenv = lambda *a, **k: False      # type: ignore[assignment]
+except ImportError:                                 # pragma: no cover — dotenv в зависимостях
+    pass
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MIGRATIONS = REPO_ROOT / "migrations"
@@ -19,6 +37,22 @@ def _reset_conn(db) -> None:
     if conn is not None:
         conn.close()
         del db._local.conn
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _session_db():
+    """Общая мигрированная БД сессии для тестов без fresh_db (вместо боевой)."""
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    import app.db as db
+
+    _reset_conn(db)
+    db.init_db(MIGRATIONS)
+    yield
+    _reset_conn(db)
+    get_settings.cache_clear()
+    shutil.rmtree(_SESSION_DIR, ignore_errors=True)
 
 
 @pytest.fixture()

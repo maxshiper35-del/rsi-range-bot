@@ -779,3 +779,63 @@ def test_api_me_affiliate_link_for_subscriber(fresh_db, webapp_token):
         runtime.set_value("affiliate_url", "https://partner.bybit.com/b/RSIRANGE")
         assert c.get("/api/me", headers=hdr).get_json()["affiliate"] == \
             "https://partner.bybit.com/b/RSIRANGE"
+
+
+def test_api_account_auth_registration_and_shape(fresh_db, webapp_token):
+    """«Счёт»: без подписи — 401; валидная подпись без /start — registered=false; юзер —
+    счёт в $ по публичным закрытым после прихода; ни уровней, ни сетапов в ответе."""
+    from app import db
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(500400, "acc")                      # фри-юзер: счёт ему тоже
+    db.execute("UPDATE users SET joined_at='2026-06-01T00:00:00+00:00' WHERE tg_id=500400")
+    _closed("BTC/USDT:USDT", 2.0, "2026-08-01T00:00:00+00:00")
+    _closed("ETH/USDT:USDT", -1.0, "2026-08-02T00:00:00+00:00")
+    _mk_open_with_setup()                                      # открытая с тегом — не в счёте
+    hdr = {"Authorization": "tma " + _init_data("123:TEST", 500400)}
+    with flask_app.test_client() as c:
+        assert c.get("/api/account").status_code == 401
+        bad = {"Authorization": "tma " + _init_data("123:TEST", 500400, spoil=True)}
+        assert c.get("/api/account", headers=bad).status_code == 401
+        nobody = {"Authorization": "tma " + _init_data("123:TEST", 777)}
+        r0 = c.get("/api/account", headers=nobody)
+        assert r0.status_code == 200 and r0.get_json()["registered"] is False
+        r = c.get("/api/account", headers=hdr)
+        raw = r.get_data(as_text=True)
+    assert r.status_code == 200 and r.headers["Cache-Control"] == "no-store"
+    d = json.loads(raw)
+    assert d["registered"] and d["is_default"] and d["trades"] == 2
+    assert abs(d["balance"] - 1000 * 1.02 * 0.99) < 0.01 and d["push"] is True
+    assert d["items"][0]["s"] == "ETH" and d["items"][0]["usd"] < 0   # свежие сверху, минус честно
+    for leak in ("6226", "setup", "123.456", "AAA", "entry", '"stop"'):
+        assert leak not in raw
+
+
+def test_api_account_post_depo_and_push(fresh_db, webapp_token):
+    """Настройки счёта из Mini App: валидация как у /api/prefs, атомарность тела,
+    без /start — 404 (юзера не заводим), тумблер утреннего отчёта."""
+    from app.delivery import my_account, payments
+    from app.webapp import app as flask_app
+    payments.register_user(500401, "acc2")
+    hdr = {"Authorization": "tma " + _init_data("123:TEST", 500401),
+           "Content-Type": "application/json"}
+    with flask_app.test_client() as c:
+        assert c.post("/api/account", data=json.dumps({"push": False})).status_code == 401
+        ghost = {"Authorization": "tma " + _init_data("123:TEST", 778),
+                 "Content-Type": "application/json"}
+        assert c.post("/api/account", headers=ghost,
+                      data=json.dumps({"push": False})).status_code == 404
+        for bad in ({"depo_usd": 5, "risk_pct": 1}, {"depo_usd": 500, "risk_pct": 11},
+                    {"depo_usd": True, "risk_pct": 1}, {"push": "no"}, {}, [1]):
+            assert c.post("/api/account", headers=hdr, data=json.dumps(bad)).status_code == 400
+        # битое поле в паре с валидным — НИЧЕГО не пишем (тело атомарно)
+        assert c.post("/api/account", headers=hdr,
+                      data=json.dumps({"depo_usd": 500, "risk_pct": 1, "push": 1})
+                      ).status_code == 400
+        assert payments.depo_prefs(500401) is None
+        ok = c.post("/api/account", headers=hdr,
+                    data=json.dumps({"depo_usd": 2500, "risk_pct": 1.5, "push": False}))
+        d = ok.get_json()
+    assert ok.status_code == 200 and d["start"] == 2500 and d["risk_pct"] == 1.5
+    assert d["is_default"] is False and d["push"] is False
+    assert payments.depo_prefs(500401) == (2500.0, 1.5) and not my_account.push_enabled(500401)

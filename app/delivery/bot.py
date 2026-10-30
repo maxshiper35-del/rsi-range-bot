@@ -8,6 +8,7 @@ SMC-интеграция реализована чистыми функциям�
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 from collections import deque
@@ -22,7 +23,7 @@ from app.brain import journal
 from app.brain.risk import calculate_position
 from app.brain.smc_setups import SMCEngine
 from app.core.signal_engine import Signal
-from app.delivery import graphics, templates
+from app.delivery import graphics, my_account, templates
 from app.power import battery_alert_text, should_alert_battery
 from app.power import pmset_batt as _pmset_batt
 
@@ -79,6 +80,26 @@ DATAOG_DIR = Path("data")
 async def _render_png(fn, *args):
     async with _RENDER_SEM:
         return await asyncio.to_thread(fn, *args)
+
+
+async def call_with_flood_retry(make_call, *, max_wait: float = 60.0, sleep=None):
+    """Один повтор после 429 (flood control) — для ПУБЛИЧНЫХ постов канала и /announce.
+
+    Лимит Telegram на один чат/канал ~20 сообщений в минуту, а массовое закрытие
+    (коррелированные стопы, до 12 позиций при лимите 6 на сторону) даёт залп постов-
+    итогов: 13.07 было 16 постов за минуту. Без повтора TelegramRetryAfter сразу уходил
+    в фолбэк фото->текст (тот же флуд-контроль) и пост-итог терялся НАСОВСЕМ — а в залпе
+    стопов теряются именно минусы, публичный трек-рекорд выглядел бы отобранным (аудит
+    надёжности 30.10). make_call — фабрика корутины (повтор требует новой); ждём столько,
+    сколько велел Telegram (с потолком max_wait), второй отказ уходит наверх."""
+    from aiogram.exceptions import TelegramRetryAfter
+
+    sleep = sleep or asyncio.sleep
+    try:
+        return await make_call()
+    except TelegramRetryAfter as e:
+        await sleep(min(float(e.retry_after), max_wait) + 1.0)
+        return await make_call()
 
 
 def _side_capacity_ok(side_value: str, symbol: str) -> bool:
@@ -957,6 +978,21 @@ def parse_depo_args(text: str) -> tuple | None:
     return (depo, risk)
 
 
+def parse_account_args(text: str) -> str | None:
+    """'/account' -> 'show'; '/account off|выкл' -> 'off'; '/account on|вкл' -> 'on';
+    иное -> None (подсказка формата: депозит задаётся /depo, не здесь)."""
+    parts = (text or "").split()
+    if len(parts) == 1:
+        return "show"
+    if len(parts) == 2:
+        arg = parts[1].lower()
+        if arg in ("off", "выкл", "стоп", "-"):
+            return "off"
+        if arg in ("on", "вкл", "+"):
+            return "on"
+    return None
+
+
 def parse_vipchannel_args(text: str) -> tuple | None:
     """'/vipchannel @rsi_range_vip 300' -> ('@rsi_range_vip', 300); None если формат неверный
     или цена вне диапазона Telegram (1-10000 Stars — createChatSubscriptionInviteLink)."""
@@ -1052,6 +1088,16 @@ def unlock_verdict(row, price: int) -> str:
     return "ok"
 
 
+def signal_action_loader(is_admin: bool):
+    """Загрузчик строки сигнала для кнопок «📈 График»/«🧮 Риск» (id из callback_data).
+
+    Админ видит любой сигнал (тени, кандидатов — для разбора). Остальным — только
+    публичный журнал: id в callback_data подделывается, а тени/кандидаты (их уровни не
+    публикуются никому) по перебору id уходили бы любому подписчику и триальщику
+    (аудит безопасности 30.10.2026)."""
+    return journal.signal_row if is_admin else journal.public_signal_row
+
+
 def build_signal_chart_data(sig: Signal, sid: int, df: pd.DataFrame,
                             updated_label: str, max_bars: int = 56) -> dict:
     """Собрать вход для graphics.build_signal_chart_html из Signal + свежих баров.
@@ -1129,6 +1175,27 @@ def should_alert_poller_stale(last_tick_at: str | None, last_alert_at: str | Non
     if last_alert_at is None:
         return True
     return (now - datetime.fromisoformat(last_alert_at)).total_seconds() >= rethrottle_hours * 3600
+
+
+def should_alert_data_stale(last_ok_at: str | None, last_tick_at: str | None,
+                            last_alert_at: str | None, now_iso: str, stale_seconds: float,
+                            uptime_seconds: float, rethrottle_hours: int = 6) -> bool:
+    """Сторож СЛЕПОТЫ (аудит надёжности 30.10): такты поллера идут, но ни один не получил
+    баров биржи дольше stale_seconds — Bybit лежит, бан или гео-блок IP. До этого сторожа
+    такое было тишиной: тик ставится при пробуждении, поэтому и watchdog поллера, и пульс
+    healthchecks зелёные, а сбои фетча — только WARNING в логе (в DM админам идут ERROR).
+    Тик сам устарел — молчим: это дело should_alert_poller_stale, один алерт на причину.
+    Тиков ещё не было — тоже молчим (свежая БД/старт). Метки данных нет вовсе при живых
+    тиках после грейса аптайма — тревога: хоть один удачный такт успел бы её поставить."""
+    from datetime import datetime
+
+    if last_tick_at is None:
+        return False
+    tick_age = (datetime.fromisoformat(now_iso) - datetime.fromisoformat(last_tick_at))
+    if tick_age.total_seconds() >= stale_seconds:
+        return False
+    return should_alert_poller_stale(last_ok_at, last_alert_at, now_iso, stale_seconds,
+                                     uptime_seconds, rethrottle_hours)
 
 
 _healthcheck_ok_logged = False
@@ -1218,6 +1285,7 @@ CHECK_HOWTO = (
     "3. Через пару секунд бот покажет по свечам биржи: исполнился ли вход, какие цели "
     "взяты, был ли стоп.\n\n"
     "Важно: именно «Переслать», а не копировать — так бот знает время публикации.\n"
+    "⚡ <b>Или пришлите @username канала — проверю последние сигналы целиком.</b>\n"
     "Хотите посмотреть, как это выглядит? 👇")
 
 
@@ -1226,6 +1294,15 @@ def check_demo_markup():
 
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
         text="🔎 Показать пример проверки", callback_data="check_demo")]])
+
+
+def audit_markup():
+    """Под итогом проверки канала: подписка на наш канал + следующий канал в одно касание
+    (кнопка просит прислать @username — дальше ловит обычный хэндлер ссылки на канал)."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup  # ленивый импорт
+
+    return InlineKeyboardMarkup(inline_keyboard=channel_join_markup().inline_keyboard + [[
+        InlineKeyboardButton(text="🔎 Проверить другой канал", callback_data="audit_again")]])
 
 
 def channel_cta_markup(bot_username: str | None, src: str, affiliate_url: str = ""):
@@ -1408,9 +1485,11 @@ USER_COMMANDS = [
     ("promo", "применить промокод: /promo <код>"),
     ("referral", "пригласить друга и получить дни подписки"),
     ("depo", "твой объём в каждом сигнале: /depo <депозит$> [риск%]"),
+    ("account", "мой счёт в $ по всем сигналам с твоего прихода"),
     ("mycard", "карточка твоего итога по отмеченным сделкам"),
     ("alert", "бесплатный прайс-алерт: /alert BTC 65000"),
     ("check", "проверить чужой сигнал: перешлите пост из любого канала"),
+    ("audit", "проверить сигнальный канал целиком: /audit @канал"),
     ("game", "игра «Лонг или шорт?»: BTC через сутки выше или ниже — очки, топ недели "
              "(/game top), выход /game off"),
     ("notify", "уведомления: мьют и тихие часы"),
@@ -1488,13 +1567,15 @@ def main_menu_layout(is_admin: bool = False) -> list:
             ["👥 Юзеры", "📈 Growth"],
             ["🎯 По сетапам", "❓ Помощь"],
         ]
+    # «💼 Мой счёт» — в первом ряду, рядом с дашбордом (ретеншн 28.10: люди думают в $,
+    # а не в R — деньги по сигналам должны быть на виду, а не за командой)
     return [
+        ["💼 Мой счёт", "📈 Дашборд"],
         ["📊 Статистика", "📄 Трек-рекорд"],
-        ["📈 Дашборд", "🧮 Калькулятор"],
-        ["💳 Подписка", "🤝 Пригласить"],
-        ["ℹ️ О боте", "🧪 Бэктест"],
-        ["📖 Глоссарий", "🎟 Промокод"],
-        ["❓ Помощь"],
+        ["🧮 Калькулятор", "💳 Подписка"],
+        ["🤝 Пригласить", "ℹ️ О боте"],
+        ["🧪 Бэктест", "📖 Глоссарий"],
+        ["🎟 Промокод", "❓ Помощь"],
     ]
 
 
@@ -1607,12 +1688,18 @@ def poller_tick_slack_seconds(timeframes: list) -> float:
     return max(youngest * 1.15, youngest + 300)
 
 
+_NOT_SHOWN = object()
+
+
 def format_health(uptime_seconds: float, last_tick_at: str | None,
                   last_backup_at: str | None, db_size_bytes: int, wal_mode: str,
-                  tick_slack_seconds: float = 3700.0) -> str:
+                  tick_slack_seconds: float = 3700.0, *,
+                  data_ok_at: object = _NOT_SHOWN) -> str:
     """/health — быстрый живой чек: аптайм, последний тик поллера, бэкап, БД, WAL.
     tick_slack_seconds — см. poller_tick_slack_seconds (дефолт — старое поведение
-    под 15m, для обратной совместимости вызовов без явного расчёта)."""
+    под 15m, для обратной совместимости вызовов без явного расчёта). data_ok_at —
+    метка последнего такта, получившего бары биржи (строка показывается, если передана):
+    тик без данных = поллер жив, но слеп (аудит надёжности 30.10)."""
     from datetime import datetime
 
     now = datetime.now(timezone.utc)
@@ -1623,11 +1710,18 @@ def format_health(uptime_seconds: float, last_tick_at: str | None,
                           .total_seconds() > tick_slack_seconds) else "✅ "
     backup_warn = "⚠️ " if (not last_backup_at or (now - datetime.fromisoformat(last_backup_at))
                             .total_seconds() > 26 * 3600) else "✅ "
+    data_line = ""
+    if data_ok_at is not _NOT_SHOWN:
+        data_iso = data_ok_at if isinstance(data_ok_at, str) and data_ok_at else None
+        data_warn = "⚠️ " if (not data_iso or (now - datetime.fromisoformat(data_iso))
+                              .total_seconds() > tick_slack_seconds) else "✅ "
+        data_line = f"{data_warn}Бары биржи получены: {_fmt_age(data_iso, now)}\n"
     return (
         "❤️ Health check\n"
         "────────────────────\n"
         f"Аптайм процесса: {up_h:.1f}ч\n"
         f"{tick_warn}Последний тик poller: {tick_age}\n"
+        f"{data_line}"
         f"{backup_warn}Последний бэкап: {backup_age}\n"
         f"БД: {db_size_bytes / 1024:.0f} KB, journal_mode={wal_mode}"
     )
@@ -1734,7 +1828,7 @@ def main() -> None:
 
     from aiogram import Bot, Dispatcher, F  # ленивый импорт тяжёлой зависимости
     from aiogram.exceptions import TelegramBadRequest
-    from aiogram.filters import Command
+    from aiogram.filters import Command, StateFilter
     from aiogram.fsm.context import FSMContext
     from aiogram.fsm.state import State, StatesGroup
     from aiogram.types import (
@@ -1887,6 +1981,20 @@ def main() -> None:
                 text="✅ Я оплатил USDT", callback_data="usdt_claim")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
+    def _trial_end_kb() -> InlineKeyboardMarkup:
+        """Конец триала (аудит текстов 30.10, К-24): 2 решения вместо 8 — неделя и месяц,
+        остальное за «Все тарифы». «Выгоднее» — только если месяц и правда дешевле в день."""
+        rows = []
+        week, month, days = runtime.week_price_stars(), runtime.price_stars(), runtime.sub_days()
+        if week > 0:
+            rows.append([InlineKeyboardButton(text=f"⭐ Неделя — {week}",
+                                              callback_data="pay_stars_week")])
+        better = " · выгоднее" if week > 0 and month / days < week / 7 else ""
+        rows.append([InlineKeyboardButton(text=f"⭐ {_fmt_days(days)} — {month}{better}",
+                                          callback_data="pay_stars")])
+        rows.append([InlineKeyboardButton(text="Все тарифы", callback_data="tariffs")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
     _mycard_last: dict[int, float] = {}
 
     async def _send_mycard(m):
@@ -2024,14 +2132,27 @@ def main() -> None:
     @dp.message(F.text == "💳 Подписка")
     async def _subscribe(m):
         await asyncio.to_thread(payments.register_user, m.from_user.id, m.from_user.username)
-        text = await asyncio.to_thread(payments.subscription_status_text, m.from_user.id)
+        text = await _subscribe_text(m.from_user.id, m.from_user.username)
+        await m.answer(text, reply_markup=_subscribe_kb(), parse_mode="HTML")
+
+    async def _subscribe_text(uid: int, username: str | None) -> str:
+        text = await asyncio.to_thread(payments.subscription_status_text, uid)
         if runtime.usdt_invoice_url() and not payments.cryptobot_enabled():
-            uname = templates.esc(m.from_user.username or m.from_user.id)
+            uname = templates.esc(username or uid)
             text += (f"\n\n💵 USDT: оплати по кнопке, в КОММЕНТАРИИ к платежу укажи «{uname}», "
                      "затем нажми «Я оплатил» — активируем в течение дня.")
         text += ("\n\n💯 <b>Money-back 7 дней</b>: не подошло — вернём Stars по запросу "
                  "(напишите админу канала @rsi_range).")
-        await m.answer(text, reply_markup=_subscribe_kb(), parse_mode="HTML")
+        return text
+
+    @dp.callback_query(F.data == "tariffs")
+    async def _tariffs_cb(cq):
+        """«Все тарифы» под сообщением о конце триала (К-24) — полный экран /subscribe."""
+        await cq.answer()
+        await asyncio.to_thread(payments.register_user, cq.from_user.id, cq.from_user.username)
+        text = await _subscribe_text(cq.from_user.id, cq.from_user.username)
+        await bot.send_message(cq.from_user.id, text, reply_markup=_subscribe_kb(),
+                               parse_mode="HTML")
 
     async def _apply_promo(m, code: str):
         res = await asyncio.to_thread(payments.redeem_promo, m.from_user.id, code)
@@ -2187,6 +2308,112 @@ def main() -> None:
         await cq.message.edit_text(templates.render_notify(prefs), parse_mode="HTML",
                                    reply_markup=_notify_kb(prefs))
         await cq.answer("Готово.")
+
+    # ---- «💼 Мой счёт»: все сигналы с прихода юзера — в деньгах (ретеншн 28.10) ----
+    _acct_png_last: dict[int, float] = {}
+
+    def _webapp_link(tab: str | None = None) -> str | None:
+        """Свежая ссылка Mini App (v= сбрасывает кеш WebView, как у «📈 Дашборд»); tab —
+        вкладка при открытии (?tab=account). None — Mini App выключен (нет https)."""
+        wurl = runtime.webapp_url()
+        if not wurl.startswith("https://"):
+            return None
+        url = f"{wurl}{'&' if '?' in wurl else '?'}v={int(_monotonic())}"
+        return f"{url}&tab={tab}" if tab else url
+
+    def _account_push_kb(on: bool = True) -> InlineKeyboardMarkup:
+        """Под утренним пушем: подробнее (карточка в чат), счёт в терминале и отписка
+        в одно касание — раздражённому юзеру проще нажать её, чем заблокировать бота."""
+        b = InlineKeyboardButton
+        top = [b(text="💼 Подробнее", callback_data="acct")]
+        link = _webapp_link("account")
+        if link:
+            top.append(b(text="📈 В терминале", web_app=WebAppInfo(url=link)))
+        bottom = (b(text="🔕 Не присылать по утрам", callback_data="acct_off") if on
+                  else b(text="🔔 Вернуть утренний отчёт", callback_data="acct_on"))
+        return InlineKeyboardMarkup(inline_keyboard=[top, [bottom]])
+
+    async def _send_account(chat_id: int, user) -> None:
+        """/account, «💼 Мой счёт», «Подробнее» под пушем: текст + PNG счёта.
+
+        Ответ перевыдаёт постоянное меню: reply-клавиатура живёт на клиенте вечно, и у
+        старых юзеров кнопки «💼 Мой счёт» нет, пока бот не пришлёт новую. PNG — с кулдауном
+        60с и через общий семафор рендеров (Chromium на вызов, как /mycard); в кулдауне,
+        без сделок или при сбое рендера — только текст."""
+        uid = user.id
+        await asyncio.to_thread(payments.register_user, uid, user.username)
+        acc = await asyncio.to_thread(my_account.account_for, uid)
+        if acc is None:
+            return
+        text = my_account.render_account(acc)
+        kb = _main_menu_kb(uid in cfg.admin_ids)
+        png = None
+        if acc.trades and _monotonic() - _acct_png_last.get(uid, -1e9) >= 60:
+            _acct_png_last[uid] = _monotonic()   # столбим ДО рендера: спам в очередь не встаёт
+            try:
+                png = await _render_png(graphics.render_account_card,
+                                        my_account.card_data(acc, bot_info["username"]))
+            except Exception as e:                     # noqa: BLE001 — рендер не критичен
+                log.warning("счёт png %s: %s", uid, e)
+        if png:
+            await bot.send_photo(chat_id, BufferedInputFile(png, filename="my_account.png"),
+                                 caption=text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+
+    @dp.message(Command("account"))
+    async def _account_cmd(m):
+        parts = (m.text or "").split()
+        if len(parts) >= 2 and parts[1].lower() == "push" and _is_admin(m):
+            # общий рубильник утреннего отчёта (runtime.account_push_enabled, дефолт выкл)
+            if len(parts) == 3 and parts[2].lower() in ("on", "off"):
+                await asyncio.to_thread(runtime.set_value, "account_push_enabled",
+                                        1 if parts[2].lower() == "on" else 0)
+            state = "включён" if runtime.account_push_enabled() else "выключен"
+            await m.answer(f"Утренний «💼 счёт за вчера» всем: {state}. "
+                           "/account push on | off")
+            return
+        action = parse_account_args(m.text)
+        if action is None:
+            await m.answer("Формат: <code>/account</code> — счёт; <code>/account off</code> "
+                           "или <code>on</code> — утренний отчёт. Депозит и риск: "
+                           "<code>/depo 500 1</code>", parse_mode="HTML")
+            return
+        if action == "show":
+            await _send_account(m.chat.id, m.from_user)
+            return
+        on = action == "on"
+        await asyncio.to_thread(payments.register_user, m.from_user.id, m.from_user.username)
+        await asyncio.to_thread(my_account.set_push, m.from_user.id, on)
+        if not runtime.account_push_enabled():
+            # рубильник выкл — не обещать отчёт, которого не будет; выбор юзера сохранён
+            await m.answer("Утренний отчёт пока не рассылается — счёт всегда тут: /account.")
+            return
+        await m.answer("🔔 Утренний отчёт включён: около 06:00 UTC — что вчерашние сделки "
+                       "сделали с твоим счётом (если они были)." if on else
+                       "🔕 Утренний отчёт выключен. Счёт — по-прежнему тут: /account. "
+                       "Вернуть: /account on")
+
+    @dp.message(F.text == "💼 Мой счёт")
+    async def _account_btn(m):
+        await _send_account(m.chat.id, m.from_user)
+
+    @dp.callback_query(F.data == "acct")
+    async def _account_cb(cq):
+        await cq.answer()                 # до рендера: Telegram ждёт ответ на колбэк ≤15с
+        await _send_account(cq.from_user.id, cq.from_user)      # личка: chat_id == tg_id
+
+    @dp.callback_query(F.data.in_({"acct_off", "acct_on"}))
+    async def _account_push_toggle(cq):
+        on = cq.data == "acct_on"
+        await asyncio.to_thread(payments.register_user, cq.from_user.id, cq.from_user.username)
+        await asyncio.to_thread(my_account.set_push, cq.from_user.id, on)
+        try:
+            await cq.message.edit_reply_markup(reply_markup=_account_push_kb(on))
+        except Exception:                 # noqa: BLE001 — сообщение старое/недоступно: не критично
+            pass
+        await cq.answer("Утренний отчёт снова включён." if on
+                        else "Утренний отчёт выключен. Вернуть: /account on")
 
     # ---- ежедневная игра «Лонг или шорт?» (app/delivery/game.py): opt-in, раунд в 12:00 UTC
     async def _game_render(data: dict) -> bytes:
@@ -2473,13 +2700,16 @@ def main() -> None:
             return None, None
         sid = int(sid_s)
         uid = cq.from_user.id
-        if uid not in cfg.admin_ids \
+        is_admin = uid in cfg.admin_ids
+        if not is_admin \
                 and not await asyncio.to_thread(payments.is_paid, uid) \
                 and not await asyncio.to_thread(payments.delivered_full, uid, sid):
             await cq.answer("Доступно получателям полного сигнала — /subscribe.",
                             show_alert=True)
             return None, None
-        row = await asyncio.to_thread(journal.signal_row, sid)
+        # тень/кандидат для не-админа — «не найден», как и несуществующий id: сам факт
+        # существования непубликуемого сигнала тоже не раскрываем
+        row = await asyncio.to_thread(signal_action_loader(is_admin), sid)
         if row is None:
             await cq.answer("Сигнал не найден.", show_alert=True)
             return None, None
@@ -2853,9 +3083,13 @@ def main() -> None:
                 log.warning("dashboard png: %s — отдаю файлом", e)
                 await _send_offline_dashboard(m)
             return
-        vurl = f"{wurl}{'&' if '?' in wurl else '?'}v={int(_monotonic())}"
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="📈 Открыть живой терминал", web_app=WebAppInfo(url=vurl))]])
+        vurl = _webapp_link() or wurl
+        acct_url = _webapp_link("account") or wurl
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📈 Открыть живой терминал",
+                                  web_app=WebAppInfo(url=vurl))],
+            [InlineKeyboardButton(text="💼 Мой счёт в терминале",
+                                  web_app=WebAppInfo(url=acct_url))]])
         await m.answer("Живой терминал — кнопкой ниже. Офлайн-файл: /dashboard",
                        reply_markup=kb)
 
@@ -3059,7 +3293,8 @@ def main() -> None:
         uptime, wal, size = await asyncio.to_thread(_collect)
         slack = poller_tick_slack_seconds(runtime.timeframes())
         await m.answer(format_health(uptime, runtime.last_poller_tick_at(),
-                                     runtime.last_backup_at(), size, wal, slack))
+                                     runtime.last_backup_at(), size, wal, slack,
+                                     data_ok_at=runtime._raw("last_poll_ok_at")))
 
     @dp.message(Command("pause"))
     async def _pause(m):
@@ -3899,16 +4134,21 @@ def main() -> None:
         channel = runtime.signals_channel()
         if channel and runtime.channel_enabled():
             try:
-                await bot.send_message(channel, text)
+                await call_with_flood_retry(lambda: bot.send_message(channel, text))
                 n += 1
             except Exception as e:                     # noqa: BLE001
                 log.warning("announce channel: %s", e)
+        # как рассылка сигнала: повтор после 429, пауза между отправками, мёртвых — в
+        # blocked. Раньше 429 молча съедал сообщение получателю (аудит надёжности 30.10)
         for uid in await asyncio.to_thread(payments.active_subscriber_ids):
             try:
-                await bot.send_message(uid, text)
+                await _send_retry(uid, text)
                 n += 1
             except Exception as e:                     # noqa: BLE001
                 log.warning("announce %s: %s", uid, e)
+                if _dead_recipient(e):
+                    await asyncio.to_thread(payments.mark_blocked, uid)
+            await asyncio.sleep(0.05)
         await m.answer(f"📣 Отправлено получателям: {n}")
 
     @dp.callback_query(F.data.startswith("adm_"))
@@ -4147,21 +4387,40 @@ def main() -> None:
     _check_log: dict = {}                       # tg_id -> [monotonic проверок за сутки]
     _check_sem = asyncio.Semaphore(2)           # не больше двух прогонов разом (лимиты Bybit)
 
+    def _venue_symbol(sym: str) -> tuple[str, float] | None:
+        """Символ на бирже свечей и делитель цен: PEPE/SHIB на Bybit — 1000-лоты (/1000);
+        None — монеты там нет. Синхронно, только из потока. Рынки обычно уже загрузил
+        поллер; если нет (первые секунды после старта) — грузим сами: без списка рынков
+        каждая чужая монета стоила бы трёх ретраев fetch_history впустую (+6с, замер 29.10).
+        Не загрузились — пробуем символ как есть."""
+        from app.data.market_data import _EXCHANGE_LOCK, _exchange
+        ex = _exchange(cfg.exchange_id)
+        if not ex.markets:
+            try:
+                with _EXCHANGE_LOCK:            # sync-ccxt не потокобезопасен
+                    ex.load_markets()
+            except Exception as e:              # noqa: BLE001 — сеть: дальше как есть
+                log.info("load_markets: %s", e)
+        markets = ex.markets
+        if not markets or sym in markets:
+            return sym, 1.0
+        if "1000" + sym in markets:
+            return "1000" + sym, 1000.0
+        return None
+
     def _run_check(sig, posted) -> str:
         # синхронно (ccxt) — только через asyncio.to_thread
-        from app.data.market_data import _exchange, fetch_history
+        from app.data.market_data import fetch_history
         from app.delivery import signal_check
         age = (datetime.now(timezone.utc) - posted).total_seconds()
         tf = signal_check.pick_timeframe(age)
         if tf is None:
             return (f"Сигнал старше {signal_check.MAX_AGE_DAYS} дней — так далеко назад "
                     "не проверяю.")
-        sym, scale = sig.symbol, 1.0
-        markets = _exchange(cfg.exchange_id).markets
-        if markets and sym not in markets:
-            if "1000" + sym not in markets:
-                return f"Монеты {templates.esc(sig.coin)} нет на Bybit — проверить не могу."
-            sym, scale = "1000" + sym, 1000.0   # PEPE/SHIB на Bybit — 1000-лоты
+        venue = _venue_symbol(sig.symbol)
+        if venue is None:
+            return f"Монеты {templates.esc(sig.coin)} нет на Bybit — проверить не могу."
+        sym, scale = venue
         tf_s = {"15m": 900, "1h": 3600, "4h": 14400}[tf]
         bars = fetch_history(sym, tf, int(age // tf_s) + 3, exchange_id=cfg.exchange_id)
         if scale != 1.0:
@@ -4213,7 +4472,10 @@ def main() -> None:
     @dp.message(F.forward_origin, F.chat.type == "private")
     async def _check_forward(m):
         from app.delivery import signal_check
-        sig = signal_check.parse_signal(m.text or m.caption or "")
+        # разбор — в потоке: текст присылает кто угодно, и до лимита 20/сутки (лимит
+        # считает только распознанные сигналы). Синхронный разбор на event loop при
+        # квадратичном regex замораживал ВЕСЬ бот на 5 с за сообщение (аудит 30.10.2026)
+        sig = await asyncio.to_thread(signal_check.parse_signal, m.text or m.caption or "")
         if sig is None:
             await m.answer("Не нашёл в посте сигнал: нужны монета, LONG/SHORT, вход "
                            "(или «по рынку») и стоп. Подробнее — /check")
@@ -4233,6 +4495,113 @@ def main() -> None:
                 txt = (f"Не получилось загрузить свечи {templates.esc(sig.coin)} с биржи. "
                        "Попробуйте через пару минут.")
         await wait.edit_text(txt, parse_mode="HTML", reply_markup=channel_join_markup())
+
+    # --- проверка канала целиком: @username -> аудит последних сигналов (29.10.2026) ---
+    # С рекламы «перешли сигнал» не переслал никто из 84 (29.10): набрать @канал проще, чем
+    # найти пост и переслать. Логика и тексты — в channel_audit; здесь сеть, лимит, отправка.
+    from app.delivery import channel_audit
+    _audit_log: dict = {}                       # tg_id -> [monotonic аудитов за сутки]
+
+    def _run_audit(posts) -> dict:
+        # синхронно (ccxt) — только через asyncio.to_thread; свечи монеты — ОДИН запрос истории
+        from app.data.market_data import fetch_history
+        now = pd.Timestamp.now(tz="UTC")
+        bars = {}
+        for sym, (tf, n) in channel_audit.fetch_plan(posts, now).items():
+            venue = _venue_symbol(sym)
+            if venue is None:
+                continue                        # монеты нет на Bybit: сигнал «не проверен»
+            vsym, scale = venue
+            try:
+                df = fetch_history(vsym, tf, n, exchange_id=cfg.exchange_id)
+            except Exception as e:              # noqa: BLE001 — сеть / лимит: монета не проверена
+                log.info("аудит: свечи %s %s: %s", vsym, tf, e)
+                continue
+            if scale != 1.0:
+                df[["open", "high", "low", "close"]] /= scale
+            bars[sym] = df
+        return channel_audit.audit(posts, bars, now)
+
+    async def _audit_channel(m, name: str) -> None:
+        if name.lower() == CHANNEL_URL.rsplit("/", 1)[-1].lower():
+            await m.answer("Это наш канал 🙂 Итог каждой его сделки — плюс или минус — бот "
+                           "записывает сам: /stats, журнал целиком — /trackrecord")
+            return
+        uid, now = m.from_user.id, _monotonic()
+        recent = [t for t in _audit_log.get(uid, []) if now - t < 86400]
+        if len(recent) >= channel_audit.AUDITS_PER_DAY and not _is_admin(m):
+            await m.answer(f"Лимит — {channel_audit.AUDITS_PER_DAY} проверки канала в сутки. "
+                           "Завтра можно снова, а отдельный сигнал — пересылкой сюда (/check).")
+            return
+        _audit_log[uid] = recent + [now]
+        wait = await m.answer(f"🔎 Читаю канал @{templates.esc(name)}…")
+        async with _check_sem:
+            try:
+                page = await asyncio.to_thread(channel_audit.fetch_channel, name)
+            except channel_audit.ChannelUnavailable:
+                _audit_log[uid] = recent        # опечатка / приватный канал — попытка не в счёт
+                await wait.edit_text(
+                    f"Не нашёл публичный канал @{templates.esc(name)}. Проверить можно только "
+                    "открытый канал — не группу, не бота и не приватный канал. Проверьте "
+                    "написание.")
+                return
+            except Exception as e:              # noqa: BLE001 — сеть / таймаут t.me
+                _audit_log[uid] = recent
+                log.info("аудит канала @%s: t.me: %s", name, e)
+                await wait.edit_text("Не получилось открыть канал — Telegram не ответил. "
+                                     "Попробуйте через пару минут.")
+                return
+            n = len(channel_audit.checkable(page.posts, pd.Timestamp.now(tz="UTC")))
+            await wait.edit_text(channel_audit.progress_text(n))
+            try:
+                agg = await asyncio.to_thread(_run_audit, page.posts)
+            except Exception as e:              # noqa: BLE001 — сеть / лимит биржи
+                log.info("аудит канала @%s: свечи: %s", name, e)
+                await wait.edit_text("Не получилось загрузить свечи с биржи. "
+                                     "Попробуйте через пару минут.")
+                return
+        log.info("аудит канала @%s: %s", name, channel_audit.log_line(agg))
+        if channel_audit.card_worthy(agg):
+            html = channel_audit.audit_card_html(name, page.title, agg,
+                                                 bot=bot_info["username"] or "rsirange_bot")
+            try:
+                png = await _render_png(graphics.render_html_to_png, html, 1080, 2, ".card")
+                await m.answer_photo(BufferedInputFile(png, filename=f"audit_{name}.png"),
+                                     caption=channel_audit.audit_caption(name, agg),
+                                     parse_mode="HTML")
+            except Exception as e:              # noqa: BLE001 — итог всё равно уйдёт текстом
+                log.error("аудит канала @%s: карточка не отрисовалась: %s", name, e)
+        await m.answer(channel_audit.render_audit(name, page.title, agg), parse_mode="HTML",
+                       reply_markup=audit_markup(), disable_web_page_preview=True)
+        try:
+            await wait.delete()
+        except Exception:                       # noqa: BLE001 — статус остался — не страшно
+            pass
+
+    # только личка: разбор чужого канала не должен уходить в группу, куда добавили бота
+    @dp.message(Command("audit"), F.chat.type == "private")
+    async def _audit_cmd(m):
+        parts = (m.text or "").split(maxsplit=1)
+        name = channel_audit.parse_channel_ref(parts[1], bare=True) if len(parts) > 1 else None
+        if name is None:
+            await m.answer(channel_audit.HELP, parse_mode="HTML")
+            return
+        await _audit_channel(m, name)
+
+    @dp.callback_query(F.data == "audit_again")
+    async def _audit_again(cq):
+        await cq.answer()
+        await cq.message.answer("Пришлите @username канала или ссылку t.me/… — проверю его "
+                                "последние сигналы по свечам биржи.")
+
+    # Сообщение в личке, где ТОЛЬКО ссылка на канал («@name», «t.me/name») — та же проверка
+    # без команды. Регистрируется после FSM-шагов (промокод, калькулятор, ввод админки
+    # перехватят свой ввод раньше) и пересылки; StateFilter(None) и ~forward_origin —
+    # явная страховка, чтобы будущие шаги и пересланные посты сюда не проваливались.
+    @dp.message(F.chat.type == "private", ~F.forward_origin, StateFilter(None),
+                F.text.func(lambda t: channel_audit.parse_channel_ref(t) is not None))
+    async def _audit_ref(m):
+        await _audit_channel(m, channel_audit.parse_channel_ref(m.text) or "")
 
     def _signal_chart_png(sig, sid):
         # синхронно (ccxt + Playwright) — вызывать только через asyncio.to_thread
@@ -4304,18 +4673,28 @@ def main() -> None:
                 photo = await _render_png(_chart_for_id, sid)
             except Exception as e:                     # noqa: BLE001 — биржа/рендер
                 log.warning("карта поста #%s: %s", sid, e)
+        # каждый вызов — через повтор после 429: залп итогов при массовом закрытии упирается
+        # в лимит канала, и без повтора пост-итог терялся насовсем (аудит надёжности 30.10)
+        def _text_post():
+            return bot.send_message(channel, text, parse_mode="HTML", reply_markup=kb)
+
         if photo is None:
-            return await bot.send_message(channel, text, parse_mode="HTML", reply_markup=kb)
-        file = BufferedInputFile(photo, filename=f"signal_{sid}.png")
+            return await call_with_flood_retry(_text_post)
+        png: bytes = photo
+
+        def _file():                                   # свежий объект загрузки на попытку
+            return BufferedInputFile(png, filename=f"signal_{sid}.png")
+
         try:
             if caption_fits(text):
-                return await bot.send_photo(channel, file, caption=text, parse_mode="HTML",
-                                            reply_markup=kb)
-            await bot.send_photo(channel, file)        # подпись не влезла — фото отдельно
+                return await call_with_flood_retry(lambda: bot.send_photo(
+                    channel, _file(), caption=text, parse_mode="HTML", reply_markup=kb))
+            # подпись не влезла — фото отдельно
+            await call_with_flood_retry(lambda: bot.send_photo(channel, _file()))
         except Exception as e:                         # noqa: BLE001 — сбой ОТПРАВКИ фото
             # тоже откат на текст: раньше терялся весь пост (аудит-2 UX [10])
             log.warning("фото поста #%s: %s", sid, e)
-        return await bot.send_message(channel, text, parse_mode="HTML", reply_markup=kb)
+        return await call_with_flood_retry(_text_post)
 
     def _watchlist_gate(symbol: str) -> tuple:
         # бэктест-гейт кандидата в авто-watchlist: 6 мес 1h на включённых сетапах
@@ -4655,6 +5034,24 @@ def main() -> None:
                 except Exception as e:                     # noqa: BLE001
                     log.warning("poller stale алерт админу %s: %s", admin_id, e)
             await asyncio.to_thread(runtime.set_last_poller_alert_at, now_)
+        # сторож слепоты: такты идут, а бары биржи не приходят (Bybit лежит/бан/гео-блок IP)
+        # — сигналов и судейства открытых нет, а пульс healthchecks зелёный (аудит 30.10)
+        last_data = runtime._raw("last_poll_ok_at")
+        if should_alert_data_stale(last_data, runtime.last_poller_tick_at(),
+                                   runtime._raw("last_data_alert_at"), now_, tick_stale,
+                                   uptime_s):
+            data_age = _fmt_age(last_data, datetime.now(timezone.utc))
+            text = (f"⚠️ Биржа данных не отдаёт бары (последний удачный такт: {data_age}). "
+                    "Такты идут, но ни один символ не загрузился — новых сигналов и "
+                    "судейства открытых сделок нет; пульс healthchecks при этом зелёный. "
+                    "Вероятно, Bybit недоступен или ограничил IP: logs/bot.log, строки "
+                    "«poll …» и «такт: …». Открытые позиции на бирже держат свои стопы.")
+            for admin_id in cfg.admin_ids:
+                try:
+                    await bot.send_message(admin_id, text)
+                except Exception as e:                     # noqa: BLE001
+                    log.warning("data stale алерт админу %s: %s", admin_id, e)
+            await asyncio.to_thread(runtime.set_value, "last_data_alert_at", now_)
         # пауза висит давно — напомнить админу (раз в сутки), чтобы молчание бота не
         # выглядело поломкой и не стоило недель без сигналов
         try:
@@ -4728,10 +5125,19 @@ def main() -> None:
             log.warning("expire_stale_candidates: %s", e)
         # истёкшие подписки -> free + уведомление (точка максимального интента:
         # кнопки оплаты прямо в сообщении, не голый /subscribe — аудит 02.09)
+        # конец триала — свой текст с личным итогом и 2 тарифами (аудит текстов 30.10, К-24),
+        # остальным — что осталось бесплатно + все тарифы (К-26)
         for uid in await asyncio.to_thread(payments.expire_overdue):
             try:
-                await _send_retry(uid, "⌛ Подписка истекла. Продлить — и снова получать "
-                                       "все сигналы:", reply_markup=_subscribe_kb())
+                summ = await asyncio.to_thread(payments.trial_summary, uid)
+                if summ is not None:
+                    depo = await asyncio.to_thread(payments.depo_prefs, uid)
+                    await _send_retry(uid, templates.render_trial_ended(
+                        summ, runtime.free_per_week(), depo), parse_mode="HTML",
+                        reply_markup=_trial_end_kb())
+                else:
+                    await _send_retry(uid, templates.render_access_ended(runtime.free_per_week()),
+                                      reply_markup=_subscribe_kb())
             except Exception as e:                     # noqa: BLE001
                 log.warning("expire notify %s: %s", uid, e)
                 if _dead_recipient(e):
@@ -5008,6 +5414,17 @@ def main() -> None:
                 list(cfg.admin_ids), date.fromisoformat(p_day)))
             _BG_TASKS.add(task)
             task.add_done_callback(_BG_TASKS.discard)
+        # «💼 счёт за вчера» юзерам — раз в сутки в утреннем окне 06–12 UTC (my_account.
+        # push_due). Маркер дня — ДО рассылки: краш посреди не перешлёт всем повторно;
+        # рассылка — фоновой задачей, как дайджест, чтобы не держать 60с-такт.
+        a_now = datetime.now(timezone.utc)
+        a_day = (my_account.push_due(a_now, runtime.account_push_last_day())
+                 if runtime.account_push_enabled() else None)   # общий рубильник, дефолт выкл
+        if a_day:
+            await asyncio.to_thread(runtime.set_account_push_last_day, a_day)
+            task = asyncio.create_task(_send_account_pushes(a_now))
+            _BG_TASKS.add(task)
+            task.add_done_callback(_BG_TASKS.discard)
         # недельный ЛИЧНЫЙ дайджест подписчикам (ретеншн) — ВНЕ гейта канала: выключение
         # канала не должно молча убивать подписческую фичу (аудит-2 UX [4]). Отдельный
         # маркер от карточки; маркер ставим ДО рассылки: краш посреди рассылки не должен
@@ -5041,9 +5458,13 @@ def main() -> None:
                 # _maintenance блокировала бы 60с-цикл (пульс dead-man's switch, watchdog
                 # поллера, активацию оплат) на минуты (ревью 12.08). Маркер недели уже
                 # стоит — повторный вход в _maintenance рассылку не продублирует.
-                asyncio.create_task(_send_digests(
+                # Ссылка в _BG_TASKS: цикл событий держит задачи слабо — таску без ссылки
+                # сборщик мусора вправе прибить посреди рассылки (аудит надёжности 30.10)
+                d_task = asyncio.create_task(_send_digests(
                     d_text, d_label, d_wk, d_st,
                     d_start.isoformat(), d_end.isoformat()))
+                _BG_TASKS.add(d_task)
+                d_task.add_done_callback(_BG_TASKS.discard)
             except Exception as e:                          # noqa: BLE001
                 log.warning("недельный дайджест: %s", e)
 
@@ -5104,6 +5525,40 @@ def main() -> None:
         except Exception as e:                          # noqa: BLE001 — таска не роняет процесс
             log.warning("рассылка дайджеста: %s", e)
 
+    async def _send_account_pushes(now: datetime) -> None:
+        """Утренний «💼 Твой счёт за вчера» ВНЕ maintenance-цикла (create_task).
+
+        Всем живым юзерам с включённым отчётом (/account off — опт-аут), у кого вчера по
+        счёту что-то закрылось: пустой день не шлём — пустой пуш = спам, а спам тизерами
+        уже стоил блоков (разбор воронки 27.10). Мьют и тихие часы — тот же гейт, что у
+        пуша сигналов (is_signal_suppressed): отчёт не срочный, тихие часы не будим.
+        Мёртвых получателей списываем mark_blocked. now — один на всю рассылку: окно
+        «вчера» не съезжает, если рассылка перевалит за час."""
+        sent = skipped = 0
+        try:
+            ids = await asyncio.to_thread(my_account.push_recipients)
+            for uid in ids:
+                try:
+                    if await asyncio.to_thread(payments.is_signal_suppressed, uid, now.hour):
+                        skipped += 1
+                        continue
+                    acc = await asyncio.to_thread(my_account.account_for, uid, now)
+                    text = my_account.render_push(acc)
+                    if text is None:
+                        continue
+                    await _send_retry(uid, text, parse_mode="HTML",
+                                      reply_markup=_account_push_kb())
+                    sent += 1
+                except Exception as e:                  # noqa: BLE001 — один юзер не роняет рассылку
+                    log.warning("счёт за вчера -> %s: %s", uid, e)
+                    if _dead_recipient(e):
+                        await asyncio.to_thread(payments.mark_blocked, uid)
+                await asyncio.sleep(0.05)               # ~20 msg/с — под лимитом Telegram
+            log.info("«счёт за вчера»: отправлено %d из %d (мьют/тихие часы: %d)",
+                     sent, len(ids), skipped)
+        except Exception as e:                          # noqa: BLE001 — таска не роняет процесс
+            log.warning("рассылка «счёт за вчера»: %s", e)
+
     async def _on_close(closed):
         # мягкое уведомление АДМИНУ (не в канал): серия стопов подряд на ВКЛЮЧЁННОМ сетапе —
         # только сигнал, без авто-отключения (решение за оператором). Не зависит от того,
@@ -5151,9 +5606,9 @@ def main() -> None:
                         channel, c["id"], templates.render_fill(c, show_price), want_chart)
                     log.info("сигнал #%s: пост filled OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] == "expired":
-                    msg = await bot.send_message(channel, templates.render_expired(c),
-                                                 parse_mode="HTML",
-                                                 reply_markup=_channel_kb("chres"))
+                    msg = await call_with_flood_retry(functools.partial(
+                        bot.send_message, channel, templates.render_expired(c),
+                        parse_mode="HTML", reply_markup=_channel_kb("chres")))
                     log.info("сигнал #%s: пост expired OK (msg_id=%s)", c["id"], msg.message_id)
                 elif c["status"] in ("tp1", "tp2", "tp3", "stopped"):
                     want_chart = lifecycle_chart_wanted(
@@ -5259,8 +5714,10 @@ def main() -> None:
                     fired = await asyncio.to_thread(
                         alerts_mod.check_and_trigger, symbol,
                         max(prev, close), min(prev, close))
-                    if fired:
-                        asyncio.create_task(_push_alerts(fired))
+                    if fired:                           # ссылка — от сборщика мусора
+                        a_task = asyncio.create_task(_push_alerts(fired))
+                        _BG_TASKS.add(a_task)
+                        a_task.add_done_callback(_BG_TASKS.discard)
             except Exception as e:                     # noqa: BLE001
                 log.warning("alerts %s: %s", symbol, e)
             rows = await asyncio.to_thread(journal.unfilled_open_signals, symbol)

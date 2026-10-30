@@ -408,6 +408,44 @@ def render_trial_last_day(free_per_week: int, st: dict) -> str:
     )
 
 
+def render_trial_ended(summ: dict, free_per_week: int,
+                       depo: tuple[float, float] | None = None) -> str:
+    """Конец триала вместо «⌛ Подписка истекла» (аудит текстов 30.10, К-24) — главный момент
+    оплаты: личный итог пробных дней в R и в $ с честным знаком, правда о том, что остаётся
+    бесплатно (квота free после правки 30.10 доступна сразу), подписка — 2 кнопки вместо 8.
+    summ — payments.trial_summary(); depo — (депозит $, риск %) из /depo или None."""
+    n, closed, r = summ["signals"], summ["closed"], summ["total_r"]
+    lines = ["🔔 <b>Пробный доступ закончился</b>"]
+    if closed:
+        if depo:
+            dep, risk = depo
+            usd = (f"≈ {r * dep * risk / 100:+,.0f}$ на депозит ${dep:,.0f} при риске "
+                   f"{risk:g}%").replace(",", " ")
+        else:
+            usd = f"≈ {r * 10:+,.0f}$ при риске $10 на сделку".replace(",", " ")
+        lines.append(f"Ваши пробные дни: сигналов {n}, закрылось {closed}, итог "
+                     f"<b>{r:+.1f}R</b> ({usd}, до комиссий).")
+        if r < 0:
+            lines.append("Эти дни вышли в минус — так бывает: серии стопов у стратегии обычны. "
+                         "Все сделки с итогами — /stats.")
+    elif n:
+        lines.append(f"Ваши пробные дни: сигналов {n}, закрытых пока нет — итоги придут в канал "
+                     "@rsi_range и в /stats.")
+    free = (f"{free_per_week} полных сигналов в неделю (следующий придёт как обычно), "
+            if free_per_week > 0 else "")
+    lines += ["", f"Дальше бесплатно: {free}итоги всех сделок, проверка чужих сигналов (/check).",
+              "Все сигналы — по подписке:"]
+    return "\n".join(lines)
+
+
+def render_access_ended(free_per_week: int) -> str:
+    """Конец оплаченного или промо-доступа (аудит текстов 30.10, К-26): сразу сказать, что
+    остаётся бесплатно, — «истекла, продлите» читалось как «всё отключили»."""
+    free = f"{free_per_week} полных сигналов в неделю и " if free_per_week > 0 else ""
+    return (f"⌛ Подписка закончилась — теперь бесплатный режим: {free}итоги всех сделок.\n"
+            "Вернуть все сигналы:")
+
+
 def render_milestone(milestone: int, st: dict) -> str:
     """Пост-веха: N закрытых сделок (честные цифры, вся история проверяема).
 
