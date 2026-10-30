@@ -1,4 +1,4 @@
-"""Сериал 9:16 «Робот торгует сам — день N»: честный дневник демо-счёта.
+"""Сериал 9:16 «Робот торгует сам — день N»: честный дневник счёта по сигналам.
 
 Каждый выпуск — один закрытый UTC-день: все закрытые сделки журнала за день без отбора
 (тот же отбор, что у публичной статистики: status tp1/tp2/tp3/stopped, result_r задан),
@@ -7,7 +7,7 @@
 Баланс — РАСЧЁТ ПО ЖУРНАЛУ, а не выписка биржи: на демо-счёте executor номинал позиций
 урезан капом (1500 USDT) и там же живёт ручная позиция владельца, поэтому эквити демо
 не описывает сигналы. Модель: старт 10 000 $ в день 1 серии, риск 1% от текущего
-баланса на сделку, R журнала (до комиссий). Подпись «расчёт по журналу, демо» — на экране.
+баланса на сделку, R журнала (до комиссий). Подпись «расчёт по журналу» — на экране.
 
   .venv/bin/python -m scripts.make_bot_diary                       # вчерашний UTC-день
   .venv/bin/python -m scripts.make_bot_diary --day 2026-10-29 --preview
@@ -256,7 +256,7 @@ def frames(d: Diary, notes: dict[int, str] | None = None) -> kit.Timeline:
                 f"<div class='vault'><div class='v-l'>НА СЧЁТЕ</div><div class='v-box'>"
                 f"<div class='v-n'>{scr}</div><div class='v-q'>{q}</div></div>"
                 f"<div class='sub'>старт {d.days[0][0]:%d.%m} · {money(START_BALANCE)} · "
-                "демо-расчёт по журналу</div></div></div>")
+                "расчёт по журналу</div></div></div>")
         tl.add(kit.page(body, _CSS), 0.1, "tick" if k == 0 else None)
 
     # 2. вчера: честно, даже если минус
@@ -299,7 +299,7 @@ def frames(d: Diary, notes: dict[int, str] | None = None) -> kit.Timeline:
         if k > max_chips:
             chips += f"<div class='fine'>+ ещё {k - max_chips} раньше</div>"
         body = (kit.brand_row(tag) +
-                "<div class='bal'><div class='b-l'>НА СЧЁТЕ · <span>расчёт по журналу, демо"
+                "<div class='bal'><div class='b-l'>НА СЧЁТЕ · <span>расчёт по журналу"
                 f"</span></div><div class='b-n'>{money(shown_bal)}</div>"
                 f"<div class='b-d {dcls}'>{money(delta, sign=True)} за день "
                 f"({pct(delta / o * 100)})</div></div>"
@@ -346,7 +346,7 @@ def frames(d: Diary, notes: dict[int, str] | None = None) -> kit.Timeline:
     tl.add(kit.page(body, _CSS), 2.6, "tick")
 
     # 6. финал
-    fine = (f"Демо-расчёт по журналу сигналов: счёт {money(START_BALANCE)} с {d.days[0][0]:%d.%m}, "
+    fine = (f"Расчёт по журналу сигналов: счёт {money(START_BALANCE)} с {d.days[0][0]:%d.%m}, "
             "риск 1% на сделку, все закрытые сделки без отбора, до комиссий.")
     end = kit.end_card(f"Завтра — <em>день {d.n + 1}</em>",
                        "Робот сам находит сделки и публикует каждую — и плюс, и стоп.",
@@ -412,7 +412,7 @@ def caption(d: Diary) -> kit.Caption:
             f"{wins} в плюс, {stops} стопов, день в {word}: {money(delta, sign=True)} "
             f"({pct(delta / d.open_balance * 100)}). На счёте {money(d.close_balance)} из "
             f"{money(START_BALANCE)} на старте {d.days[0][0]:%d.%m}. Баланс — расчёт по журналу "
-            "сигналов (демо): риск 1% на сделку, все сделки без отбора, до комиссий. "
+            "сигналов: риск 1% на сделку, все сделки без отбора, до комиссий. "
             f"Каждая сделка — в Telegram: {kit.BOT}. {kit.NOT_ADVICE}."),
         hashtags="#трейдинг #крипта #сигналы #робот #биткоин",
     )

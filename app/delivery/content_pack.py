@@ -187,7 +187,7 @@ def captions(period: str, trades: list[dict], channel: str = "@rsi_range") -> di
 def replay_caption(row: dict, channel: str = "@rsi_range") -> str:
     r = float(row["result_r"])
     how = "выход по трейлингу" if r > 0 else "выход по стопу"
-    return (f"Повтор реальной сделки: {row['symbol'].split('/')[0]} {row['side']}, "
+    return (f"Повтор сделки: {row['symbol'].split('/')[0]} {row['side']}, "
             f"{_r(r)} до комиссий, {how}. Публикуем все сделки — плюсы и минусы. "
             f"Сигналы — в Telegram: {channel}. Не финансовый совет. {TAGS}")
 
