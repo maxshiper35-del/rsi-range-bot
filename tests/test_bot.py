@@ -172,6 +172,8 @@ def test_format_backtest_summary():
     assert "НЕ доказан" in txt
     assert "/stats" in txt
     assert "hindsight" in txt
+    # замер 30.10 (trail-realism): минутная проверка — обязательная часть честного итога
+    assert "по минутным свечам" in txt and "0,13R" in txt and "в минус" in txt
     # /backtest — статический текст, не зависит от БД (не упадёт на пустом контексте)
 
 
