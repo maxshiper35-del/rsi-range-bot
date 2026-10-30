@@ -1422,6 +1422,8 @@ USER_COMMANDS = [
     ("alert", "бесплатный прайс-алерт: /alert BTC 65000"),
     ("check", "проверить чужой сигнал: перешлите пост из любого канала"),
     ("audit", "проверить сигнальный канал целиком: /audit @канал"),
+    ("game", "игра «Лонг или шорт?»: BTC через сутки выше или ниже — очки, топ недели "
+             "(/game top), выход /game off"),
     ("notify", "уведомления: мьют и тихие часы"),
     ("cancel", "отменить текущий пошаговый ввод"),
     ("about", "как устроен сервис, честный дисклеймер"),
@@ -1996,6 +1998,11 @@ def main() -> None:
                        reply_markup=channel_join_markup())
         if arg.startswith("src_") and is_check_hook_source(arg[4:]):
             await m.answer(CHECK_HOWTO, parse_mode="HTML", reply_markup=check_demo_markup())
+        if arg == "game":
+            # t.me/rsirange_bot?start=game — вход в игру из канала/рекламы, где /game не
+            # кликается; first-touch атрибуция, как у рентгена (своя поверхность воронки)
+            await asyncio.to_thread(payments.set_acquisition_source, m.from_user.id, "game")
+            await _game_join_flow(m.from_user.id, m.answer)
 
     @dp.message(Command("bybit"))
     async def _bybit(m):
@@ -2191,6 +2198,114 @@ def main() -> None:
         await cq.message.edit_text(templates.render_notify(prefs), parse_mode="HTML",
                                    reply_markup=_notify_kb(prefs))
         await cq.answer("Готово.")
+
+    # ---- ежедневная игра «Лонг или шорт?» (app/delivery/game.py): opt-in, раунд в 12:00 UTC
+    async def _game_render(data: dict) -> bytes:
+        return await _render_png(graphics.render_game_chart, data)
+
+    async def _game_offer_round(uid: int) -> None:
+        """Открытый раунд — юзеру, который сам пришёл в /game и ещё не голосовал (force:
+        показать, даже если раунд уже приходил и потерялся в чате)."""
+        from app.delivery import game
+        now = datetime.now(timezone.utc)
+        r = await asyncio.to_thread(game.open_round, now)
+        if r is None:
+            return
+        if await asyncio.to_thread(game.get_vote, int(r["id"]), uid) is not None:
+            return
+        await game.send_round(bot, r, [uid], render=_game_render,
+                              prize_days=runtime.game_prize_days(),
+                              on_dead=payments.mark_blocked, log=log, now=now, force=True)
+
+    async def _game_join_flow(uid: int, answer) -> None:
+        """Вступление (/game, кнопка-приглашение, /start game): приветствие с правилами или
+        статус, затем открытый раунд. answer — корутина ответа (m.answer или send_message)."""
+        from app.delivery import game
+        now = datetime.now(timezone.utc)
+        joined = await asyncio.to_thread(game.join, uid, now)
+        text = await asyncio.to_thread(game.render_status, uid, joined,
+                                       runtime.game_prize_days(), now, tuple(cfg.admin_ids))
+        if uid in cfg.admin_ids:
+            s = await asyncio.to_thread(game.admin_summary, now)
+            text += (f"\n\n🛠 Игроков: {s['players']} (вышли {s['left']}) · раунд "
+                     f"{s['last_day'] or '—'}: доставлен {s['sent']}, голосов {s['votes']} · "
+                     f"приз {runtime.game_prize_days()} дн. (/game prize N)")
+        await answer(text, parse_mode="HTML")
+        await _game_offer_round(uid)
+
+    @dp.message(Command("game"))
+    async def _game_cmd(m):
+        from app.delivery import game
+        uid = m.from_user.id
+        await asyncio.to_thread(payments.register_user, uid, m.from_user.username)
+        parts = (m.text or "").split()
+        arg = parts[1].lower() if len(parts) > 1 else ""
+        now = datetime.now(timezone.utc)
+        admins = tuple(cfg.admin_ids)
+        if arg in ("off", "stop", "выйти"):
+            left = await asyncio.to_thread(game.leave, uid, now)
+            await m.answer(game.LEAVE_TEXT if left else "Ты и так не в игре. Вступить: /game")
+            return
+        if arg in ("top", "топ"):
+            key = game.week_key(now.date())
+            board = await asyncio.to_thread(game.leaderboard, key, admins)
+            text = await asyncio.to_thread(game.render_top, key, board, uid,
+                                           runtime.game_prize_days(), uid in admins)
+            await m.answer(text, parse_mode="HTML")
+            return
+        if arg in ("rules", "правила"):
+            await m.answer(game.render_rules(runtime.game_prize_days()), parse_mode="HTML")
+            return
+        if arg == "prize" and _is_admin(m):
+            if len(parts) < 3 or not parts[2].isdecimal() or int(parts[2]) > 30:
+                await m.answer(f"Приз недели: {runtime.game_prize_days()} дн.\n"
+                               "Формат: /game prize N — дней доступа победителю (0–30, "
+                               "0 — без приза, топ остаётся)")
+                return
+            await asyncio.to_thread(runtime.set_value, "game_prize_days", int(parts[2]))
+            await m.answer(f"✅ Приз недели: {int(parts[2])} дн." if int(parts[2])
+                           else "✅ Приз недели выключен — топ и итоги недели остаются")
+            return
+        await _game_join_flow(uid, m.answer)
+
+    @dp.callback_query(F.data.startswith("game:"))
+    async def _game_cb(cq):
+        from app.delivery import game
+        kind, rid, choice = game.parse_callback(cq.data)
+        uid = cq.from_user.id
+        if kind == "join":
+            await asyncio.to_thread(payments.register_user, uid, cq.from_user.username)
+            await cq.answer("🎯 Ты в игре!")
+
+            async def _dm(text, **kw):
+                return await bot.send_message(uid, text, **kw)
+
+            await _game_join_flow(uid, _dm)
+            return
+        if kind != "vote" or rid is None or choice is None:
+            await cq.answer("Голос принят — итог придёт сюда." if kind == "noop" else None)
+            return
+        now = datetime.now(timezone.utc)
+        await asyncio.to_thread(payments.register_user, uid, cq.from_user.username)
+        res = await asyncio.to_thread(game.cast_vote, rid, uid, choice, now)
+        r = await asyncio.to_thread(game.get_round, rid)
+        v = await asyncio.to_thread(game.get_vote, rid, uid)
+        if res == "ok" and r is not None:
+            await cq.answer(game.vote_ack(r, choice))
+        elif res == "already" and v is not None:
+            await cq.answer(f"Голос уже принят: {game.CHOICE_LABEL[v['choice']]} — изменить "
+                            "нельзя.", show_alert=True)
+        elif res == "closed":
+            await cq.answer("Голосование по этому раунду закрыто. Новый раунд — каждый день "
+                            "в 12:00 UTC.", show_alert=True)
+        else:
+            await cq.answer("Раунд не найден.")
+        # кнопки -> плашка с ответом; закрытый раунд без голоса — кнопки просто убрать
+        try:
+            await cq.message.edit_reply_markup(
+                reply_markup=game.voted_markup(v["choice"]) if v is not None else None)
+        except Exception:                               # noqa: BLE001 — старое/недоступное/без изменений
+            pass
 
     @dp.message(F.text == "🎟 Промокод")
     async def _promo_btn_start(m, state: FSMContext):
@@ -4555,11 +4670,65 @@ def main() -> None:
             except Exception as e:                     # noqa: BLE001 — не-launchd окружение
                 log.warning("kickstart туннеля: %s", e)
 
+    # игра «Лонг или шорт?»: своя фоновая таска на такт (ссылка держит её от сборщика мусора)
+    _game_bg: dict = {"task": None, "next_fetch": 0.0}
+
+    async def _game_tick() -> None:
+        """Такт игры: итоги созревших раундов -> раунд дня -> итоги недели -> рассылка.
+        Фоновой таской из _maintenance: фетч биржи с ретраями — до десятков секунд, рассылка
+        растёт с аудиторией, а 60с-цикл (пульс dead-man's switch) их ждать не должен. Сбой
+        биржи — пауза 5 мин (не молотить Bybit каждую минуту); итоги недели и рассылка от
+        биржи не зависят и идут своим чередом. Весь раунд/итог — за маркерами в БД, так что
+        пропущенный (Mac спал) такт догоняется следующим."""
+        try:
+            from app.delivery import game
+            now = datetime.now(timezone.utc)
+            admins = tuple(cfg.admin_ids)
+            if _monotonic() >= _game_bg["next_fetch"]:
+                # итог — раньше старта: в 12:00 бар итога вчерашнего раунда — он же «сейчас»
+                # сегодняшнего, и юзер получает «вчера» раньше «сегодня»
+                try:
+                    for s in await asyncio.to_thread(game.resolve_due, now):
+                        log.info("игра: раунд %s решён — %s, голосов %s, угадали %s, "
+                                 "пропустили %s", s["day"], s["outcome"], s.get("voters", 0),
+                                 s.get("correct", 0), s.get("missed", 0))
+                except Exception as e:                     # noqa: BLE001
+                    _game_bg["next_fetch"] = _monotonic() + 300
+                    log.warning("игра: итог раунда: %s — повтор через 5 мин", e)
+                try:
+                    r = await asyncio.to_thread(game.ensure_round, now)
+                    if r is not None:
+                        log.info("игра: раунд %s стартовал, BTC %s, голосование до %s",
+                                 r["day"], r["ref_price"], r["closes_at"])
+                except Exception as e:                     # noqa: BLE001
+                    _game_bg["next_fetch"] = _monotonic() + 300
+                    log.warning("игра: старт раунда: %s — повтор через 5 мин", e)
+            try:
+                for a in await asyncio.to_thread(game.award_due_weeks, now,
+                                                 runtime.game_prize_days(), admins):
+                    w = a["winner"]
+                    log.info("игра: неделя %s — победитель %s (%s очк.), приз %g дн., "
+                             "участников %d", a["week_key"], w["tg_id"] if w else "—",
+                             w["points"] if w else 0, a["prize_days"], a["players"])
+            except Exception as e:                         # noqa: BLE001
+                log.warning("игра: итоги недели: %s", e)
+            sent = await game.send_pending(bot, render=_game_render,
+                                           prize_days=runtime.game_prize_days(),
+                                           on_dead=payments.mark_blocked, log=log,
+                                           exclude=admins, now=now)
+            if any(sent.values()):
+                log.info("игра: отправлено %s", sent)
+        except Exception as e:                             # noqa: BLE001 — таска не роняет процесс
+            log.warning("игра: такт: %s", e)
+
     async def _maintenance():
         try:
             await _watch_webapp()
         except Exception as e:                         # noqa: BLE001 — сторож не роняет такт
             log.warning("webapp watch: %s", e)
+        # игра «Лонг или шорт?» — следующий такт стартует, только когда прошлый закончился
+        if _game_bg["task"] is None or _game_bg["task"].done():
+            _game_bg["task"] = asyncio.create_task(_game_tick(), name="game")
         # автобэкап не подтверждён/устарел — алерт админу (троттлинг: не чаще раза в сутки)
         now_ = clock.utcnow_iso()
         if should_alert_backup_stale(runtime.last_backup_at(),
