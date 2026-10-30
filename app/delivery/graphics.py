@@ -476,6 +476,206 @@ def render_signal_chart(data: dict) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Карта раунда игры «Лонг или шорт?» (app/delivery/game.py): свечи BTC за 48 ч, линия
+# «сейчас» и зона «через 24 ч» справа. Та же тема, что у карты сигнала, — но без уровней
+# входа/стопа: это вопрос, а не сетап.
+# ---------------------------------------------------------------------------
+
+def spaced_price(x: float) -> str:
+    """Цена с пробелами по тысячам и без хвостовых нулей: 68123.4 -> '68 123.4'. Один формат
+    в подписи раунда, на карте и в итоге — юзер сравнивает одни и те же цифры."""
+    return f"{float(x):,.2f}".rstrip("0").rstrip(".").replace(",", " ")
+
+
+def _nice_step(span: float, n: int = 4) -> float:
+    """«Круглый» шаг сетки цен (1/2/2.5/5 × 10^k), дающий около n линий на диапазоне."""
+    import math
+
+    raw = span / max(n, 1)
+    if raw <= 0:
+        return 1.0
+    mag = 10 ** math.floor(math.log10(raw))
+    for m in (1, 2, 2.5, 5, 10):
+        if raw <= m * mag:
+            return m * mag
+    return 10 * mag
+
+
+def _game_svg(bars: list, ref_price: float, w: int = 1060, h: int = 520,
+              gutter: int = 170, future_frac: float = 0.2) -> str:
+    """SVG карты раунда: свечи истории, линия «сейчас» через всю ширину и зона «+24 ч» справа
+    (выше линии — зелёная «▲ выше», ниже — красная «▼ ниже»). bars: [(ts_ms, o, h, l, c), …].
+    w = внутренняя ширина .game-card (1112 − 2×26): шире — пилюля цены вылезает за карточку.
+    Чистая функция — тестируется без браузера."""
+    from datetime import datetime, timezone
+
+    axis_h = 30
+    plot_h = h - axis_h
+    plot_w = w - gutter
+    hist_w = round(plot_w * (1 - future_frac), 2)
+    lo = min(min(b[3] for b in bars), ref_price)
+    hi = max(max(b[2] for b in bars), ref_price)
+    pad = (hi - lo) * 0.08 or max(abs(ref_price) * 0.001, 1e-9)
+    lo, hi = lo - pad, hi + pad
+    # «сейчас» — последний close, часто это экстремум окна: без запаса одна из зон будущего
+    # схлопнулась бы в полоску и подпись «выше»/«ниже» легла бы на линию
+    span = hi - lo
+    hi = max(hi, ref_price + 0.22 * span)
+    lo = min(lo, ref_price - 0.22 * span)
+
+    def y(p: float) -> float:
+        return round((hi - p) / (hi - lo) * (plot_h - 20) + 10, 2)
+
+    yr = y(ref_price)
+    fut_w = round(plot_w - hist_w, 2)
+    fx = round(hist_w + fut_w / 2, 2)
+    parts = [
+        f'<rect class="future" x="{hist_w}" y="0" width="{fut_w}" height="{yr}" '
+        f'fill="{_GREEN}" fill-opacity="0.08"/>',
+        f'<rect class="future" x="{hist_w}" y="{yr}" width="{fut_w}" '
+        f'height="{round(plot_h - yr, 2)}" fill="{_RED}" fill-opacity="0.08"/>',
+        f'<text x="{fx}" y="{round(yr / 2 + 8, 2)}" text-anchor="middle" font-size="22" '
+        f'font-weight="800" fill="{_GREEN}">▲ выше</text>',
+        f'<text x="{fx}" y="{round(yr + (plot_h - yr) / 2 + 8, 2)}" text-anchor="middle" '
+        f'font-size="22" font-weight="800" fill="{_RED}">▼ ниже</text>',
+        f'<text x="{round(plot_w - 10, 2)}" y="22" text-anchor="end" font-size="13" '
+        f'font-weight="700" fill="#A6ABB5">+24 ч</text>',
+    ]
+    # сетка цен: тонкие линии + подписи в правом жёлобе (возле «сейчас» — не мешаем пилюле)
+    step = _nice_step(hi - lo, n=6)
+    tick = (lo // step + 1) * step
+    while tick < hi:
+        yy = y(tick)
+        parts.append(f'<line class="grid" x1="0" y1="{yy}" x2="{plot_w}" y2="{yy}" '
+                     f'stroke="#FFFFFF" stroke-opacity="0.05" stroke-width="1"/>')
+        if abs(yy - yr) > 24:
+            parts.append(f'<text x="{plot_w + 14}" y="{round(yy + 4.5, 2)}" font-size="12.5" '
+                         f'font-weight="600" fill="#565C68">{spaced_price(tick)}</text>')
+        tick += step
+    # граница «сейчас | будущее»
+    parts.append(f'<line x1="{hist_w}" y1="0" x2="{hist_w}" y2="{plot_h}" stroke="{_INDIGO}" '
+                 f'stroke-width="1.4" stroke-dasharray="5 5" stroke-opacity="0.6"/>')
+    # свечи
+    slot = hist_w / len(bars)
+    bw = max(slot * 0.62, 2.0)
+    for i, (ts, o, hi_, lo_, c) in enumerate(bars):
+        color = _GREEN if c >= o else _RED
+        cx = round(i * slot + slot / 2, 2)
+        parts.append(f'<line x1="{cx}" y1="{y(hi_)}" x2="{cx}" y2="{y(lo_)}" '
+                     f'stroke="{color}" stroke-width="1.4" stroke-opacity="0.85"/>')
+        top, bot = min(y(o), y(c)), max(y(o), y(c))
+        parts.append(f'<rect class="c-body" x="{cx - bw / 2:.2f}" y="{top}" width="{bw:.2f}" '
+                     f'height="{max(bot - top, 1.4):.2f}" rx="1.5" fill="{color}"/>')
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        if dt.hour in (0, 12) and 44 < cx < hist_w - 44:      # подписи у краёв обрезались бы
+            parts.append(f'<text class="tick" x="{cx}" y="{h - 9}" text-anchor="middle" '
+                         f'font-size="12.5" font-weight="600" fill="#6B7280">'
+                         f'{dt:%d.%m %H:%M}</text>')
+    # линия «сейчас» поверх свечей + пилюля с ценой
+    ly = min(max(yr - 14, 2), plot_h - 30)
+    parts.append(f'<line x1="0" y1="{yr}" x2="{plot_w}" y2="{yr}" stroke="{_INDIGO}" '
+                 f'stroke-width="1.8" stroke-opacity="0.95"/>')
+    parts.append(
+        f'<rect class="pill" x="{plot_w + 8}" y="{ly:.2f}" width="{gutter - 12}" height="28" '
+        f'rx="8" fill="{_INDIGO}" fill-opacity="0.14" stroke="{_INDIGO}" stroke-opacity="0.5"/>'
+        f'<text x="{plot_w + 18}" y="{ly + 19:.2f}" font-size="13.5" font-weight="700" '
+        f'fill="{_INDIGO}">Сейчас {spaced_price(ref_price)}</text>')
+    return (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" '
+            f'xmlns="http://www.w3.org/2000/svg">{"".join(parts)}</svg>')
+
+
+_GAME_STYLE = """
+  .game-card { padding: 24px 26px 18px; }
+  .game-q { font-size: 31px; font-weight: 800; letter-spacing: -0.6px; line-height: 1.22; color: #F1F2F5; }
+  .game-q .px { color: #B8C2FB; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .game-meta { display: flex; align-items: center; justify-content: space-between; margin: 14px 0 12px; }
+  .game-sym { display: flex; align-items: center; gap: 10px; }
+  .sym-pill { padding: 6px 12px; border-radius: 9px; font-size: 14px; font-weight: 800; letter-spacing: 0.03em;
+              background: rgba(155,168,250,0.12); border: 1px solid rgba(155,168,250,0.42); color: #B8C2FB; }
+  .game-tf { font-size: 14px; font-weight: 600; color: #6B7280; }
+  .game-stats { font-size: 13.5px; font-weight: 600; color: #A6ABB5; font-variant-numeric: tabular-nums; }
+  .game-stats .pos { color: #6FE3AC; }
+  .game-stats .neg { color: #F58787; }
+  .votes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .vote { border-radius: 16px; padding: 15px 20px; text-align: center; font-size: 21px; font-weight: 800; letter-spacing: 0.03em; }
+  .vote small { display: block; font-size: 13px; font-weight: 600; margin-top: 4px; opacity: 0.75; letter-spacing: 0; }
+  .vote.up { background: rgba(74,222,156,0.11); border: 1px solid rgba(74,222,156,0.42); color: #6FE3AC; }
+  .vote.down { background: rgba(241,101,101,0.11); border: 1px solid rgba(241,101,101,0.42); color: #F58787; }
+  svg text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+"""
+
+_GAME_BODY = Template("""
+<div class="canvas"><div class="wrap">
+
+  <div class="header">
+    <div class="brand">
+      <div class="mark">R</div>
+      <div class="brand-text">
+        <div class="name">RSI Range Signals</div>
+        <div class="handle">@rsirange_bot</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="eyebrow">Игра дня · Лонг или шорт?</div>
+      <div class="period">Раунд $day</div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="card game-card">
+    <div class="game-q">BTC через 24 часа будет выше или ниже, чем сейчас — <span class="px">$ref</span>?</div>
+    <div class="game-meta">
+      <div class="game-sym"><span class="sym-pill">$symbol</span><span class="game-tf">1ч · последние $hours ч</span></div>
+      <div class="game-stats">$stats</div>
+    </div>
+    $svg
+  </div>
+
+  <div class="votes">
+    <div class="vote up">▲ ВЫШЕ<small>кнопка «Выше» под картинкой</small></div>
+    <div class="vote down">▼ НИЖЕ<small>кнопка «Ниже» под картинкой</small></div>
+  </div>
+
+  <div class="footer">
+    <div class="footer-left">Игра на интуицию — <b>не торговый сигнал</b></div>
+    <div class="footer-right">Цена Bybit · итог $result</div>
+  </div>
+
+</div></div>
+""")
+
+
+def build_game_chart_html(data: dict) -> str:
+    """data: {day_label, symbol, bars: [(ts_ms,o,h,l,c), …], ref_price, result_label}
+    -> заполненный HTML карты раунда. Чистая функция — тестируется без Playwright."""
+    bars = [tuple(b) for b in data["bars"]]
+    if not bars:
+        raise ValueError("карта раунда без свечей")
+    first_open, ref = float(bars[0][1]), float(data["ref_price"])
+    move = (ref - first_open) / first_open * 100 if first_open else 0.0
+    cls = "pos" if move > 0 else "neg" if move < 0 else ""
+    stats = (f'{len(bars)} ч: <span class="{cls}">{move:+.2f}%</span> · '
+             f'макс {spaced_price(max(b[2] for b in bars))} · '
+             f'мин {spaced_price(min(b[3] for b in bars))}')
+    body = _GAME_BODY.substitute(
+        day=_esc(data["day_label"]),
+        ref=spaced_price(ref),
+        symbol=_esc(data["symbol"]),
+        hours=len(bars),
+        stats=stats,
+        svg=_game_svg(bars, ref),
+        result=_esc(data["result_label"]),
+    )
+    return f"<style>{_STYLE}{_GAME_STYLE}</style>{body}"
+
+
+def render_game_chart(data: dict) -> bytes:
+    """PNG карты раунда. Тяжёлый Playwright — только через to_thread (bot._render_png)."""
+    return render_html_to_png(build_game_chart_html(data))
+
+
+# ---------------------------------------------------------------------------
 # Дашборд трек-рекорда: самодостаточная страница (эквити-кривая + разбивки).
 # Отдаётся файлом (как verifier.html) — работает офлайн, без сервера/туннеля;
 # тот же документ переиспользуется как страница Telegram Mini App, когда у бота

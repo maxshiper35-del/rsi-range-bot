@@ -684,6 +684,14 @@ def referral_reward_days() -> int:
     return _num("referral_reward_days", int, 7)
 
 
+def game_prize_days() -> int:
+    """Приз победителю недели в игре «Лонг или шорт?» (/game), дней полного доступа.
+    0 — без приза (топ и итоги недели остаются). Дефолт 3: ощутимо для free-юзера после
+    триала и меньше недельного тарифа (150⭐) — игра не подменяет покупку. Меняет админ:
+    /game prize <дней>."""
+    return max(_num("game_prize_days", int, 3), 0)
+
+
 def signal_chart_enabled() -> bool:
     """Прикладывать ли к посту сигнала PNG-карту (свечи + зоны входа/стопа/тейков).
     Дефолт выкл: включается из админки после живой проверки рендера (фича-флаг
@@ -744,6 +752,7 @@ def effective() -> dict:
         "teaser_per_day": teaser_per_day(),
         "cornix_enabled": cornix_block_enabled(),
         "trial_days": trial_days(),
+        "game_prize_days": game_prize_days(),
         "display_leverage": display_leverage(),
         "signal_chart_enabled": signal_chart_enabled(),
         "lifecycle_chart_enabled": lifecycle_chart_enabled(),
