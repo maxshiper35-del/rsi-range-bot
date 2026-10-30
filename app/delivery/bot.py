@@ -1602,10 +1602,18 @@ def menu_resets_dialog(menu_texts: frozenset):
     калькулятора. Кнопки ПОСЛЕ шагов ловил _fsm_menu_escape, и их приходилось нажимать
     дважды. Команды проходили мимо шагов, но диалог тоже не закрывали. Сброс идёт до разбора
     хэндлеров: FSMContextMiddleware уже положил state/raw_state, и StateFilter шагов видит
-    обнулённое состояние."""
+    обнулённое состояние.
+
+    Оплата и пересылка посреди диалога — тоже не ввод шага (ревью 31.10): successful_payment
+    без текста проходил фильтр шага ~F.text.startswith("/"), и брошенный «Промокод» или
+    «Калькулятор» забирал оплату себе — Stars списаны, подписка не выдана, в логе пусто.
+    Пересланный пост уходил в шаг вместо /check."""
     async def _mw(handler, event, data):
         text = getattr(event, "text", None) or ""
-        if data.get("raw_state") is not None and (text in menu_texts or text.startswith("/")):
+        leaves = (text in menu_texts or text.startswith("/")
+                  or getattr(event, "successful_payment", None) is not None
+                  or getattr(event, "forward_origin", None) is not None)
+        if data.get("raw_state") is not None and leaves:
             state = data.get("state")
             if state is not None:
                 await state.clear()
@@ -1867,6 +1875,59 @@ def _bg_task_done(task: asyncio.Task) -> None:
 
 # сбой одного и того же блока обслуживания — алерт админам не чаще раза в 6 ч
 MAINT_ALERT_EVERY_S = 6 * 3600
+# сообщение об истечении доступа, не ушедшее из-за сети/Telegram, повторяем до суток
+EXPIRE_NOTIFY_RETRY_S = 24 * 3600
+
+
+class ExpiryNotices:
+    """Сообщение об истечении доступа (К-24 / К-26) с повтором — ревью 31.10.
+
+    expire_overdue() понижает юзера в free до отправки, и следующий такт его уже не видит:
+    сбой сети или Telegram в минуту истечения терял сообщение насовсем, без следа. Теперь
+    такой юзер ждёт в очереди и получает сообщение на следующих тактах — до суток, если
+    за это время не оплатил. Очередь в памяти процесса: рестарт её очищает. Мёртвый
+    получатель (заблокировал бота) — пометка и без повтора; BadRequest (битый текст) не
+    исправится повтором — сразу ERROR."""
+
+    def __init__(self, *, retry_s: float = EXPIRE_NOTIFY_RETRY_S,
+                 clock: Callable[[], float] = _monotonic) -> None:
+        self._retry_s = retry_s
+        self._clock = clock
+        self._pending: dict[int, float] = {}            # tg_id -> время первой неудачи
+
+    @property
+    def pending(self) -> list[int]:
+        return list(self._pending)
+
+    async def run(self, due: list[int], *,
+                  notify: Callable[[int], Awaitable[object]],
+                  still_expired: Callable[[int], Awaitable[bool]],
+                  dead: Callable[[Exception], bool],
+                  mark_blocked: Callable[[int], Awaitable[object]]) -> None:
+        retry = []
+        for uid in [u for u in self._pending if u not in due]:
+            if await still_expired(uid):
+                retry.append(uid)
+            else:                                       # успел оплатить — не «закончился»
+                self._pending.pop(uid, None)
+        log = logging.getLogger("bot")
+        for uid in [*due, *retry]:
+            try:
+                await notify(uid)
+            except Exception as e:                      # noqa: BLE001 — один юзер не роняет такт
+                from aiogram.exceptions import TelegramBadRequest
+                first = self._pending.setdefault(uid, self._clock())
+                if dead(e):
+                    self._pending.pop(uid, None)
+                    log.warning("expire notify %s: %s", uid, e)
+                    await mark_blocked(uid)
+                elif isinstance(e, TelegramBadRequest) or self._clock() - first > self._retry_s:
+                    self._pending.pop(uid, None)
+                    log.error("expire notify %s: не доставлено, повторов не будет: %s", uid, e)
+                else:
+                    log.warning("expire notify %s: %s — повторю на следующем такте", uid, e)
+            else:
+                self._pending.pop(uid, None)
 
 
 class MaintenanceGuard:
@@ -2641,7 +2702,7 @@ def main() -> None:
         await state.set_state(PromoState.code)
         await m.answer("Введите промокод:")
 
-    @dp.message(PromoState.code, ~F.text.startswith("/"))
+    @dp.message(PromoState.code, F.text, ~F.text.startswith("/"))
     async def _promo_step_code(m, state: FSMContext):
         await state.clear()
         await _apply_promo(m, (m.text or "").strip())
@@ -2863,7 +2924,9 @@ def main() -> None:
 
     # кнопка "Калькулятор" — пошаговый FSM-ввод вместо одной строки с 4 числами. Кнопка
     # меню или команда посреди ввода закрывает диалог ещё до шагов (menu_resets_dialog);
-    # ~F.text.startswith("/") на шагах — страховка, если middleware не подключён
+    # ~F.text.startswith("/") на шагах — страховка, если middleware не подключён. F.text на
+    # шагах обязателен: без него шаг ловит и сообщения без текста — successful_payment
+    # (оплата терялась, ревью 31.10), стикеры, фото
     @dp.message(Command("cancel"))
     async def _cancel(m, state: FSMContext):
         await state.clear()
@@ -2875,7 +2938,7 @@ def main() -> None:
         await m.answer("🧮 Калькулятор позиции\nДепозит в USD? Например: 1000\n"
                        "(передумали — /cancel)")
 
-    @dp.message(CalcStates.deposit, ~F.text.startswith("/"))
+    @dp.message(CalcStates.deposit, F.text, ~F.text.startswith("/"))
     async def _calc_step_deposit(m, state: FSMContext):
         try:
             dep = float((m.text or "").replace(",", "."))
@@ -2887,7 +2950,7 @@ def main() -> None:
         await state.set_state(CalcStates.risk)
         await m.answer("Риск на сделку, %? Например: 2")
 
-    @dp.message(CalcStates.risk, ~F.text.startswith("/"))
+    @dp.message(CalcStates.risk, F.text, ~F.text.startswith("/"))
     async def _calc_step_risk(m, state: FSMContext):
         try:
             risk = float((m.text or "").replace(",", "."))
@@ -2899,7 +2962,7 @@ def main() -> None:
         await state.set_state(CalcStates.entry)
         await m.answer("Цена входа? Например: 62340")
 
-    @dp.message(CalcStates.entry, ~F.text.startswith("/"))
+    @dp.message(CalcStates.entry, F.text, ~F.text.startswith("/"))
     async def _calc_step_entry(m, state: FSMContext):
         try:
             entry = float((m.text or "").replace(",", "."))
@@ -2911,7 +2974,7 @@ def main() -> None:
         await state.set_state(CalcStates.stop)
         await m.answer("Цена стопа? Например: 62980")
 
-    @dp.message(CalcStates.stop, ~F.text.startswith("/"))
+    @dp.message(CalcStates.stop, F.text, ~F.text.startswith("/"))
     async def _calc_step_stop(m, state: FSMContext):
         try:
             stop = float((m.text or "").replace(",", "."))
@@ -4196,7 +4259,7 @@ def main() -> None:
             pass
         await cq.answer("Готово")
 
-    @dp.message(AdminInput.numeric, ~F.text.startswith("/"))
+    @dp.message(AdminInput.numeric, F.text, ~F.text.startswith("/"))
     async def _admin_numeric_receive(m, state: FSMContext):
         if not _is_admin(m):
             return
@@ -4212,7 +4275,7 @@ def main() -> None:
         await asyncio.to_thread(runtime.set_value, field, v)
         await m.answer(f"✅ {label} обновлено: {v}")
 
-    @dp.message(AdminInput.symbol, ~F.text.startswith("/"))
+    @dp.message(AdminInput.symbol, F.text, ~F.text.startswith("/"))
     async def _admin_symbol_receive(m, state: FSMContext):
         if not _is_admin(m):
             return
@@ -5230,25 +5293,32 @@ def main() -> None:
         except Exception as e:                             # noqa: BLE001
             log.warning("expire_stale_candidates: %s", e)
 
+    async def _notify_expired(uid: int) -> None:
+        # точка максимального интента: кнопки оплаты прямо в сообщении, не голый /subscribe
+        # (аудит 02.09). Конец триала — свой текст с личным итогом и 2 тарифами (аудит
+        # текстов 30.10, К-24), остальным — что осталось бесплатно + все тарифы (К-26)
+        summ = await asyncio.to_thread(payments.trial_summary, uid)
+        if summ is not None:
+            await _send_retry(uid, templates.render_trial_ended(
+                summ, runtime.free_per_week()), parse_mode="HTML",
+                reply_markup=_trial_end_kb())
+        else:
+            await _send_retry(uid, templates.render_access_ended(runtime.free_per_week()),
+                              reply_markup=_subscribe_kb())
+
+    expiry_notices = ExpiryNotices()
+
     async def _mt_expire():
-        # истёкшие подписки -> free + уведомление (точка максимального интента:
-        # кнопки оплаты прямо в сообщении, не голый /subscribe — аудит 02.09)
-        # конец триала — свой текст с личным итогом и 2 тарифами (аудит текстов 30.10, К-24),
-        # остальным — что осталось бесплатно + все тарифы (К-26)
-        for uid in await asyncio.to_thread(payments.expire_overdue):
-            try:
-                summ = await asyncio.to_thread(payments.trial_summary, uid)
-                if summ is not None:
-                    await _send_retry(uid, templates.render_trial_ended(
-                        summ, runtime.free_per_week()), parse_mode="HTML",
-                        reply_markup=_trial_end_kb())
-                else:
-                    await _send_retry(uid, templates.render_access_ended(runtime.free_per_week()),
-                                      reply_markup=_subscribe_kb())
-            except Exception as e:                     # noqa: BLE001
-                log.warning("expire notify %s: %s", uid, e)
-                if _dead_recipient(e):
-                    await asyncio.to_thread(payments.mark_blocked, uid)
+        # истёкшие подписки -> free + уведомление; не ушедшие из-за сети — повтор (ревью 31.10)
+        async def _still_expired(uid: int) -> bool:
+            return not await asyncio.to_thread(payments.is_paid, uid)
+
+        async def _mark_blocked(uid: int) -> None:
+            await asyncio.to_thread(payments.mark_blocked, uid)
+
+        await expiry_notices.run(
+            await asyncio.to_thread(payments.expire_overdue), notify=_notify_expired,
+            still_expired=_still_expired, dead=_dead_recipient, mark_blocked=_mark_blocked)
 
     async def _mt_renew_reminders():
         # напоминания о продлении (за 3 дня, единожды). mark_reminded ставится и при

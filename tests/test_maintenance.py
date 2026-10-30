@@ -122,3 +122,76 @@ def test_send_raw_alerts_isolates_admins(monkeypatch):
     monkeypatch.setattr(bot, "_send_raw_telegram_message", fake_send)
     bot._send_raw_alerts("tok", (1, 2, 3), "таска умерла")
     assert sent == [1, 3]
+
+
+def _expiry_run(notices, due, *, notify, still_expired=None, blocked=None):
+    async def _still(uid):
+        return True if still_expired is None else still_expired(uid)
+
+    async def _mark(uid):
+        (blocked if blocked is not None else []).append(uid)
+
+    def _dead(e):
+        return "blocked" in str(e).lower()
+
+    asyncio.run(notices.run(due, notify=notify, still_expired=_still, dead=_dead,
+                            mark_blocked=_mark))
+
+
+def test_expiry_notice_retried_after_network_failure_until_delivered():
+    """Ревью 31.10: юзер понижен в free до отправки, и сбой сети в минуту истечения терял
+    К-24 насовсем. Теперь он ждёт в очереди и уходит на следующем такте — один раз."""
+    from app.delivery import bot
+    sent: list[int] = []
+    fail = {"on": True}
+
+    async def notify(uid):
+        if fail["on"]:
+            raise ConnectionError("Telegram недоступен")
+        sent.append(uid)
+
+    clock = _Clock()
+    notices = bot.ExpiryNotices(retry_s=3600, clock=clock)
+    _expiry_run(notices, [7, 8], notify=notify)
+    assert notices.pending == [7, 8] and sent == []
+    clock.t = 60
+    fail["on"] = False
+    _expiry_run(notices, [9], notify=notify)            # новый истёкший + повтор двух старых
+    assert sorted(sent) == [7, 8, 9] and notices.pending == []
+    _expiry_run(notices, [], notify=notify)             # доставленным второго раза нет
+    assert sorted(sent) == [7, 8, 9]
+
+
+def test_expiry_notice_gives_up_after_limit_and_skips_paid_and_dead():
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import SendMessage
+
+    from app.delivery import bot
+    clock = _Clock()
+    notices = bot.ExpiryNotices(retry_s=3600, clock=clock)
+    calls: list[int] = []
+    blocked: list[int] = []
+
+    async def notify(uid):
+        calls.append(uid)
+        if uid == 1:
+            raise ConnectionError("сеть")
+        if uid == 2:
+            raise RuntimeError("Forbidden: bot was blocked by the user")
+        if uid == 3:
+            raise TelegramBadRequest(SendMessage(chat_id=3, text="x"), "can't parse entities")
+
+    _expiry_run(notices, [1, 2, 3], notify=notify, blocked=blocked)
+    assert notices.pending == [1]                       # мёртвый и BadRequest не повторяются
+    assert blocked == [2]
+    clock.t = 3601                                      # сутки (тут — час) вышли: сдаёмся
+    _expiry_run(notices, [], notify=notify)
+    assert notices.pending == [] and calls.count(1) == 2
+
+    calls.clear()
+    clock.t = 0
+    notices = bot.ExpiryNotices(retry_s=3600, clock=clock)
+    _expiry_run(notices, [5], notify=lambda uid: (_ for _ in ()).throw(ConnectionError("x")))
+    assert notices.pending == [5]
+    _expiry_run(notices, [], notify=notify, still_expired=lambda uid: False)  # успел оплатить
+    assert notices.pending == [] and calls == []

@@ -117,28 +117,39 @@ def paying_total(conn: sqlite3.Connection, admins: set[int]) -> int:
 
 
 _LOG_TS = re.compile(r"^(\d{4}-\d{2}-\d{2})T")
+_EXPIRE_UID = re.compile(r" expire notify (\d+): ")
 
 
 def delivery_errors(log: Path, since: str) -> list[str]:
-    """Сбои сообщения о конце доступа (_mt_expire пишет «expire notify <id>: <ошибка>») и
-    падения блока «истечение подписок» целиком (MaintenanceGuard)."""
-    per_day: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    """Сбои сообщения о конце доступа (ExpiryNotices пишет «expire notify <id>: <ошибка>») и
+    падения блока «истечение подписок» целиком (MaintenanceGuard). Считаются люди, а не
+    строки: с 31.10 сбой сети повторяется на следующих тактах и пишет строку на каждый."""
+    per_day: dict[str, dict[str, set[str]]] = collections.defaultdict(
+        lambda: collections.defaultdict(set))
     try:
         lines = log.read_text(errors="replace").splitlines()
     except OSError:
         return [f"лог {log} не прочитан"]
-    for line in lines:
+    for n, line in enumerate(lines):
         m = _LOG_TS.match(line)
         if not m or m.group(1) < since[:10]:
             continue
-        if " expire notify " in line:
-            kind = "заблокировал бота" if "blocked by the user" in line else "другая ошибка"
-            per_day[m.group(1)][kind] += 1
+        u = _EXPIRE_UID.search(line)
+        if u:
+            if "blocked by the user" in line:
+                kind = "заблокировал бота"
+            elif "повторов не будет" in line:
+                kind = "не доставлено совсем"
+            elif "повторю" in line:
+                kind = "сбой сети (был повтор)"
+            else:
+                kind = "другая ошибка"
+            per_day[m.group(1)][kind].add(u.group(1))
         elif "блок «истечение подписок» упал" in line:
-            per_day[m.group(1)]["блок упал целиком"] += 1
+            per_day[m.group(1)]["блок упал целиком (тактов)"].add(str(n))
     if not per_day:
         return ["Ошибок доставки в логе нет."]
-    return [f"- {d}: " + ", ".join(f"{k} — {v}" for k, v in c.items())
+    return [f"- {d}: " + ", ".join(f"{k} — {len(v)}" for k, v in c.items())
             for d, c in sorted(per_day.items())]
 
 

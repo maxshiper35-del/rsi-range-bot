@@ -533,6 +533,9 @@ def cryptobot_enabled() -> bool:
     return bool(runtime.cryptobot_token())
 
 
+CRYPTOBOT_USER_AGENT = "rsirange-bot/1.0"
+
+
 def _cryptobot_call(method: str, params: dict, post: bool = True):
     """Вызов CryptoPay API. -> result. Вынесено отдельно для мока в тестах."""
     import json
@@ -543,7 +546,9 @@ def _cryptobot_call(method: str, params: dict, post: bool = True):
 
     token = runtime.cryptobot_token()
     base = f"https://pay.crypt.bot/api/{method}"
-    headers = {"Crypto-Pay-API-Token": token}
+    # без своего User-Agent Cloudflare перед pay.crypt.bot отвечает 403 (error 1010) на
+    # «Python-urllib» — все USDT-кнопки были мертвы (ревью 31.10; с UA getMe -> 200)
+    headers = {"Crypto-Pay-API-Token": token, "User-Agent": CRYPTOBOT_USER_AGENT}
     if post:
         req = urllib.request.Request(base, data=urllib.parse.urlencode(params).encode(),
                                      headers=headers)

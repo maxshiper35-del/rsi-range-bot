@@ -951,6 +951,72 @@ def test_menu_button_or_command_closes_dialog_in_one_press():
     assert "🛠 Админ-панель" in bot.MENU_TEXTS
 
 
+def test_payment_or_forward_during_dialog_reaches_its_handler():
+    """Ревью 31.10: брошенный «Промокод»/«Калькулятор» забирал successful_payment — у него
+    нет текста, и фильтр шага ~F.text.startswith("/") его пропускал. Stars списаны, подписка
+    не выдана, в логе пусто. Пересланный пост так же уходил в шаг вместо /check. Порядок
+    регистрации как в bot.main(): шаг раньше хэндлеров оплаты и пересылки."""
+    import asyncio
+    from datetime import datetime, timezone
+
+    from aiogram import Bot, Dispatcher, F
+    from aiogram.fsm.state import State, StatesGroup
+    from aiogram.types import Chat, Message, MessageOriginUser, SuccessfulPayment, Update, User
+
+    class Calc(StatesGroup):
+        deposit = State()
+
+    seen: list[str] = []
+
+    def make_dp(with_middleware: bool) -> Dispatcher:
+        dp = Dispatcher()
+        if with_middleware:
+            dp.message.outer_middleware(bot.menu_resets_dialog(frozenset({"ℹ️ О боте"})))
+
+        @dp.message(Calc.deposit, F.text, ~F.text.startswith("/"))
+        async def _step(m):
+            seen.append(f"step:{m.text}")
+
+        @dp.message(F.successful_payment)
+        async def _paid(m):
+            seen.append("paid")
+
+        @dp.message(F.forward_origin, F.chat.type == "private")
+        async def _forward(m):
+            seen.append("forward")
+
+        return dp
+
+    user = User(id=42, is_bot=False, first_name="t")
+    now = datetime.now(timezone.utc)
+    payment = SuccessfulPayment(currency="XTR", total_amount=150,
+                                invoice_payload="sub:7.0:week",
+                                telegram_payment_charge_id="c", provider_payment_charge_id="p")
+    origin = MessageOriginUser(date=now, sender_user=User(id=7, is_bot=False, first_name="s"))
+
+    async def scenario(dp: Dispatcher) -> list:
+        tg = Bot("123:ABC")
+        ctx = dp.fsm.get_context(bot=tg, chat_id=42, user_id=42)
+        states = []
+        for extra in ({"successful_payment": payment},
+                      {"forward_origin": origin, "text": "LONG BTC вход 64000 стоп 63000"}):
+            await ctx.set_state(Calc.deposit)
+            msg = Message(message_id=1, date=now, chat=Chat(id=42, type="private"),
+                          from_user=user, **extra)
+            await dp.feed_update(tg, Update(update_id=1, message=msg))
+            states.append(await ctx.get_state())
+        await tg.session.close()
+        return states
+
+    # с middleware: оплата и пересылка закрывают диалог и идут в свои хэндлеры
+    assert asyncio.run(scenario(make_dp(True))) == [None, None]
+    assert seen == ["paid", "forward"]
+    # без middleware оплату всё равно не съедает шаг: у неё нет текста (F.text на шаге)
+    seen.clear()
+    asyncio.run(scenario(make_dp(False)))
+    assert seen[0] == "paid"
+
+
 def test_main_menu_layout_user():
     user = bot.main_menu_layout(is_admin=False)
     flat = [t for row in user for t in row]

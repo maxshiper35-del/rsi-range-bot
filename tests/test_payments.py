@@ -427,6 +427,28 @@ def test_poll_cryptobot_adds_bonus_days(fresh_db, monkeypatch):
 
 
 
+def test_cryptobot_call_sends_own_user_agent(fresh_db, monkeypatch):
+    """Ревью 31.10: Cloudflare перед pay.crypt.bot режет «Python-urllib» (403, error 1010) —
+    USDT-кнопки были мертвы. Запрос обязан нести свой User-Agent и токен."""
+    import io
+    import json
+
+    from app import runtime
+    from app.delivery import payments
+    runtime.set_value("cryptobot_token", "tok")
+    sent = {}
+
+    def fake_urlopen(req, timeout):
+        sent.update({k.lower(): v for k, v in req.header_items()})
+        return io.BytesIO(json.dumps({"ok": True, "result": {"name": "rsirange"}}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert payments._cryptobot_call("getMe", {}, post=False) == {"name": "rsirange"}
+    assert sent["user-agent"] == payments.CRYPTOBOT_USER_AGENT
+    assert "urllib" not in sent["user-agent"].lower()
+    assert sent["crypto-pay-api-token"] == "tok"
+
+
 def test_cryptobot_invoice_and_poll(fresh_db, monkeypatch):
     from app.config import get_settings
     monkeypatch.setenv("CRYPTOBOT_TOKEN", "tok")
