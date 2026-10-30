@@ -206,3 +206,63 @@ def test_plausible_rejects_misparsed_zone():
 
 def test_handles_collects_source_tags():
     assert vip.handles(["Join @SomeVipChan ☆leaksz now"]) == ["SomeVipChan", "leaksz"]
+
+
+_BUY_POST = """🔰 #BTCUSDT
+
+⏫ BUY : 81909-80271
+
+👁‍🗨 Leverage: Cross (10.00X)
+
+📍TARGETS
+
+1) 82564
+2) 83220
+5) 88052+
+
+❌ STOPLOSS: 78633"""
+
+
+def test_buy_sell_line_is_entry_zone():
+    sig = vip.parse_post(_BUY_POST)
+    assert sig is not None and (sig.coin, sig.side) == ("BTC", "LONG")
+    assert (sig.entry_lo, sig.entry_hi, sig.stop) == (80271, 81909, 78633)
+    assert sig.targets[:2] == [82564, 83220]
+    short = (_BUY_POST.replace("⏫ BUY : 81909-80271", "⏬ SELL : 0.7655-0.78081")
+             .replace("82564", "0.759376").replace("83220", "0.753252")
+             .replace("88052", "0.70").replace("78633", "0.79612"))
+    s = vip.parse_post(short)
+    assert s is not None and s.side == "SHORT" and (s.entry_lo, s.stop) == (0.7655, 0.79612)
+    assert vip.prep_text("Buy zone 1,2") == "Buy zone 1,2"         # не строка «BUY :»
+
+
+def test_verdict_breakeven_agrees_with_closing_at_tp1():
+    # сработали короткие цели (+1R), длинные (+3R) ушли в стоп: по всем сигналам «нужно»
+    # вышло бы 1/(1+2) = 33% при факте 50% — а итог на TP1 при этом в нуле
+    rows = [_checked("tp", 1.0)] * 2 + [_checked("stop", 3.0)] * 2
+    v = vip.verdict(rows)
+    assert v.tp1_mean == pytest.approx(1.0) and v.at_tp1 == pytest.approx(0.0)
+    assert v.breakeven == pytest.approx(v.hit_rate)                # 50% и 50%: ровно ноль
+    assert vip._pct_digits(v) == 1                                 # равные в целых — со знаком
+
+
+def test_public_guard_blocks_demo_wording():
+    for bad in ("демо-счёт робота", "НА ДЕМО-СЧЁТЕ", "виртуальные деньги", "Демо: без денег"):
+        with pytest.raises(AssertionError):
+            kit.check_public([bad])
+    kit.check_public(["демонстрация входа", "демографический спрос"])  # не «демо»
+
+
+def test_quiz_math_and_captions_pass_guards():
+    from scripts import make_quiz as quiz
+
+    quiz._check()                                       # арифметика: каждое число двумя путями
+    keys = [q.key for q in quiz.QUIZZES]
+    assert len(keys) == len(set(keys)) and len({q.title for q in quiz.QUIZZES}) == len(keys)
+    for q in quiz.QUIZZES:
+        if q.key[:2] >= "21":
+            cap = quiz.caption(q)
+            kit.check_public([cap.render()])
+            assert cap.hashtags.startswith("#") and "#" not in cap.description
+            frames, _cues = quiz.build(q)
+            kit.check_public(kit.visible_text(h) for h, _d in frames)

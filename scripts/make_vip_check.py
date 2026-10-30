@@ -47,6 +47,8 @@ _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120 Safari/537.36")
 _TP_LINE = re.compile(r"\bTP\s*([1-9])\s*[:：]\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", re.I)
 _TP_PCT = re.compile(r"\bTP\s*[1-9][^\n]*?\(\s*\+\s*([0-9]+(?:[.,][0-9]+)?)\s*%", re.I)
+# «⏫ BUY : 81909-80271» в начале строки — зона входа без слова «entry» (шаблон 30.10)
+_BUY_LINE = re.compile(r"(?im)^([^\w\n]*)(buy|sell)\s*:\s*(?=\d)")
 _TF_S = {"15m": 900, "1h": 3600, "4h": 14400}
 _SIDE = {"LONG": "лонг", "SHORT": "шорт"}
 BIG_CARDS = 3
@@ -226,11 +228,12 @@ def subs_ru(raw: str | None) -> str:
 
 
 def prep_text(text: str) -> str:
-    """Поправка разбора: «81,500» — тысячи, если в тексте есть точечные десятичные."""
+    """Поправки разбора: «81,500» — тысячи, если в тексте есть точечные десятичные;
+    строка «⏫ BUY : 0.077-0.075» — зона входа (слово «entry» дописывается, сторона остаётся)."""
     t = text.replace(" ", " ")
     if re.search(r"\d\.\d", t):
         t = re.sub(r"(?<![\d.])(\d{1,3}),(\d{3})(?!\d)", r"\1\2", t)
-    return t
+    return _BUY_LINE.sub(r"\1\2 entry: ", t)
 
 
 def explicit_targets(text: str) -> list[float]:
@@ -388,7 +391,7 @@ class Verdict:
     stop: int
     nofill: int
     open: int
-    tp1_mean: float                          # средняя первая цель в R (по исполненным)
+    tp1_mean: float                          # средняя первая цель в R (по сработавшим)
     hit_rate: float                          # доля целей среди закрытых исполненных
     breakeven: float                         # нужная доля попаданий при выходе на TP1
     at_tp1: float                            # сумма R, если закрывать всё на TP1
@@ -397,7 +400,11 @@ class Verdict:
 def verdict(rows: list[Checked]) -> Verdict:
     tp = [r for r in rows if r.kind == "tp"]
     stop = [r for r in rows if r.kind == "stop"]
-    tp1 = [r.tp1_r for r in rows if r.tp1_r is not None]
+    # средняя первая цель — у СРАБОТАВШИХ: тогда «нужно для нуля» и «закрывать всё на TP1»
+    # не противоречат друг другу (по всем сигналам вышло «было 58,8% < нужно 59,4%» рядом
+    # с «+0,5R» — короткие цели срабатывают чаще длинных)
+    tp1 = [r.tp1_r for r in tp if r.tp1_r is not None] or \
+        [r.tp1_r for r in rows if r.tp1_r is not None]
     mean = sum(tp1) / len(tp1) if tp1 else 0.0
     resolved = len(tp) + len(stop)
     return Verdict(
@@ -407,6 +414,11 @@ def verdict(rows: list[Checked]) -> Verdict:
         tp1_mean=mean, hit_rate=len(tp) / resolved if resolved else 0.0,
         breakeven=1 / (1 + mean) if mean > 0 else 1.0,
         at_tp1=sum(r.tp1_r or 0.0 for r in tp) - len(stop))
+
+
+def _pct_digits(v: Verdict) -> int:
+    """Знаков у «нужно / было»: один, если в целых процентах они совпали бы."""
+    return 1 if round(v.breakeven * 100) == round(v.hit_rate * 100) else 0
 
 
 _KIND = {"tp": ("✅", "тейк"), "stop": ("🛑", "стоп"), "nofill": ("⌛", "нет входа"),
@@ -535,23 +547,24 @@ def frames(rows: list[Checked], v: Verdict, subs: str, claim: float | None) -> k
 
     # 6. математика: сколько нужно попаданий при такой цели — и сколько было
     need, got = v.breakeven * 100, v.hit_rate * 100
+    dg = _pct_digits(v)                 # 58,8% против 59,4% не должны выглядеть как 59 и 59
     body = (kit.brand_row(tag) +
             "<div class='vd'><div class='m-h'>Первая цель — "
             f"<em>{rr(v.tp1_mean)}</em></div>"
-            f"<div class='m-p'>На <b>1 $</b> риска — <b>{num(v.tp1_mean, 2)} $</b> прибыли. "
-            "Чтобы не терять, цель должна срабатывать хотя бы:</div>"
+            f"<div class='m-p'>Сработавшая цель давала в среднем <b>{num(v.tp1_mean, 2)} $</b> "
+            "на <b>1 $</b> риска. Чтобы не терять, она должна срабатывать хотя бы:</div>"
             "<div class='bars'>"
             f"<div class='bl'><div class='bt'>нужно для нуля</div><div class='bk'><div class='tr'>"
             f"<div class='fl' style='width:{need:.0f}%;background:#F2B84B'></div></div>"
-            f"<div class='bv amb'>{num(need)}%</div></div></div>"
+            f"<div class='bv amb'>{num(need, dg)}%</div></div></div>"
             f"<div class='bl'><div class='bt'>было (из {v.tp + v.stop} закрытых)</div>"
             f"<div class='bk'><div class='tr'><div class='fl' style='width:{got:.0f}%;"
             f"background:{G if got >= need else R}'></div></div>"
-            f"<div class='bv {'pos' if got >= need else 'neg'}'>{num(got)}%</div></div></div>"
+            f"<div class='bv {'pos' if got >= need else 'neg'}'>{num(got, dg)}%</div></div></div>"
             "</div>"
             f"<div class='sumbox'><div class='l'>Закрывать всё на первой цели:</div>"
             f"<div class='n {'pos' if v.at_tp1 > 0 else 'neg'}'>{rr(v.at_tp1, 1)}</div>"
-            f"<small>≈ {num(v.at_tp1, 0, sign=True)}% депозита при риске 1% · до комиссий</small>"
+            f"<small>≈ {num(v.at_tp1, 1, sign=True)}% депозита при риске 1% · до комиссий</small>"
             "</div></div>")
     tl.add(kit.page(body, _CSS), 4.2, "tick")
 
@@ -576,9 +589,11 @@ def caption(v: Verdict, subs: str, claim: float | None) -> kit.Caption:
             f"название не публикуем).{claim_txt} Каждый прогнал по свечам Bybit по тем же "
             f"правилам, что у проверки сигналов в боте: до первой цели дошли {v.tp}, стоп "
             "раньше цели — "
-            f"{v.stop}, вход не исполнился — {v.nofill}, ещё открыт — {v.open}. Первая цель в "
-            f"среднем {rr(v.tp1_mean)}: чтобы не терять, ей нужно срабатывать в "
-            f"{num(v.breakeven * 100)}% случаев, а сработала в {num(v.hit_rate * 100)}% "
+            f"{v.stop}, вход не исполнился — {v.nofill}, ещё открыт — {v.open}. Сработавшая "
+            f"первая цель давала в среднем {rr(v.tp1_mean)}: чтобы не терять, ей нужно "
+            "срабатывать в "
+            f"{num(v.breakeven * 100, _pct_digits(v))}% случаев, а сработала в "
+            f"{num(v.hit_rate * 100, _pct_digits(v))}% "
             "закрытых. Проверь свой канал: перешли сигнал боту "
             f"{kit.BOT} — бесплатно. {kit.NOT_ADVICE}."),
         hashtags="#крипта #сигналы #трейдинг #проверка #криптосигналы",
@@ -602,6 +617,8 @@ def main() -> None:
     ap.add_argument("--out", default=str(OUT))
     ap.add_argument("--refresh", action="store_true", help="заново скачать страницы и свечи")
     ap.add_argument("--preview", action="store_true")
+    ap.add_argument("--key", help="имя файла без расширения (по умолчанию proverka_kanala_<дата>;"
+                                  " два канала с постами одного дня иначе перезапишут друг друга)")
     a = ap.parse_args()
     posts, title, subs_raw = fetch_pages(a.channel, a.pages, a.refresh)
     rows, skipped = check_signals(posts, a.n, a.refresh)
@@ -618,7 +635,7 @@ def main() -> None:
         print("  пропущен:", s[1])
     print(f"итог: {v}")
     tl = frames(rows, v, subs, claim)
-    key = f"proverka_kanala_{rows[0].post.dt:%Y%m%d}"
+    key = a.key or f"proverka_kanala_{rows[0].post.dt:%Y%m%d}"
     out = Path(a.out)
     forbid = [a.channel, title or ""] + handles([p.text for p in posts])
     if a.preview:
