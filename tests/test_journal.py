@@ -1100,3 +1100,21 @@ def test_breakeven_rule_from_snapshot():
     assert r2[2] == 0.3                                          # фиксация +0.3R
     r3 = journal._outcome_from_bars(row({**base, "be_trigger_r": 1.2}), df)
     assert r3[2] == -1.0                                         # +1.1R не дотянул до 1.2
+
+
+def test_config_version_stamped_and_follows_strategy_settings(fresh_db):
+    """30.10 (миграция 028): хеш стратегических настроек на момент создания сигнала —
+    проверка вперёд сравнивает исполнение внутри одной конфигурации. Смена фильтра/трейла
+    меняет хеш; вотчлист (ротация монет) — нет."""
+    from app import runtime
+    from app.brain import journal
+    a = journal.record_signal(_sig(created_at="2026-01-01T00:00:00+00:00"))
+    b = journal.record_signal(_sig(created_at="2026-01-01T01:00:00+00:00"))
+    runtime.set_value("symbols", "BTC/USDT:USDT,ETH/USDT:USDT")
+    c = journal.record_signal(_sig(created_at="2026-01-01T02:00:00+00:00"))
+    runtime.set_value("min_confidence", "0.77")
+    d = journal.record_signal(_sig(created_at="2026-01-01T03:00:00+00:00"))
+    v = {sid: fresh_db.query_one("SELECT config_version FROM signals WHERE id=?",
+                                 (sid,))["config_version"] for sid in (a, b, c, d)}
+    assert v[a] and len(v[a]) == 8
+    assert v[a] == v[b] == v[c] != v[d]

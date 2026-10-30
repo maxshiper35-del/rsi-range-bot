@@ -171,6 +171,36 @@ def _trail_rule() -> dict | None:
             "max_hold_hours": runtime.trail_max_hold_hours()}
 
 
+def _config_version() -> str | None:
+    """Короткий хеш стратегических настроек на момент создания сигнала (миграция 028).
+
+    Проверка вперёд (forward_check) сравнивает исполнение и журнал только ВНУТРИ одной
+    конфигурации: смена фильтров входа или схемы выхода меняет хеш, и сделки разных правил
+    не смешиваются в одну когорту (30.10.2026: когорта «с 19.10» смешивала три версии
+    executor). Входят только настройки, решающие ЧТО публикуется и КАК судится; вотчлист —
+    нет (ротация монет раздробила бы когорты), цены/канал — нет. Сбой чтения — None:
+    метаданные не должны ронять вставку сигнала."""
+    import hashlib
+
+    from app import runtime
+    try:
+        cfg = {
+            "tf": list(runtime.timeframes()), "setups": sorted(runtime.enabled_setups()),
+            "shadow": sorted(map(list, runtime.shadow_setups())),
+            "min_conf": runtime.min_confidence(), "min_impulse": runtime.min_impulse_atr(),
+            "min_rr_open": runtime.min_rr_open_model(), "min_stop": runtime.min_stop_pct(),
+            "htf_block": runtime.htf_block_countertrend(), "late": runtime.late_entry_gate(),
+            "time_filter": runtime.time_filter_enabled(),
+            "per_side": runtime.max_open_per_side(),
+            "cooldown": [runtime.side_cooldown_stops(), runtime.side_cooldown_hours()],
+            "trail": _trail_rule(),
+        }
+    except Exception:                                   # noqa: BLE001 — метаданные, не исход
+        return None
+    raw = json.dumps(cfg, sort_keys=True, default=str).encode()
+    return hashlib.sha1(raw).hexdigest()[:8]
+
+
 def _insert(signal: Signal, status: str, event: str) -> int:
     """Общая вставка сигнала в заданном статусе + начальное событие. -> signal_id."""
     tps = list(signal.take_profits) + [None, None, None]
@@ -181,16 +211,18 @@ def _insert(signal: Signal, status: str, event: str) -> int:
     if trail is not None:
         snapshot["trail"] = trail
     exchange = snapshot.get("exchange", "bybit")
+    cfg_ver = _config_version()
     with db.transaction() as conn:
         cur = conn.execute(
             "INSERT INTO signals(symbol, side, timeframe, entry, stop, tp1, tp2, tp3, "
             "risk_reward, confidence, reasons_json, snapshot_json, exchange, status, "
-            "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "created_at, updated_at, config_version) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (signal.symbol, signal.side.value, signal.timeframe, signal.entry, signal.stop,
              tps[0], tps[1], tps[2], signal.risk_reward, signal.confidence,
              json.dumps(signal.reasons, ensure_ascii=False),
              json.dumps(snapshot, ensure_ascii=False),
-             exchange, status, signal.created_at, now),
+             exchange, status, signal.created_at, now, cfg_ver),
         )
         sid = cur.lastrowid
         conn.execute(

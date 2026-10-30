@@ -17,6 +17,10 @@
 переставляет стоп-ордер BingX на этот уровень (_sync_trail_stops). Раньше трейл жил только
 в журнале, выход исполнялся рыночным закрытием после бара — замер 20.10: на 24 выходах
 по трейлу executor отставал на −0.48R (при развороте позицию забирал исходный стоп).
+С 24.10 — нативный TRAILING_STOP_MARKET (биржа ведёт трейл в реальном времени); с 30.10
+(версия e5) его АКТИВАЦИЮ решает реалтайм-стрим Bybit — та же цена, что у журнала, — а не
+опрос цены BingX раз в такт (аудит docs/audits/2026-10-30-execution-parity.md: опрос
+пропускал короткие проходы +1.5R и активировал трейл по артефактам цены демо-стакана).
 Ошибка слежения executor-против-журнала — измеряемая величина, не скрытая.
 
 БЕЗОПАСНОСТЬ. Sandbox (VST) ЗАХАРДКОЖЕН — v1 физически не умеет торговать реальные
@@ -35,13 +39,70 @@ from __future__ import annotations
 
 import os
 import re as _re
+import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from app import clock, db, runtime
 
 # клиентские id: rsiE<sid> — вход; аварийный стоп прикреплён к входу (BingX создаёт
 # его при филле сам, отдельного client_id у него нет)
 _ENTRY_PREFIX = "rsiE"
+
+# Версия исполнения (миграция 028): пишется в executor_orders при постановке и при филле —
+# проверка вперёд сравнивает сделки ОДНОЙ механики. История — в миграции 028:
+# e1 лимитка · e2 TRIGGER_MARKET · e3 почасовой стоп за трейлом · e4 нативный трейл, опрос
+# BingX · e5 активация трейла по стриму Bybit + постановка входа сразу после записи сигнала.
+EXECUTION_VERSION = "e5"
+EXECUTION_VERSIONS = {
+    "e1": "лимитный вход, выход по рынку после журнала",
+    "e2": "вход по касанию (TRIGGER_MARKET), выход по рынку после журнала",
+    "e3": "стоп на бирже за трейлом журнала раз в такт",
+    "e4": "нативный трейл, активация опросом BingX",
+    "e5": "нативный трейл, активация по стриму Bybit",
+}
+
+# Замки сигналов (30.10.2026): стрим-активация трейла и быстрая постановка входа идут из
+# потоков fast-цикла параллельно такту сверки. Без замка трейлинг-ордер мог встать на
+# позицию, которую такт в этот же момент закрывает по журналу, — reduce-only сирота съела
+# бы долю СЛЕДУЮЩЕГО сигнала того же символа/стороны. RLock: повторный вход того же потока
+# безопасен; быстрые пути берут замок без ожидания и уступают такту.
+_SID_LOCKS: dict[int, threading.RLock] = {}
+_SID_LOCKS_GUARD = threading.Lock()
+
+
+def _sid_lock(sid: int) -> threading.RLock:
+    with _SID_LOCKS_GUARD:
+        lk = _SID_LOCKS.get(sid)
+        if lk is None:
+            lk = _SID_LOCKS[sid] = threading.RLock()
+        return lk
+
+
+# Строки отчёта быстрых путей (поток fast-цикла): уходят админу с ближайшим тактом
+# сверки ОДНИМ сообщением — действие мгновенное, уведомление в прежнем ритме и троттлинге.
+_PENDING_REPORT: list[str] = []
+_PENDING_GUARD = threading.Lock()
+
+
+def _push_report(lines: list[str]) -> None:
+    if lines:
+        with _PENDING_GUARD:
+            _PENDING_REPORT.extend(lines)
+
+
+def _drain_report() -> list[str]:
+    with _PENDING_GUARD:
+        out = list(_PENDING_REPORT)
+        _PENDING_REPORT.clear()
+    return out
+
+
+def _iso_ms(iso: str) -> int:
+    d = datetime.fromisoformat(iso)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return int(d.timestamp() * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +187,10 @@ class Action:
     detail: str
 
 
+# пометка пропуска: журнал засчитал касание entry раньше, чем executor поставил вход
+PREFILL_NOTE = "филл в журнале раньше постановки"
+
+
 def plan(open_rows: list, tracked: dict, markets: set, since: str) -> list[Action]:
     """Свести журнал и учёт executor_orders к списку действий (без сети, тестируемо).
 
@@ -147,8 +212,10 @@ def plan(open_rows: list, tracked: dict, markets: set, since: str) -> list[Actio
             continue
         if r["filled_at"] is not None:
             # журнал зафиксировал филл (реалтайм-стрим) раньше, чем executor успел
-            # поставить вход — цена уже у уровня, честнее пропустить, чем догонять
-            actions.append(Action("skip", sid, "филл в журнале раньше постановки"))
+            # поставить вход — цена уже у уровня, честнее пропустить, чем догонять.
+            # С 30.10 вход ставит быстрый путь place_fresh через секунды после записи
+            # сигнала; сюда попадают касания в первые секунды после публикации
+            actions.append(Action("skip", sid, PREFILL_NOTE))
             continue
         actions.append(Action("place", sid, r["symbol"]))
     for sid, state in tracked.items():
@@ -165,19 +232,21 @@ def plan(open_rows: list, tracked: dict, markets: set, since: str) -> list[Actio
 # Обвязка биржи
 # ---------------------------------------------------------------------------
 _ex_cache: dict = {"ex": None, "born": 0.0}
+_ex_fast_cache: dict = {"ex": None, "born": 0.0}
 _EX_TTL_SEC = 6 * 3600            # пересоздать инстанс (и market-кеш ccxt) раз в 6ч
 
 
-def _exchange():
+def _exchange(cache: dict | None = None):
     """Кешированный инстанс ccxt: без кеша каждый 60с-такт создавал бы клиента и качал
     полный список контрактов BingX (ревью 13.08) — лишний тяжёлый запрос и точка отказа."""
     import time as _time
 
     import ccxt
 
+    c = _ex_cache if cache is None else cache
     now = _time.monotonic()
-    if _ex_cache["ex"] is not None and now - _ex_cache["born"] < _EX_TTL_SEC:
-        return _ex_cache["ex"]
+    if c["ex"] is not None and now - c["born"] < _EX_TTL_SEC:
+        return c["ex"]
     ex = ccxt.bingx({
         "apiKey": os.environ.get("BINGX_API_KEY", ""),
         "secret": os.environ.get("BINGX_API_SECRET", ""),
@@ -186,8 +255,15 @@ def _exchange():
     })
     ex.set_sandbox_mode(True)      # v1: ТОЛЬКО демо (VST) — см. докстринг модуля
     ex.load_markets()
-    _ex_cache["ex"], _ex_cache["born"] = ex, now
+    c["ex"], c["born"] = ex, now
     return ex
+
+
+def _exchange_fast():
+    """Свой инстанс ccxt для потока fast-цикла (вход сразу после сигнала, трейл по стриму):
+    такт сверки работает в другом потоке параллельно, а ccxt и requests.Session
+    потокобезопасности не обещают. Цена — лишний load_markets раз в 6 ч."""
+    return _exchange(_ex_fast_cache)
 
 
 def _tracked() -> dict:
@@ -198,9 +274,10 @@ def _tracked() -> dict:
 def _track(sid: int, r, qty: float, client_id: str) -> None:
     db.execute(
         "INSERT OR REPLACE INTO executor_orders(signal_id, symbol, side, qty, entry_px, "
-        "stop_px, client_id, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "stop_px, client_id, state, created_at, updated_at, execution_version) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (sid, r["symbol"], r["side"], qty, r["entry"], r["stop"], client_id,
-         "placing", clock.utcnow_iso(), clock.utcnow_iso()))
+         "placing", clock.utcnow_iso(), clock.utcnow_iso(), EXECUTION_VERSION))
 
 
 def _set_state(sid: int, state: str, note: str | None = None) -> None:
@@ -223,7 +300,8 @@ def reconcile() -> list[str]:
         runtime.set_value("executor_enabled", "0")
         return ["⚠️ Executor выключен сам: в окружении нет ключей BingX "
                 "(локальный режим; включать после возврата на сервер)"]
-    report: list[str] = []
+    # строки быстрых путей (стрим-трейл, постановка входа) — в общее сообщение такта
+    report: list[str] = _drain_report()
     ex = _exchange()
     open_rows = db.query("SELECT * FROM signals WHERE status='open' AND result_r IS NULL")
     _retry_budget_skips({r["id"] for r in open_rows})
@@ -261,6 +339,10 @@ def reconcile() -> list[str]:
                  if st in ("placing", "placed") and sid in open_ids]
 
     for a in todo:
+        # замок сигнала: быстрые пути (стрим-трейл, постановка входа) не пересекаются с
+        # действием такта по тому же сигналу
+        lock = _sid_lock(a.signal_id)
+        lock.acquire()
         try:
             if a.kind == "skip":
                 if a.signal_id not in tracked:
@@ -269,98 +351,7 @@ def reconcile() -> list[str]:
                     _set_state(a.signal_id, "error", a.detail)
                     report.append(f"⏭ #{a.signal_id}: {a.detail}")
             elif a.kind == "place":
-                r = rows_by_id[a.signal_id]
-                m = ex.market(r["symbol"])
-                lim = m.get("limits", {}) or {}
-                budget = min(MAX_NOTIONAL_USDT,
-                             SYMBOL_BUDGET_USDT - _active_notional(r["symbol"], r["side"]))
-                qty = calc_qty(balance, runtime.executor_risk_pct(), r["entry"], r["stop"],
-                               float((lim.get("amount") or {}).get("min") or 0),
-                               float(m.get("precision", {}).get("amount") or 0),
-                               max_notional=budget)
-                if qty <= 0:
-                    used = _active_notional(r["symbol"], r["side"])
-                    why = ("бюджет номинала символа/стороны исчерпан "
-                           f"(кап {SYMBOL_BUDGET_USDT:g} USDT, занято {used:g})"
-                           if budget < MAX_NOTIONAL_USDT else "объём ниже минимума биржи")
-                    _track(a.signal_id, r, 0.0, "")
-                    _set_state(a.signal_id, "error", why)
-                    report.append(f"⏭ #{a.signal_id}: {why}")
-                    continue
-                side = "buy" if r["side"] == "LONG" else "sell"
-                client_id = f"{_ENTRY_PREFIX}{a.signal_id}"
-                # учёт ДО create_order (state='placing'): таймаут ПОСЛЕ отправки не
-                # оставит ордер-сироту — recovery в except сверит по clientOrderID
-                _track(a.signal_id, r, qty, client_id)
-                # цены — к тику инструмента: сырой стоп ловил 101400
-                # «SL Price must be…» на монетах с крупным тиком (#343 PORTAL 20.08)
-                entry_px = float(ex.price_to_precision(r["symbol"], r["entry"]))
-                sl = {"type": "STOP_MARKET",
-                      "stopPrice": float(ex.price_to_precision(r["symbol"], r["stop"]))}
-                base = {"positionSide": r["side"], "clientOrderID": client_id,
-                        "stopLoss": sl}
-                # Направление триггера BingX ставит сам от текущей цены — это СОВПАДАЕТ
-                # с журнальной семантикой «филл касанием entry с любой стороны»:
-                # trigger сработает ровно тогда, когда журнал засчитает касание.
-                from ccxt import ExchangeError as _ExErr
-                from ccxt import NetworkError as _NetErr
-                deferred_sl = False
-                try:
-                    try:
-                        created = ex.create_order(
-                            r["symbol"], "market", side, qty, None,
-                            params={**base, "triggerPrice": entry_px})
-                    except _ExErr as e_sl:
-                        if "101400" in str(e_sl) and "SL" in str(e_sl).upper():
-                            # BingX валидирует прикреплённый стоп от ТЕКУЩЕЙ цены:
-                            # если цена сейчас за стопом (#434 ENA 02.09), связка
-                            # неставима. Ставим триггер БЕЗ стопа, аварийный стоп
-                            # довесим при филле (_sync_fill_states по метке note)
-                            created = ex.create_order(
-                                r["symbol"], "market", side, qty, None,
-                                params={"positionSide": r["side"],
-                                        "clientOrderID": client_id,
-                                        "triggerPrice": entry_px})
-                            # метка ставится ВМЕСТЕ с 'placed' ниже: отдельный UPDATE
-                            # затирался _set_state(…, 'placed') — стоп после филла не
-                            # довешивался, позиция жила без биржевого стопа (аудит 05.10)
-                            deferred_sl = True
-                        else:
-                            # триггер отвергнут (цена у уровня?). Немедленный маркет
-                            # честен ТОЛЬКО если журнал УЖЕ засчитал касание (гонка
-                            # внутри такта) — истина у журнала, не у тикера
-                            fresh = db.query_one(
-                                "SELECT filled_at FROM signals WHERE id=?",
-                                (a.signal_id,))
-                            if not (fresh and fresh["filled_at"]):
-                                raise
-                            created = ex.create_order(
-                                r["symbol"], "market", side, qty, None,
-                                params=dict(base))
-                    _store_order_id(a.signal_id, (created or {}).get("id"))
-                except Exception as e_create:           # noqa: BLE001
-                    # неоднозначный сбой (таймаут после отправки?): сверить по clientOrderID —
-                    # ордер реально стоит -> успех; нет -> настоящая ошибка наверх
-                    trow = db.query_one("SELECT * FROM executor_orders WHERE signal_id=?",
-                                        (a.signal_id,))
-                    if _entry_order(ex, trow) is None:
-                        if isinstance(e_create, _NetErr):
-                            # ответ потерян в сети: ордер мог встать, но ещё не виден в
-                            # листинге. 'error' навсегда выбрасывал его из сверки — живой
-                            # триггер никто не снимал (аудит 05.10). Остаёмся в 'placing':
-                            # _sync_fill_states подхватит ордер или через 10 мин честно
-                            # закроет строку
-                            report.append(f"⚠️ #{a.signal_id} {r['symbol']}: ответ биржи "
-                                          f"потерян ({type(e_create).__name__}) — сверю "
-                                          "следующими тактами")
-                            continue
-                        raise
-                _set_state(a.signal_id, "placed",
-                           "стоп отложен до филла" if deferred_sl else None)
-                report.append(f"📥 #{a.signal_id} {r['symbol']} {r['side']}: "
-                              f"триггер-маркет {qty:g} @ {r['entry']:g}, "
-                              + (f"стоп {r['stop']:g} довешу при филле (VST)" if deferred_sl
-                                 else f"стоп {r['stop']:g} (VST)"))
+                _place_entry(ex, a.signal_id, rows_by_id[a.signal_id], balance, report)
             elif a.kind == "cancel":
                 t = db.query_one("SELECT * FROM executor_orders WHERE signal_id=?",
                                  (a.signal_id,))
@@ -437,6 +428,8 @@ def reconcile() -> list[str]:
                 elif n == 1:
                     report.append(f"⚠️ #{a.signal_id}: {type(e).__name__}: "
                                   f"{str(e)[:100]} — повторю")
+        finally:
+            lock.release()
 
     # переход placed -> filled (информативно): вход исчез из открытых, позиция есть
     _sync_fill_states(ex, report)
@@ -453,6 +446,150 @@ def reconcile() -> list[str]:
         if orph:
             _ORPHAN_ALERT["at"] = _time.monotonic()
             report.extend(orph)
+    return report
+
+
+def _place_entry(ex, sid: int, r, balance: float, report: list[str],
+                 require_unfilled: bool = False) -> None:
+    """Поставить вход сигнала: TRIGGER_MARKET по касанию entry с прикреплённым аварийным
+    стопом (−1R). Зовётся тактом сверки и быстрым путём place_fresh — ПОД замком сигнала.
+    Сигнал уже под учётом (быстрый путь или прошлый такт успели) — ничего не делаем.
+    require_unfilled (быстрый путь): журнал уже засчитал касание — вход не ставим, пропуск
+    «филл в журнале раньше постановки» оформит такт сверки по прежнему правилу."""
+    if db.query_one("SELECT 1 FROM executor_orders WHERE signal_id=?", (sid,)):
+        return
+    if require_unfilled:
+        cur = db.query_one("SELECT filled_at FROM signals WHERE id=?", (sid,))
+        if cur is None or cur["filled_at"]:
+            return
+    m = ex.market(r["symbol"])
+    lim = m.get("limits", {}) or {}
+    budget = min(MAX_NOTIONAL_USDT,
+                 SYMBOL_BUDGET_USDT - _active_notional(r["symbol"], r["side"]))
+    qty = calc_qty(balance, runtime.executor_risk_pct(), r["entry"], r["stop"],
+                   float((lim.get("amount") or {}).get("min") or 0),
+                   float(m.get("precision", {}).get("amount") or 0),
+                   max_notional=budget)
+    if qty <= 0:
+        used = _active_notional(r["symbol"], r["side"])
+        why = ("бюджет номинала символа/стороны исчерпан "
+               f"(кап {SYMBOL_BUDGET_USDT:g} USDT, занято {used:g})"
+               if budget < MAX_NOTIONAL_USDT else "объём ниже минимума биржи")
+        _track(sid, r, 0.0, "")
+        _set_state(sid, "error", why)
+        report.append(f"⏭ #{sid}: {why}")
+        return
+    side = "buy" if r["side"] == "LONG" else "sell"
+    client_id = f"{_ENTRY_PREFIX}{sid}"
+    # учёт ДО create_order (state='placing'): таймаут ПОСЛЕ отправки не
+    # оставит ордер-сироту — recovery в except сверит по clientOrderID
+    _track(sid, r, qty, client_id)
+    # цены — к тику инструмента: сырой стоп ловил 101400
+    # «SL Price must be…» на монетах с крупным тиком (#343 PORTAL 20.08)
+    entry_px = float(ex.price_to_precision(r["symbol"], r["entry"]))
+    sl = {"type": "STOP_MARKET",
+          "stopPrice": float(ex.price_to_precision(r["symbol"], r["stop"]))}
+    base = {"positionSide": r["side"], "clientOrderID": client_id, "stopLoss": sl}
+    # Направление триггера BingX ставит сам от текущей цены — это СОВПАДАЕТ
+    # с журнальной семантикой «филл касанием entry с любой стороны»:
+    # trigger сработает ровно тогда, когда журнал засчитает касание.
+    from ccxt import ExchangeError as _ExErr
+    from ccxt import NetworkError as _NetErr
+    deferred_sl = False
+    try:
+        try:
+            created = ex.create_order(
+                r["symbol"], "market", side, qty, None,
+                params={**base, "triggerPrice": entry_px})
+        except _ExErr as e_sl:
+            if "101400" in str(e_sl) and "SL" in str(e_sl).upper():
+                # BingX валидирует прикреплённый стоп от ТЕКУЩЕЙ цены:
+                # если цена сейчас за стопом (#434 ENA 02.09), связка
+                # неставима. Ставим триггер БЕЗ стопа, аварийный стоп
+                # довесим при филле (_sync_fill_states по метке note)
+                created = ex.create_order(
+                    r["symbol"], "market", side, qty, None,
+                    params={"positionSide": r["side"], "clientOrderID": client_id,
+                            "triggerPrice": entry_px})
+                # метка ставится ВМЕСТЕ с 'placed' ниже: отдельный UPDATE
+                # затирался _set_state(…, 'placed') — стоп после филла не
+                # довешивался, позиция жила без биржевого стопа (аудит 05.10)
+                deferred_sl = True
+            else:
+                # триггер отвергнут (цена у уровня?). Немедленный маркет
+                # честен ТОЛЬКО если журнал УЖЕ засчитал касание (гонка
+                # внутри такта) — истина у журнала, не у тикера
+                fresh = db.query_one("SELECT filled_at FROM signals WHERE id=?", (sid,))
+                if not (fresh and fresh["filled_at"]):
+                    raise
+                created = ex.create_order(r["symbol"], "market", side, qty, None,
+                                          params=dict(base))
+        _store_order_id(sid, (created or {}).get("id"))
+    except Exception as e_create:                       # noqa: BLE001
+        # неоднозначный сбой (таймаут после отправки?): сверить по clientOrderID —
+        # ордер реально стоит -> успех; нет -> настоящая ошибка наверх
+        trow = db.query_one("SELECT * FROM executor_orders WHERE signal_id=?", (sid,))
+        if _entry_order(ex, trow) is None:
+            if isinstance(e_create, _NetErr):
+                # ответ потерян в сети: ордер мог встать, но ещё не виден в
+                # листинге. 'error' навсегда выбрасывал его из сверки — живой
+                # триггер никто не снимал (аудит 05.10). Остаёмся в 'placing':
+                # _sync_fill_states подхватит ордер или через 10 мин честно
+                # закроет строку
+                report.append(f"⚠️ #{sid} {r['symbol']}: ответ биржи "
+                              f"потерян ({type(e_create).__name__}) — сверю "
+                              "следующими тактами")
+                return
+            raise
+    _set_state(sid, "placed", "стоп отложен до филла" if deferred_sl else None)
+    report.append(f"📥 #{sid} {r['symbol']} {r['side']}: "
+                  f"триггер-маркет {qty:g} @ {r['entry']:g}, "
+                  + (f"стоп {r['stop']:g} довешу при филле (VST)" if deferred_sl
+                     else f"стоп {r['stop']:g} (VST)"))
+
+
+def place_fresh() -> list[str]:
+    """Быстрая постановка входов ТОЛЬКО ЧТО записанных сигналов (fast-цикл бота, ~2 с).
+
+    Аудит 30.10 (#698/#704, раньше #691/#562/#487…): вход ставился на ближайшем такте
+    сверки — до 60 с + время обслуживания после записи сигнала, — а стрим засчитывал
+    касание entry через 3–42 с после записи (уровень у текущей цены). Executor честно
+    пропускал такие сигналы («филл в журнале раньше постановки»): ордера ещё не было.
+    Здесь триггер встаёт через секунды после записи. Сеть — только когда есть новый
+    сигнал; любой сбой молча оставляет постановку такту сверки (там и алерты)."""
+    since = runtime.executor_since() or ""
+    if not since or not runtime.executor_enabled() or not os.environ.get("BINGX_API_KEY"):
+        return []
+    rows = db.query(
+        "SELECT * FROM signals WHERE status='open' AND result_r IS NULL AND filled_at IS NULL "
+        "AND created_at >= ? AND id NOT IN (SELECT signal_id FROM executor_orders)", (since,))
+    if not rows or runtime.executor_halt_day() == clock.utcnow_iso()[:10]:
+        return []
+    report: list[str] = []
+    try:
+        ex = _exchange_fast()
+        rows = [r for r in rows if r["symbol"] in ex.markets]
+        if not rows:
+            return []
+        bal = ex.fetch_balance()
+        balance = float((bal.get("total") or {}).get("VST", 0.0))
+        if _apply_daily_guard(_equity_of(bal), report):
+            _push_report(report)
+            return report
+    except Exception:                                   # noqa: BLE001 — сеть: решит такт
+        return []
+    for r in rows:
+        lock = _sid_lock(r["id"])
+        if not lock.acquire(blocking=False):
+            continue                                    # такт сверки ведёт этот сигнал
+        try:
+            _place_entry(ex, r["id"], r, balance, report, require_unfilled=True)
+        except Exception as e:                          # noqa: BLE001 — как ветка place такта
+            _set_state(r["id"], "error", str(e)[:200])
+            report.append(f"⚠️ #{r['id']}: {type(e).__name__}: {str(e)[:120]}")
+        finally:
+            lock.release()
+    _push_report(report)
     return report
 
 
@@ -852,125 +989,398 @@ def _sync_trail_stops(ex, report: list[str], skip: set | frozenset = frozenset()
     засчитает выход по трейлу на закрытии бара; закрываемся по рынку сразу."""
     import time as _t
 
-    from ccxt import ExchangeError as _ExErr
     rows = db.query(
         "SELECT eo.*, s.trail_stop FROM executor_orders eo JOIN signals s "
         "ON s.id = eo.signal_id WHERE eo.state='filled' AND s.status='open' "
         "AND s.result_r IS NULL AND s.trail_stop IS NOT NULL")
     for t in rows:
         sid, sym = t["signal_id"], t["symbol"]
-        if sid in skip:
+        if sid in skip or t["trail_order_id"]:
             continue                                    # нативный трейл ведёт биржа
-        cur = t["trail_px"] if t["trail_px"] is not None else t["stop_px"]
-        new = float(t["trail_stop"])
-        if cur is None or not _is_tighter(t["side"], new, float(cur)):
-            continue
-        new_px = float(ex.price_to_precision(sym, new))
-        if not _is_tighter(t["side"], new_px, float(cur)):
-            continue                                    # сдвиг меньше тика
+        lock = _sid_lock(sid)
+        if not lock.acquire(blocking=False):
+            continue                                    # стрим ставит нативный трейл сейчас
         try:
-            old = _find_stop_order(ex, t, float(cur))
-            if old is None:
-                # стоп уже сработал (позиция закрыта) — закрытие оформит ветка close по
-                # журналу; живая позиция без найденного стопа — алерт раз в час
-                if _position_qty(ex, sym, t["side"]) > 0 and _alert_due(
-                        _TRAIL_WARNED.setdefault(sid, {"at": None}), _t.monotonic()):
-                    _TRAIL_WARNED[sid]["at"] = _t.monotonic()
-                    report.append(f"⚠️ #{sid} {sym}: стоп на бирже не найден — трейл "
-                                  f"{new_px:g} не переставлен")
-                continue
-            close_side = "sell" if t["side"] == "LONG" else "buy"
-            try:
-                o = ex.create_order(sym, "market", close_side, float(t["qty"]), None,
-                                    params={"stopLossPrice": new_px, **_CLOSE_STOP})
-            except _ExErr as e:
-                # цена уже за новым уровнем: 101400 (вход со связкой) / 110411 (LONG: стоп
-                # должен быть НИЖЕ цены) / 110412 (SHORT: ВЫШЕ) — журнал засчитает выход
-                if not any(c in str(e) for c in ("101400", "110411", "110412")):
-                    raise
-                closed = _close_position(ex, t, max_qty=float(t["qty"]))
-                _cancel_stop(ex, sym, old.get("id"))
-                _set_state(sid, "closed", f"трейл {new_px:g}: цена уже за стопом — по рынку")
-                report.append(f"📤 #{sid} {sym}: цена уже за трейлом {new_px:g} — "
-                              f"закрыто по рынку {closed:g} (VST)")
-                continue
-            db.execute("UPDATE executor_orders SET trail_px=?, note=?, updated_at=? "
-                       "WHERE signal_id=?",
-                       (new_px, f"sl:{(o or {}).get('id') or ''}", clock.utcnow_iso(), sid))
-            _cancel_stop(ex, sym, old.get("id"))
-            report.append(f"🪜 #{sid} {sym} {t['side']}: стоп подтянут "
-                          f"{float(cur):g} → {new_px:g} (VST)")
+            _move_trail_stop(ex, t, report)
         except Exception as e:                          # noqa: BLE001 — один сигнал не роняет такт
             stamp = _TRAIL_WARNED.setdefault(sid, {"at": None})
             if _alert_due(stamp, _t.monotonic()):       # повтор каждый такт — не спамить
                 stamp["at"] = _t.monotonic()
                 report.append(f"⚠️ #{sid} {sym}: трейл не переставлен — "
                               f"{type(e).__name__}: {str(e)[:100]}")
+        finally:
+            lock.release()
+
+
+def _move_trail_stop(ex, t, report: list[str]) -> None:
+    """Один шаг почасового трейла (фолбэк к нативному): стоп BingX на уровень журнала."""
+    import time as _t
+
+    from ccxt import ExchangeError as _ExErr
+    sid, sym = t["signal_id"], t["symbol"]
+    cur = t["trail_px"] if t["trail_px"] is not None else t["stop_px"]
+    new = float(t["trail_stop"])
+    if cur is None or not _is_tighter(t["side"], new, float(cur)):
+        return
+    new_px = float(ex.price_to_precision(sym, new))
+    if not _is_tighter(t["side"], new_px, float(cur)):
+        return                                          # сдвиг меньше тика
+    old = _find_stop_order(ex, t, float(cur))
+    if old is None:
+        # стоп уже сработал (позиция закрыта) — закрытие оформит ветка close по
+        # журналу; живая позиция без найденного стопа — алерт раз в час
+        if _position_qty(ex, sym, t["side"]) > 0 and _alert_due(
+                _TRAIL_WARNED.setdefault(sid, {"at": None}), _t.monotonic()):
+            _TRAIL_WARNED[sid]["at"] = _t.monotonic()
+            report.append(f"⚠️ #{sid} {sym}: стоп на бирже не найден — трейл "
+                          f"{new_px:g} не переставлен")
+        return
+    close_side = "sell" if t["side"] == "LONG" else "buy"
+    try:
+        o = ex.create_order(sym, "market", close_side, float(t["qty"]), None,
+                            params={"stopLossPrice": new_px, **_CLOSE_STOP})
+    except _ExErr as e:
+        # цена уже за новым уровнем: 101400 (вход со связкой) / 110411 (LONG: стоп
+        # должен быть НИЖЕ цены) / 110412 (SHORT: ВЫШЕ) — журнал засчитает выход
+        if not any(c in str(e) for c in ("101400", "110411", "110412")):
+            raise
+        closed = _close_position(ex, t, max_qty=float(t["qty"]))
+        _cancel_stop(ex, sym, old.get("id"))
+        _set_state(sid, "closed", f"трейл {new_px:g}: цена уже за стопом — по рынку")
+        report.append(f"📤 #{sid} {sym}: цена уже за трейлом {new_px:g} — "
+                      f"закрыто по рынку {closed:g} (VST)")
+        return
+    db.execute("UPDATE executor_orders SET trail_px=?, note=?, updated_at=? "
+               "WHERE signal_id=?",
+               (new_px, f"sl:{(o or {}).get('id') or ''}", clock.utcnow_iso(), sid))
+    _cancel_stop(ex, sym, old.get("id"))
+    report.append(f"🪜 #{sid} {sym} {t['side']}: стоп подтянут "
+                  f"{float(cur):g} → {new_px:g} (VST)")
+
+
+# --- нативный трейл (TRAILING_STOP_MARKET) -------------------------------------------------
+# Метка-захват в trail_order_id, пока create_order в полёте или его ответ потерян: второй
+# трейл на ту же позицию не встанет ни из другого потока, ни после рестарта (метка в БД).
+_PENDING_TRAIL = "pending:"
+_PENDING_TRAIL_STALE_S = 120.0
+STREAM_STALE_S = 120.0       # кадров стрима по символу нет дольше — активация опросом BingX
+ACT_RETRY_S = 30.0           # не чаще одной попытки активации сигнала за 30 с (стрим ~1 кадр/с)
+
+_TRAIL_ROWS_SQL = (
+    "SELECT eo.*, s.entry AS j_entry, s.stop AS j_stop, s.trail_stop, s.snapshot_json, "
+    "s.filled_at AS j_filled_at FROM executor_orders eo JOIN signals s ON s.id = eo.signal_id "
+    "WHERE eo.state='filled' AND s.status='open' AND s.result_r IS NULL")
+
+# ws-символ ('BTCUSDT') -> позиции, ждущие активации: [{sid, side, act, fill_ms}]. Кеш
+# пересобирает fast-цикл (refresh_armed, ~10 с) и ЗАМЕНЯЕТ целиком (не мутирует) — горячий
+# обработчик стрима читает его из event loop без SQL, сети и гонок.
+_ARMED: dict[str, list[dict]] = {}
+_STREAM_SEEN: dict[str, float] = {}     # ws-символ -> monotonic последнего кадра стрима
+_ACT_TRIED: dict[int, float] = {}       # sid -> monotonic последней попытки (только event loop)
+_JLEVEL_SEEN: dict[int, float] = {}     # sid -> уровень трейла журнала, уже сверенный с ценой
+
+
+def refresh_armed() -> int:
+    """Пересобрать из БД позиции, ждущие активации нативного трейла. Только SQL, без сети.
+    Условия: позиция открыта на BingX (state='filled'), журнал засчитал вход (filled_at —
+    ход сделки считается только после него), у сигнала есть правило трейла, трейла ещё нет."""
+    from app.brain import journal
+    from app.data.stream import ws_symbol
+
+    global _ARMED
+    armed: dict[str, list[dict]] = {}
+    for t in db.query(_TRAIL_ROWS_SQL
+                      + " AND (eo.trail_order_id IS NULL OR eo.trail_order_id='')"):
+        rule = journal._trail_of(t)
+        risk = abs(t["j_entry"] - t["j_stop"])
+        if rule is None or not risk or not t["j_filled_at"]:
+            continue
+        sg = 1 if t["side"] == "LONG" else -1
+        armed.setdefault(ws_symbol(t["symbol"]), []).append({
+            "sid": t["signal_id"], "side": t["side"],
+            "act": t["j_entry"] + sg * rule["activate_r"] * risk,
+            "fill_ms": _iso_ms(t["j_filled_at"])})
+    _ARMED = armed
+    return sum(len(v) for v in armed.values())
+
+
+def disarm_all() -> None:
+    global _ARMED
+    _ARMED = {}
+
+
+def _disarm(sid: int) -> None:
+    global _ARMED
+    _ARMED = {k: [it for it in v if it["sid"] != sid] for k, v in _ARMED.items()}
+
+
+def stream_tick(symbol_ws: str, high: float, low: float, close: float,
+                start_ms: int = 0, now_ms: int | None = None) -> list[int]:
+    """Кадр реалтайм-стрима Bybit (горячий путь event loop: только память). -> sid позиций,
+    чей ход по цене ЖУРНАЛА прошёл уровень активации трейла — их активировать сейчас.
+
+    Экстремум бара (high/low) берётся, лишь если бар начался ПОСЛЕ филла журнала: high/low
+    бара филла включают цену ДО входа (пик до касания entry — не ход сделки), там — только
+    последняя цена. Экстремум ловит и проход между кадрами, и проход во время переподключения
+    стрима (кадр после реконнекта несёт high/low всего бара). Повтор по сигналу — не чаще
+    ACT_RETRY_S: активация идемпотентна (захват в БД), троттлинг лишь бережёт API BingX."""
+    import time as _t
+
+    mono = _t.monotonic()
+    _STREAM_SEEN[symbol_ws] = mono
+    items = _ARMED.get(symbol_ws)
+    if not items:
+        return []
+    now_ms = int(_t.time() * 1000) if now_ms is None else now_ms
+    out = []
+    for it in items:
+        if now_ms <= it["fill_ms"]:
+            continue
+        whole_bar = bool(start_ms) and start_ms >= it["fill_ms"]
+        if it["side"] == "LONG":
+            hit = (high if whole_bar else close) >= it["act"]
+        else:
+            hit = (low if whole_bar else close) <= it["act"]
+        if not hit:
+            continue
+        last = _ACT_TRIED.get(it["sid"])
+        if last is not None and mono - last < ACT_RETRY_S:
+            continue
+        _ACT_TRIED[it["sid"]] = mono
+        out.append(it["sid"])
+    return out
+
+
+def activate_trail(sid: int) -> list[str]:
+    """Стрим Bybit увидел проход уровня активации — поставить нативный трейл СЕЙЧАС, не ждать
+    такта сверки (поток fast-цикла). Замок сигнала берётся без ожидания: занят тактом — тот
+    и решит. Цена BingX (last) — подтверждение и якорь: биржевой трейл ведёт её; если она уже
+    за трейлом журнала — выход по рынку. -> строки отчёта (они же уходят в такт)."""
+    import time as _t
+
+    lock = _sid_lock(sid)
+    if not lock.acquire(blocking=False):
+        return []
+    report: list[str] = []
+    try:
+        if not runtime.executor_enabled() or not os.environ.get("BINGX_API_KEY"):
+            return []
+        t = db.query_one(_TRAIL_ROWS_SQL + " AND eo.signal_id=?", (sid,))
+        if t is None or t["trail_order_id"]:
+            return []
+        _activate_native(_exchange_fast(), t, report, "стрим Bybit")
+        _disarm(sid)              # трейл стоит / позиция закрыта; иначе вернёт refresh_armed
+    except Exception as e:                              # noqa: BLE001 — такт сверки повторит
+        stamp = _TRAIL_WARNED.setdefault(sid, {"at": None})
+        if _alert_due(stamp, _t.monotonic()):
+            stamp["at"] = _t.monotonic()
+            report.append(f"⚠️ #{sid}: нативный трейл (стрим) не встал — "
+                          f"{type(e).__name__}: {str(e)[:100]}")
+    finally:
+        lock.release()
+    _push_report(report)
+    return report
+
+
+def _activate_native(ex, t, report: list[str], source: str, px: float | None = None) -> bool:
+    """Поставить нативный трейл позиции (вызывающий держит замок сигнала). -> True, если
+    позиция теперь под трейлом (или его ставит другой поток); закрыта по рынку — False.
+
+    Цену АКТИВАЦИИ BingX через API игнорирует (смоук 24.10: activationPrice молча отброшен,
+    трейл начинался сразу) — поэтому ордер ставится в момент активации и тянется от текущей
+    цены BingX. Захват в БД ДО create_order: потерянный ответ не даст второго трейла."""
+    from ccxt import NetworkError as _NetErr
+
+    from app.brain import journal
+    sid, sym = t["signal_id"], t["symbol"]
+    rule = journal._trail_of(t)
+    risk = abs(t["j_entry"] - t["j_stop"])
+    if rule is None or not risk:
+        return False
+    if px is None:
+        px = float(ex.fetch_ticker(sym)["last"])
+    sg = 1 if t["side"] == "LONG" else -1
+    move_r = sg * (px - t["j_entry"]) / risk
+    if t["trail_stop"] is not None and sg * (px - float(t["trail_stop"])) <= 0:
+        # журнал подтянул трейл на закрытии бара, цена BingX уже за ним: журнал засчитает
+        # выход на следующем баре — выходим сейчас. Переставленный почасовой стоп ('sl:'
+        # в note) снять: строка уходит в closed, ветка close такта его уже не увидит
+        _cancel_deferred_stop(ex, t)
+        closed = _close_position(ex, t, max_qty=float(t["qty"]))
+        if closed <= 0:
+            _record_stop_close(ex, t)
+        _set_state(sid, "closed", f"цена {px:g} уже за трейлом журнала — по рынку")
+        report.append(f"📤 #{sid} {sym}: цена уже за трейлом {float(t['trail_stop']):g} — "
+                      f"закрыто по рынку {closed:g} (VST)")
+        return False
+    now = clock.utcnow_iso()
+    claimed = db.execute(
+        "UPDATE executor_orders SET trail_order_id=?, updated_at=? WHERE signal_id=? "
+        "AND state='filled' AND (trail_order_id IS NULL OR trail_order_id='')",
+        (_PENDING_TRAIL + now, now, sid))
+    if claimed != 1:
+        return True                                     # трейл уже стоит / ставится
+    dist = float(ex.price_to_precision(sym, rule["distance_r"] * risk))
+    close_side = "sell" if t["side"] == "LONG" else "buy"
+    try:
+        o = ex.create_order(sym, "market", close_side, float(t["qty"]), None,
+                            params={"trailingAmount": dist, **_CLOSE_STOP})
+    except _NetErr:
+        raise                                           # ответ мог потеряться: метка остаётся
+    except Exception:
+        db.execute("UPDATE executor_orders SET trail_order_id=NULL WHERE signal_id=? "
+                   "AND trail_order_id=?", (sid, _PENDING_TRAIL + now))
+        raise
+    oid = str((o or {}).get("id") or "")
+    if oid:                                             # без id — метку разрешит листинг
+        db.execute("UPDATE executor_orders SET trail_order_id=?, updated_at=? "
+                   "WHERE signal_id=?", (oid, clock.utcnow_iso(), sid))
+    report.append(f"🎯 #{sid} {sym} {t['side']}: трейлинг-стоп на бирже, отступ {dist:g} "
+                  f"(ход BingX {move_r:+.2f}R; {source})")
+    return True
+
+
+def _find_trail_order(ex, t):
+    """Наш TRAILING_STOP_MARKET в открытых ордерах: та же сторона позиции и наш объём.
+    clientOrderID трейлу не задаём — параметр для трейлинг-ордера не проверен смоуком."""
+    qty = float(t["qty"])
+    for o in ex.fetch_open_orders(t["symbol"]) or []:
+        info = o.get("info") or {}
+        typ = str(info.get("type") or o.get("type") or "").upper()
+        if "TRAILING" not in typ or str(info.get("positionSide", "")).upper() != t["side"]:
+            continue
+        try:
+            q = float(info.get("origQty") or o.get("amount") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if abs(q - qty) <= qty * 1e-6:
+            return o
+    return None
+
+
+def _resolve_pending_trail(ex, t) -> None:
+    """Метка-захват без id (ответ create потерян): найти трейл в листинге и записать id.
+    Нет его дольше 2 мин: позиция жива — снять метку (активация повторится), позиция
+    плоская — метку оставить (трейл, видимо, уже исполнился; закрытие оформит журнал)."""
+    marker = t["trail_order_id"] or ""
+    sid = t["signal_id"]
+    o = _find_trail_order(ex, t)
+    if o is not None and o.get("id"):
+        db.execute("UPDATE executor_orders SET trail_order_id=?, updated_at=? "
+                   "WHERE signal_id=? AND trail_order_id=?",
+                   (str(o["id"]), clock.utcnow_iso(), sid, marker))
+        return
+    try:
+        age = (datetime.now(timezone.utc)
+               - datetime.fromisoformat(marker[len(_PENDING_TRAIL):])).total_seconds()
+    except ValueError:
+        age = _PENDING_TRAIL_STALE_S + 1
+    if age > _PENDING_TRAIL_STALE_S and _position_qty(ex, t["symbol"], t["side"]) > 0:
+        db.execute("UPDATE executor_orders SET trail_order_id=NULL, updated_at=? "
+                   "WHERE signal_id=? AND trail_order_id=?", (clock.utcnow_iso(), sid, marker))
+
+
+def _journal_level_check(ex, t, report: list[str]) -> None:
+    """Нативный трейл стоит, но журнал на закрытии бара подтянул СВОЙ трейл выше биржевого
+    (трейл встал поздно: обрыв сети Mac, опоздавшая активация) и цена BingX уже за ним —
+    журнал гарантированно засчитает выход на следующем баре. Снимаем трейл и выходим по
+    рынку сейчас. Сверка — раз на новый уровень журнала (≤ 1 тикер в час на позицию)."""
+    lvl = t["trail_stop"]
+    sid = t["signal_id"]
+    if lvl is None or _JLEVEL_SEEN.get(sid) == float(lvl):
+        return
+    px = float(ex.fetch_ticker(t["symbol"])["last"])
+    _JLEVEL_SEEN[sid] = float(lvl)
+    sg = 1 if t["side"] == "LONG" else -1
+    if sg * (px - float(lvl)) > 0:
+        return
+    _cancel_native_trail(ex, t)
+    # учёт отражает биржу: при сбое закрытия следующий такт увидит позицию без трейла и
+    # повторит выход по ветке «цена за трейлом журнала»
+    db.execute("UPDATE executor_orders SET trail_order_id=NULL, updated_at=? WHERE signal_id=?",
+               (clock.utcnow_iso(), sid))
+    _cancel_deferred_stop(ex, t)
+    closed = _close_position(ex, t, max_qty=float(t["qty"]))
+    if closed <= 0:
+        _record_stop_close(ex, t)
+    _set_state(sid, "closed", f"цена {px:g} уже за трейлом журнала {float(lvl):g} — по рынку")
+    report.append(f"📤 #{sid} {t['symbol']}: цена уже за трейлом журнала {float(lvl):g} "
+                  f"(нативный трейл ниже) — закрыто по рынку {closed:g} (VST)")
 
 
 def _sync_native_trails(ex, report: list[str]) -> set:
-    """Нативный трейлинг-стоп BingX (TRAILING_STOP_MARKET, отступ в цене) — модель журнала
-    «максимум − 0.2R», которую биржа ведёт в реальном времени. Цену АКТИВАЦИИ BingX через API
-    игнорирует (смоук 24.10: activationPrice молча отброшен, трейл начинался сразу), поэтому
-    активирует executor: цена прошла +activate_r ИЛИ журнал уже подтянул трейл на закрытии
-    бара. Цена уже за уровнем журнала — выход по рынку сразу. -> signal_id с живым трейлом."""
+    """Нативный трейл на такте сверки (фолбэк и обслуживание). -> sid с живым трейлом.
+
+    Активацию ведёт стрим Bybit (stream_tick -> activate_trail, цена журнала, секунды). Такт:
+      * трейла нет, журнал подтянул трейл на закрытии бара -> поставить трейл (или выйти по
+        рынку, если цена BingX уже за уровнем журнала);
+      * трейла нет, стрим по символу молчит дольше STREAM_STALE_S (выключен, обрыв, символ
+        вне вотчлиста) -> прежнее правило: цена BingX прошла +activate_r;
+      * трейл стоит -> разрешить метку-захват / сверить с новым уровнем журнала.
+    При живом стриме тикер BingX раз в такт больше не опрашивается: аудит 30.10 — опрос
+    пропускал короткие проходы +1.5R (#715) и активировал трейл по артефакту цены
+    демо-стакана, которого не было на рынке журнала (#695 SOL, 27.10)."""
     import time as _t
 
     from app.brain import journal
-    rows = db.query(
-        "SELECT eo.*, s.entry AS j_entry, s.stop AS j_stop, s.trail_stop, s.snapshot_json "
-        "FROM executor_orders eo JOIN signals s ON s.id = eo.signal_id "
-        "WHERE eo.state='filled' AND s.status='open' AND s.result_r IS NULL")
+    from app.data.stream import ws_symbol
     active: set = set()
-    for t in rows:
+    for t in db.query(_TRAIL_ROWS_SQL):
         sid, sym = t["signal_id"], t["symbol"]
-        if t["trail_order_id"]:
-            active.add(sid)
-            continue
-        rule = journal._trail_of(t)
-        risk = abs(t["j_entry"] - t["j_stop"])
-        if rule is None or not risk:
+        lock = _sid_lock(sid)
+        if not lock.acquire(blocking=False):
+            active.add(sid)                             # быстрый путь ставит трейл сейчас
             continue
         try:
-            px = float(ex.fetch_ticker(sym)["last"])
-        except Exception:                               # noqa: BLE001 — сеть: следующим тактом
-            continue
-        sg = 1 if t["side"] == "LONG" else -1
-        move_r = sg * (px - t["j_entry"]) / risk
-        if move_r < rule["activate_r"] and t["trail_stop"] is None:
-            continue
-        try:
-            if t["trail_stop"] is not None and sg * (px - float(t["trail_stop"])) <= 0:
-                closed = _close_position(ex, t, max_qty=float(t["qty"]))
-                _set_state(sid, "closed", f"цена {px:g} уже за трейлом журнала — по рынку")
-                report.append(f"📤 #{sid} {sym}: цена уже за трейлом {float(t['trail_stop']):g} — "
-                              f"закрыто по рынку {closed:g} (VST)")
+            oid = t["trail_order_id"] or ""
+            if oid:
+                active.add(sid)
+                if oid.startswith(_PENDING_TRAIL):
+                    _resolve_pending_trail(ex, t)
+                else:
+                    _journal_level_check(ex, t, report)
                 continue
-            dist = float(ex.price_to_precision(sym, rule["distance_r"] * risk))
-            close_side = "sell" if t["side"] == "LONG" else "buy"
-            o = ex.create_order(sym, "market", close_side, float(t["qty"]), None,
-                                params={"trailingAmount": dist, **_CLOSE_STOP})
+            journal_active = t["trail_stop"] is not None
+            if not journal_active:
+                seen = _STREAM_SEEN.get(ws_symbol(sym))
+                if seen is not None and _t.monotonic() - seen < STREAM_STALE_S:
+                    continue                            # активацию ведёт стрим Bybit
+            rule = journal._trail_of(t)
+            risk = abs(t["j_entry"] - t["j_stop"])
+            if rule is None or not risk:
+                continue
+            try:
+                px = float(ex.fetch_ticker(sym)["last"])
+            except Exception:                           # noqa: BLE001 — сеть: следующим тактом
+                continue
+            sg = 1 if t["side"] == "LONG" else -1
+            if not journal_active and (not t["j_filled_at"]
+                                       or sg * (px - t["j_entry"]) / risk < rule["activate_r"]):
+                continue
+            if _activate_native(ex, t, report, "такт", px=px):
+                active.add(sid)
         except Exception as e:                          # noqa: BLE001 — фолбэк: почасовой трейл
             stamp = _TRAIL_WARNED.setdefault(sid, {"at": None})
             if _alert_due(stamp, _t.monotonic()):
                 stamp["at"] = _t.monotonic()
                 report.append(f"⚠️ #{sid} {sym}: нативный трейл не встал — "
                               f"{type(e).__name__}: {str(e)[:100]}")
-            continue
-        db.execute("UPDATE executor_orders SET trail_order_id=?, updated_at=? WHERE signal_id=?",
-                   (str((o or {}).get("id") or ""), clock.utcnow_iso(), sid))
-        active.add(sid)
-        report.append(f"🎯 #{sid} {sym} {t['side']}: трейлинг-стоп на бирже, отступ {dist:g} "
-                      f"(ход {move_r:+.2f}R)")
+        finally:
+            lock.release()
     return active
 
 
 def _cancel_native_trail(ex, t) -> None:
     """Снять нативный трейл, если позиция закрывается иначе (журнал/аварийный стоп):
-    reduce-only сирота съел бы долю СЛЕДУЮЩЕГО сигнала того же символа/стороны."""
+    reduce-only сирота съел бы долю СЛЕДУЮЩЕГО сигнала того же символа/стороны. Метка-
+    захват без id (ответ create потерян) — трейл ищем в листинге открытых ордеров."""
     oid = t["trail_order_id"] if "trail_order_id" in t.keys() else None
-    if oid:
-        _cancel_stop(ex, t["symbol"], oid)
+    if not oid:
+        return
+    if str(oid).startswith(_PENDING_TRAIL):
+        o = _find_trail_order(ex, t)
+        oid = o.get("id") if o else None
+    _cancel_stop(ex, t["symbol"], oid)
 
 
 def _cancel_stop(ex, symbol: str, oid) -> None:
@@ -1016,6 +1426,9 @@ def _sync_fill_states(ex, report: list[str]) -> None:
             # closed с филлом — обычный ордер; closed БЕЗ филла — сработавший триггер
             # BingX (исполнение в отдельном рыночном ордере, смоук 02.09)
             _set_state(t["signal_id"], "filled")
+            # версия = код, при котором ОТКРЫЛАСЬ позиция: он же ведёт её выход
+            db.execute("UPDATE executor_orders SET execution_version=? WHERE signal_id=?",
+                       (EXECUTION_VERSION, t["signal_id"]))
             if filled > 0:
                 _record_fill(t["signal_id"], o)
             else:
@@ -1154,7 +1567,13 @@ def execution_report(start_iso: str, end_iso: str) -> str | None:
     placed = sum(1 for r in rows if r["state"] in ("placed", "filled", "closed"))
     filled = [r for r in rows if r["fill_px"]]
     closed = [r for r in rows if r["state"] == "closed"]
-    errors = [r for r in rows if r["state"] == "error"]
+    # «филл в журнале раньше постановки» — не ошибка исполнения, а сделка журнала, которую
+    # executor не мог повторить (ордера ещё не было). Раньше шла строкой ⚠️ среди ошибок
+    # и молча выпадала из пар (аудит 30.10, #698/#704) — теперь отдельной категорией с R
+    prefill = [r for r in rows if r["state"] == "error"
+               and (r["note"] or "").startswith(PREFILL_NOTE)]
+    prefill_ids = {r["signal_id"] for r in prefill}
+    errors = [r for r in rows if r["state"] == "error" and r["signal_id"] not in prefill_ids]
     cancelled = sum(1 for r in rows if r["state"] == "cancelled")
 
     lines = ["🤖 <b>Executor: исполнение vs журнал (неделя)</b>",
@@ -1163,6 +1582,7 @@ def execution_report(start_iso: str, end_iso: str) -> str | None:
     j_sum = x_sum = 0.0
     n_pairs = 0
     slips_out = []
+    by_ver: dict = {}
     for r in closed:
         risk = abs(r["entry_px"] - r["stop_px"])
         sign = 1.0 if r["side"] == "LONG" else -1.0
@@ -1173,12 +1593,25 @@ def execution_report(start_iso: str, end_iso: str) -> str | None:
                 j_sum += j_r
                 x_sum += x_r
                 n_pairs += 1
+                v = by_ver.setdefault(r["execution_version"] or "?", [0, 0.0, 0.0])
+                v[0] += 1
+                v[1] += j_r
+                v[2] += x_r
             if r["exit_price"]:
                 # + = вышли ЛУЧШЕ журнала, − = хуже (в R от дистанции стопа)
                 slips_out.append(sign * (r["close_px"] - r["exit_price"]) / risk)
     if n_pairs:
         lines.append(f"Закрытые зеркальные ({n_pairs}): журнал {j_sum:+.2f}R · "
                      f"демо {x_sum:+.2f}R · разрыв {x_sum - j_sum:+.2f}R")
+        if len(by_ver) > 1:
+            # механика выхода менялась внутри недели — разрыв по версиям, не вперемешку
+            lines.append("по версиям исполнения: " + "; ".join(
+                f"{k} n={n}: разрыв {x - j:+.2f}R" for k, (n, j, x) in sorted(by_ver.items())))
+    if prefill:
+        pj = sum(r["result_r"] for r in prefill if r["result_r"] is not None)
+        lines.append(f"Не исполнимо (журнал засчитал вход раньше, чем ордер успел встать): "
+                     f"{len(prefill)} · журнал {pj:+.2f}R — в пары не входят: "
+                     + ", ".join(f"#{r['signal_id']}" for r in prefill[:6]))
     if slips_out:
         avg = sum(slips_out) / len(slips_out)
         worst = min(slips_out)

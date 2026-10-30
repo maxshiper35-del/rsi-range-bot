@@ -60,3 +60,40 @@ def test_judge_gap_open_exits_at_open(fresh_db):
                                                   "tp_exit": False, "max_hold_hours": 168}})}
     assert _outcome_from_bars(row, df)[2] == 1.8                 # журнал: по уровню трейла
     assert _outcome_from_bars(row, df, gap_open=True)[2] == 0.5  # реально: по открытию 101
+
+
+def _exec_row(sid: int, version: str, fill: float, close: float, j_r: float,
+              state: str = "closed", note: str | None = None) -> None:
+    from app import db
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, confidence, "
+        "snapshot_json, status, created_at, closed_at, result_r) VALUES "
+        "(?, ?,'LONG','1h',100,99,2,0.7,'{}','stopped', "
+        "'2026-10-25T00:00:00+00:00','2026-10-25T05:00:00+00:00', ?)",
+        (sid, f"X{sid}/USDT:USDT", j_r))
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, client_id, "
+        "state, note, created_at, fill_px, close_px, closed_at, execution_version) VALUES "
+        "(?, 'X/USDT:USDT','LONG',10,100,99,'',?,?,'2026-10-25T00:01:00+00:00',?,?,"
+        "'2026-10-25T05:01:00+00:00',?)",
+        (sid, state, note, fill if state == "closed" else None,
+         close if state == "closed" else None, version))
+
+
+def test_exec_check_breaks_down_by_execution_version(fresh_db):
+    """30.10: когорта с 19.10 смешивала механики выхода (e3/e4/e5) — разбивка по версиям,
+    вердикт по зарегистрированной когорте не меняется; пропуски «филл раньше ордера» —
+    отдельной строкой с R журнала."""
+    from app.brain import forward_check as fc
+    _exec_row(1, "e4", 100, 101.2, 1.8)            # демо +1.2R против журнала +1.8R
+    _exec_row(2, "e4", 100, 99, -1.0)
+    _exec_row(3, "e5", 100, 101.7, 1.8)
+    _exec_row(4, "e4", 0, 0, -1.0, state="error", note="филл в журнале раньше постановки")
+    e = fc.exec_check()
+    assert e["n"] == 3 and set(e["by_version"]) == {"e4", "e5"}
+    assert e["by_version"]["e4"]["n"] == 2 and e["by_version"]["e4"]["gap"] == -0.3
+    assert e["by_version"]["e5"]["gap"] == -0.1
+    assert e["prefill"] == {"n": 1, "sum": -1.0, "exp": -1.0}
+    txt = fc.report(datetime(2026, 11, 1, tzinfo=timezone.utc))
+    assert "по версиям исполнения" in txt and "e5 (нативный трейл, активация по стриму" in txt
+    assert "не исполнимо" in txt

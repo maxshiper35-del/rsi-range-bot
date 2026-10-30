@@ -66,12 +66,32 @@ def shadow_4h_check(now: datetime) -> dict:
     return {**sh, "days": days, "ready": ready, "verdict": verdict}
 
 
+def _exec_verdict(real: list[float], gaps: list[float]) -> dict:
+    a = _agg(real)
+    gap = round(sum(gaps) / len(gaps), 3) if gaps else None
+    dd = _max_dd(real)
+    ready = a["n"] >= EXEC_MIN_N
+    verdict = None
+    if ready and a["exp"] is not None and gap is not None:
+        ok = a["exp"] >= EXEC_MIN_EXP and dd <= EXEC_MAX_DD and gap >= EXEC_MIN_GAP
+        verdict = "live_candidate" if ok else ("review" if a["exp"] <= 0 else "demo")
+    return {**a, "dd": dd, "gap": gap, "ready": ready, "verdict": verdict}
+
+
 def exec_check() -> dict:
-    """Реальный R executor по ценам исполнения против R журнала, сделки после трейла на бирже."""
+    """Реальный R executor по ценам исполнения против R журнала, сделки после трейла на бирже.
+
+    Вердикт — по зарегистрированной когорте (с EXEC_SINCE, правила 24.10 не меняются).
+    by_version (30.10, миграция 028): та же метрика ВНУТРИ каждой версии исполнения —
+    механика выхода в когорте менялась (e3 почасовой стоп -> e4 нативный трейл с опросом
+    -> e5 активация по стриму), и сравнивать надо одинаковое с одинаковым. prefill —
+    сделки журнала, которые executor не мог повторить (касание раньше ордера): в пары не
+    входят, но и не теряются молча."""
     real, gaps = [], []
+    per: dict = {}
     for r in db.query(
             "SELECT eo.side, eo.qty, eo.fill_px, eo.close_px, eo.fill_fee, eo.close_fee, "
-            "s.entry, s.stop, s.result_r FROM executor_orders eo "
+            "eo.execution_version, s.entry, s.stop, s.result_r FROM executor_orders eo "
             "JOIN signals s ON s.id = eo.signal_id WHERE eo.state='closed' "
             "AND eo.fill_px IS NOT NULL AND eo.close_px IS NOT NULL AND s.created_at >= ? "
             "ORDER BY eo.closed_at", (EXEC_SINCE,)):
@@ -83,15 +103,18 @@ def exec_check() -> dict:
         x = sg * (r["close_px"] - r["fill_px"]) / risk - fees
         real.append(x)
         gaps.append(x - (r["result_r"] or 0))
-    a = _agg(real)
-    gap = round(sum(gaps) / len(gaps), 3) if gaps else None
-    dd = _max_dd(real)
-    ready = a["n"] >= EXEC_MIN_N
-    verdict = None
-    if ready and a["exp"] is not None and gap is not None:
-        ok = a["exp"] >= EXEC_MIN_EXP and dd <= EXEC_MAX_DD and gap >= EXEC_MIN_GAP
-        verdict = "live_candidate" if ok else ("review" if a["exp"] <= 0 else "demo")
-    return {**a, "dd": dd, "gap": gap, "ready": ready, "verdict": verdict}
+        v = per.setdefault(r["execution_version"] or "?", ([], []))
+        v[0].append(x)
+        v[1].append(x - (r["result_r"] or 0))
+    out = _exec_verdict(real, gaps)
+    out["by_version"] = {k: _exec_verdict(xs, gs) for k, (xs, gs) in sorted(per.items())}
+    from app.v2.bingx_executor import PREFILL_NOTE
+    pre = db.query(
+        "SELECT s.result_r FROM executor_orders eo JOIN signals s ON s.id = eo.signal_id "
+        "WHERE eo.state='error' AND eo.note LIKE ? AND s.created_at >= ? "
+        "AND s.result_r IS NOT NULL", (PREFILL_NOTE + "%", EXEC_SINCE))
+    out["prefill"] = _agg([r["result_r"] for r in pre])
+    return out
 
 
 def _fmt(v: float | None, d: int = 2) -> str:
@@ -112,6 +135,13 @@ def report(now: datetime) -> str:
           "review": "⚠️ реальный итог ≤ 0 — пересмотр стратегии",
           "demo": "продолжать демо — порог не пройден",
           None: f"копим данные: нужно ≥{EXEC_MIN_N} закрытых"}[e["verdict"]]
+    from app.v2.bingx_executor import EXECUTION_VERSIONS
+    ver_lines = "".join(
+        f"\n· {k} ({EXECUTION_VERSIONS.get(k, '?')}): {v['n']} сд. · {_fmt(v['sum'], 1)} · "
+        f"отрыв {_fmt(v['gap'], 3)}/сд." for k, v in e["by_version"].items())
+    pre = e["prefill"]
+    pre_line = (f"\nне исполнимо (журнал засчитал вход раньше ордера): {pre['n']} сд. · "
+                f"журнал {_fmt(pre['sum'], 1)} — в пары не входят" if pre["n"] else "")
     return (
         "🧪 <b>Проверка решений вперёд</b> (правила от 24.10, пороги не меняются)\n\n"
         f"<b>1. Гейт «вход уже пройден»</b> · {g['weeks']} нед.\n"
@@ -123,4 +153,6 @@ def report(now: datetime) -> str:
         f"{s['n']} сд. · {_fmt(s['sum'], 1)} · {_fmt(s['exp'], 3)}/сд.\n→ {sv}\n\n"
         f"<b>3. Executor (демо), после трейла на бирже</b>\n"
         f"{e['n']} сд. · реально {_fmt(e['sum'], 1)} · {_fmt(e['exp'], 3)}/сд. · "
-        f"просадка {e['dd']:.1f}R · отрыв от журнала {_fmt(e['gap'], 3)}/сд.\n→ {ev}")
+        f"просадка {e['dd']:.1f}R · отрыв от журнала {_fmt(e['gap'], 3)}/сд.\n→ {ev}"
+        + (f"\nпо версиям исполнения (сравнивать одинаковое):{ver_lines}" if ver_lines else "")
+        + pre_line)

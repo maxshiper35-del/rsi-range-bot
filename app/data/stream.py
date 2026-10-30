@@ -44,6 +44,9 @@ class KlineEvt:
     low: float
     close: float            # последняя цена тика — для кроссинг-семантики прайс-алертов
     confirm: bool           # True = бар закрыт
+    # открытие бара, мс (поле Bybit 'start'): executor отличает бар филла (его high/low
+    # включают цену ДО входа) от баров целиком после филла; 0 — поле не пришло
+    start: int = 0
 
 
 def parse_kline(raw: str) -> list:
@@ -58,7 +61,8 @@ def parse_kline(raw: str) -> list:
         return [KlineEvt(symbol_ws=symbol_ws,
                          high=float(d["high"]), low=float(d["low"]),
                          close=float(d["close"]),
-                         confirm=bool(d.get("confirm")))
+                         confirm=bool(d.get("confirm")),
+                         start=int(d.get("start") or 0))
                 for d in msg.get("data", [])]
     except Exception:                                   # noqa: BLE001
         return []
@@ -73,8 +77,8 @@ async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log) -> None:
     """Вечный цикл стрима: connect -> subscribe kline.{tf}.{sym} -> события -> reconnect.
 
     get_symbols() -> list[str] (unified), get_tf() -> str (наш лейбл, напр. '1h'),
-    on_intrabar(symbol_ws, high, low) -> awaitable, enabled() -> bool (флаг runtime,
-    выключение подхватывается не позже _RECONNECT_MAX_AGE), log — логгер.
+    on_intrabar(symbol_ws, high, low, close, start_ms) -> awaitable, enabled() -> bool
+    (флаг runtime, выключение подхватывается не позже _RECONNECT_MAX_AGE), log — логгер.
     Ошибки цикла гасятся с бэкоффом — стрим никогда не роняет процесс."""
     import aiohttp
 
@@ -116,7 +120,8 @@ async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log) -> None:
                         if '"success":false' in frame.data.replace(" ", ""):
                             log.warning("стрим: отказ операции: %.200s", frame.data)
                         for evt in parse_kline(frame.data):
-                            await on_intrabar(evt.symbol_ws, evt.high, evt.low, evt.close)
+                            await on_intrabar(evt.symbol_ws, evt.high, evt.low, evt.close,
+                                              evt.start)
             if planned:
                 backoff = 1.0                           # штатное соединение отжило свой срок
             else:

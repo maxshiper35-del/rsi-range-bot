@@ -428,6 +428,7 @@ def _seed_place(sid=941):
 def _patch_net(monkeypatch, ex_mod, fake):
     monkeypatch.setenv("BINGX_API_KEY", "test")
     monkeypatch.setattr(ex_mod, "_exchange", lambda: fake)
+    monkeypatch.setattr(ex_mod, "_exchange_fast", lambda: fake)
     monkeypatch.setattr(ex_mod, "_sync_fill_states", lambda ex, report: None)
     monkeypatch.setattr(ex_mod, "_orphan_lines", lambda ex: [])
 
@@ -790,3 +791,294 @@ def test_hourly_trail_skips_positions_with_native_trailing(fresh_db):
     fake, report = _TrailEx(), []
     ex._sync_trail_stops(fake, report, skip={983})
     assert fake.created == [] and fake.cancelled == []
+
+
+# --- 30.10.2026: активация трейла по стриму Bybit, захват, быстрый вход, версии ------------
+# (аудит docs/audits/2026-10-30-execution-parity.md)
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _exec_state_reset():
+    """Модульные кеши executor (стрим, захваты, отчёт) не переживают границы тестов."""
+    from app.v2 import bingx_executor as ex
+
+    def _clear():
+        ex.disarm_all()
+        ex._STREAM_SEEN.clear()
+        ex._ACT_TRIED.clear()
+        ex._JLEVEL_SEEN.clear()
+        ex._TRAIL_WARNED.clear()
+        ex._drain_report()
+    _clear()
+    yield
+    _clear()
+
+
+class _StreamEx(_NativeEx):
+    """Нативный трейл + листинг открытых ордеров + сценарий create_order для трейла."""
+
+    def __init__(self, last, trail_behaviour=None, **kw):
+        super().__init__(last, **kw)
+        self.trail_behaviour = trail_behaviour
+        self.ticker_calls = 0
+
+    def fetch_ticker(self, symbol):
+        self.ticker_calls += 1
+        return {"last": self.last}
+
+    def create_order(self, symbol, typ, side, qty, price, params=None):
+        params = params or {}
+        if "trailingAmount" in params and self.trail_behaviour is not None:
+            self.created.append(("trail", params["trailingAmount"], side, qty))
+            return self.trail_behaviour(self)
+        return super().create_order(symbol, typ, side, qty, price, params)
+
+
+def _arm_env(monkeypatch, ex_mod, fake):
+    from app import runtime
+    monkeypatch.setenv("BINGX_API_KEY", "test")
+    monkeypatch.setattr(ex_mod, "_exchange", lambda: fake)
+    monkeypatch.setattr(ex_mod, "_exchange_fast", lambda: fake)
+    runtime.set_value("executor_enabled", "1")
+
+
+def _ms(iso):
+    from datetime import datetime
+    return int(datetime.fromisoformat(iso).timestamp() * 1000)
+
+
+def test_stream_tick_uses_bar_extreme_only_after_fill_bar(fresh_db):
+    """Бар филла: его high включает цену ДО входа — активация только по последней цене.
+    Бар целиком после филла: high ловит проход между кадрами и во время реконнекта."""
+    from app.v2 import bingx_executor as ex
+    _seed_native(1001)                                      # LONG 100/98, act 103, филл 02:00
+    assert ex.refresh_armed() == 1
+    fill = _ms("2026-10-24T02:00:00+00:00")
+    bar_fill, bar_next = fill - 30 * 60_000, fill + 60 * 60_000
+    now = fill + 70 * 60_000
+    # бар филла: high 104 (пик до входа), последняя цена 101 — не активация
+    assert ex.stream_tick("TTTUSDT", 104.0, 99.0, 101.0, bar_fill, now) == []
+    # следующий бар: high 103.2 прошёл +1.5R, хотя последняя цена уже 102.5
+    assert ex.stream_tick("TTTUSDT", 103.2, 101.0, 102.5, bar_next, now) == [1001]
+    # повтор раньше ACT_RETRY_S — тишина (активация идемпотентна, API бережём)
+    assert ex.stream_tick("TTTUSDT", 103.5, 101.0, 103.4, bar_next, now) == []
+    # до филла журнала ход сделки не считается
+    ex._ACT_TRIED.clear()
+    assert ex.stream_tick("TTTUSDT", 110.0, 99.0, 110.0, bar_fill, fill - 1) == []
+    assert "TTTUSDT" in ex._STREAM_SEEN
+
+
+def test_activate_trail_from_stream_places_once(fresh_db, monkeypatch):
+    """Стрим увидел +1.5R: трейл встаёт сразу (не на такте), один раз; строка — в отчёт такта."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1002)
+    fake = _StreamEx(last=103.1)
+    _arm_env(monkeypatch, ex, fake)
+    out = ex.activate_trail(1002)
+    assert fake.created == [("trail", 0.4, "sell", 10.0)]
+    assert db.query_one("SELECT trail_order_id FROM executor_orders WHERE signal_id=1002")[
+        "trail_order_id"] == "TR1"
+    assert any("трейлинг-стоп на бирже" in x and "стрим Bybit" in x for x in out)
+    assert ex.activate_trail(1002) == [] and len(fake.created) == 1   # повтор — без ордера
+    assert any("стрим Bybit" in x for x in ex._drain_report())
+
+
+def test_activate_trail_skips_signal_held_by_reconcile(fresh_db, monkeypatch):
+    """Такт сверки держит замок сигнала (закрывает позицию) — быстрый путь уступает."""
+    import threading
+
+    from app.v2 import bingx_executor as ex
+    _seed_native(1003)
+    fake = _StreamEx(last=103.1)
+    _arm_env(monkeypatch, ex, fake)
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with ex._sid_lock(1003):
+            held.set()
+            release.wait(5)
+    th = threading.Thread(target=holder)
+    th.start()
+    held.wait(5)
+    try:
+        assert ex.activate_trail(1003) == [] and fake.created == []
+    finally:
+        release.set()
+        th.join(5)
+
+
+def test_activate_trail_lost_response_keeps_claim_then_recovers(fresh_db, monkeypatch):
+    """Ответ create потерян: метка-захват остаётся (второго трейла не будет ни из потока, ни
+    после рестарта), такт находит трейл в листинге и записывает его id."""
+    from ccxt import RequestTimeout
+
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1004)
+
+    def lost(fake):
+        fake.opens.append({"id": "TR9", "info": {"type": "TRAILING_STOP_MARKET",
+                                                 "positionSide": "LONG", "origQty": "10"}})
+        raise RequestTimeout("timed out")
+    fake = _StreamEx(last=103.1, trail_behaviour=lost)
+    _arm_env(monkeypatch, ex, fake)
+    ex.activate_trail(1004)
+    oid = db.query_one("SELECT trail_order_id FROM executor_orders WHERE signal_id=1004")[
+        "trail_order_id"]
+    assert oid.startswith(ex._PENDING_TRAIL)
+    ex._ACT_TRIED.clear()
+    assert ex.activate_trail(1004) == [] and len(fake.created) == 1   # захват держит
+    assert ex._sync_native_trails(fake, []) == {1004}                # такт: листинг -> id
+    assert db.query_one("SELECT trail_order_id FROM executor_orders WHERE signal_id=1004")[
+        "trail_order_id"] == "TR9"
+
+
+def test_activate_trail_rejection_releases_claim(fresh_db, monkeypatch):
+    """Биржа однозначно отвергла трейл — захват снимается, следующая попытка возможна."""
+    from ccxt import ExchangeError
+
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1005)
+
+    def reject(fake):
+        raise ExchangeError('bingx {"code":109400,"msg":"bad"}')
+    fake = _StreamEx(last=103.1, trail_behaviour=reject)
+    _arm_env(monkeypatch, ex, fake)
+    out = ex.activate_trail(1005)
+    assert any("не встал" in x for x in out)
+    assert db.query_one("SELECT trail_order_id FROM executor_orders WHERE signal_id=1005")[
+        "trail_order_id"] is None
+
+
+def test_tick_defers_activation_to_live_stream(fresh_db):
+    """#695 SOL 27.10: цена демо-стакана BingX провалилась на +1.52R, рынок журнала — нет;
+    опрос активировал трейл, выход +1.30R против +2.92R журнала. При живом стриме такт
+    тикер не опрашивает и по цене BingX трейл не ставит; без стрима — прежнее правило."""
+    import time
+
+    from app.v2 import bingx_executor as ex
+    _seed_native(1006)
+    fake = _StreamEx(last=103.1)                               # BingX: +1.55R
+    ex._STREAM_SEEN["TTTUSDT"] = time.monotonic()              # стрим жив, Bybit не прошёл
+    assert ex._sync_native_trails(fake, []) == set()
+    assert fake.created == [] and fake.ticker_calls == 0
+    ex._STREAM_SEEN["TTTUSDT"] = time.monotonic() - ex.STREAM_STALE_S - 1   # стрим молчит
+    assert ex._sync_native_trails(fake, []) == {1006}
+    assert fake.created == [("trail", 0.4, "sell", 10.0)]
+
+
+def test_journal_trail_beyond_closes_even_with_native_trail(fresh_db):
+    """Трейл встал поздно (обрыв сети), журнал на закрытии бара подтянул свой выше, цена
+    BingX уже за ним: журнал засчитает выход — снимаем трейл и выходим по рынку. Сверка —
+    раз на уровень журнала."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1007, trail_stop=103.6)
+    db.execute("UPDATE executor_orders SET trail_order_id='TR5' WHERE signal_id=1007")
+    fake = _StreamEx(last=103.4)
+    report: list = []
+    assert ex._sync_native_trails(fake, report) == {1007}
+    assert "TR5" in fake.cancelled and ("market", "sell", 10.0) in fake.created
+    assert db.query_one("SELECT state FROM executor_orders WHERE signal_id=1007")["state"] \
+        == "closed"
+    assert any("трейлом журнала" in x for x in report)
+
+
+def test_journal_level_checked_once_per_level(fresh_db):
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1008, trail_stop=103.6)
+    db.execute("UPDATE executor_orders SET trail_order_id='TR6' WHERE signal_id=1008")
+    fake = _StreamEx(last=104.5)                               # цена выше уровня — держим
+    ex._sync_native_trails(fake, [])
+    ex._sync_native_trails(fake, [])
+    assert fake.ticker_calls == 1 and fake.created == []
+
+
+def test_place_fresh_places_new_signal_before_tick_and_stamps_version(fresh_db, monkeypatch):
+    """#698/#704: вход ставился на такте (до 60 с+), стрим засчитывал касание раньше.
+    Быстрый путь ставит триггер сразу; такт после этого второго ордера не ставит."""
+    from app import db, runtime
+    from app.v2 import bingx_executor as ex
+    fake = _PlaceEx(lambda f, p: {"id": "T7"})
+    _seed_place(1009)
+    _patch_net(monkeypatch, ex, fake)
+    runtime.set_value("executor_enabled", "1")
+    out = ex.place_fresh()
+    assert any("триггер-маркет" in x for x in out) and len(fake.created) == 1
+    row = db.query_one("SELECT state, order_id, execution_version FROM executor_orders "
+                       "WHERE signal_id=1009")
+    assert (row["state"], row["order_id"], row["execution_version"]) == \
+        ("placed", "T7", ex.EXECUTION_VERSION)
+    assert ex.place_fresh() == []                              # уже под учётом — без сети
+    ex.reconcile()
+    assert len(fake.created) == 1                              # такт не дублирует
+
+
+def test_place_fresh_leaves_prefilled_signal_to_reconcile(fresh_db, monkeypatch):
+    from app import db, runtime
+    from app.v2 import bingx_executor as ex
+    fake = _PlaceEx(lambda f, p: {"id": "T8"})
+    _seed_place(1010)
+    db.execute("UPDATE signals SET filled_at='2026-10-05T02:00:05+00:00' WHERE id=1010")
+    _patch_net(monkeypatch, ex, fake)
+    runtime.set_value("executor_enabled", "1")
+    assert ex.place_fresh() == [] and fake.created == []
+    ex.reconcile()                                             # пропуск оформляет такт
+    row = db.query_one("SELECT state, note FROM executor_orders WHERE signal_id=1010")
+    assert (row["state"], row["note"]) == ("error", ex.PREFILL_NOTE)
+
+
+def test_fill_stamps_execution_version(fresh_db, monkeypatch):
+    """Версия = код, при котором открылась позиция (он ведёт выход): пишется при филле."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_place(1011)
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, created_at, order_id, execution_version) VALUES "
+        "(1011,'GGG/USDT:USDT','LONG',5,100,98,'rsiE1011','placed',"
+        "'2026-10-05T01:00:00+00:00','O1','e4')")
+    monkeypatch.setattr(ex, "_entry_order", lambda e, t: {"id": "O1", "status": "closed",
+                                                          "filled": 5, "average": 100.1})
+    ex._sync_fill_states(object(), [])
+    row = db.query_one("SELECT state, execution_version FROM executor_orders "
+                       "WHERE signal_id=1011")
+    assert (row["state"], row["execution_version"]) == ("filled", ex.EXECUTION_VERSION)
+
+
+def test_execution_report_prefill_is_own_category(fresh_db):
+    """«Филл в журнале раньше постановки» — не ошибка исполнения: отдельная строка с R
+    журнала, в ошибках и парах не участвует."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at, result_r) VALUES "
+        "(1012,'HHH/USDT:USDT','LONG','1h',10,9,2.0,0.7,'{}','stopped',"
+        "'2026-10-24T19:00:00+00:00',-1.0)")
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, note, created_at, updated_at) VALUES (1012,'HHH/USDT:USDT','LONG',"
+        "0,10,9,'','error',?,'2026-10-24T20:01:27+00:00','2026-10-24T20:01:27+00:00')",
+        (ex.PREFILL_NOTE,))
+    txt = ex.execution_report("2026-10-24T00:00:00+00:00", "2026-10-31T00:00:00+00:00")
+    assert "Не исполнимо" in txt and "#1012" in txt and "−1.00R" not in txt
+    assert "-1.00R" in txt and "ошибок: 0" in txt
+
+
+def test_close_beyond_journal_trail_cancels_moved_hourly_stop(fresh_db):
+    """Выход по рынку «цена за трейлом журнала» уводит строку сразу в closed — ветка close
+    такта переставленный почасовой стоп ('sl:' в note) уже не снимет; снимаем здесь, иначе
+    reduce-only сирота съела бы позицию следующего сигнала того же символа/стороны."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1013, trail_stop=103.6)
+    db.execute("UPDATE executor_orders SET note='sl:SL7' WHERE signal_id=1013")
+    fake = _StreamEx(last=103.0)
+    ex._STREAM_SEEN["TTTUSDT"] = 0.0                           # стрим давно молчит
+    assert ex._sync_native_trails(fake, []) == set()
+    assert "SL7" in fake.cancelled and ("market", "sell", 10.0) in fake.created

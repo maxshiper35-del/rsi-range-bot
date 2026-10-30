@@ -5693,12 +5693,41 @@ def main() -> None:
                     await asyncio.to_thread(alerts_mod.rearm, a["id"])
                     log.warning("alert push %s: %s — алерт перевзведён", a["tg_id"], e)
 
-    async def _on_intrabar(symbol_ws: str, high: float, low: float, close: float):
+    async def _activate_trail(sid: int) -> None:
+        """Нативный трейл по сигналу стрима — в потоке, вне горячего цикла WS."""
+        from app.v2 import bingx_executor
+        try:
+            for line in await asyncio.to_thread(bingx_executor.activate_trail, sid):
+                log.info("executor(стрим): %s", line)
+        except Exception as e:                         # noqa: BLE001 — такт сверки повторит
+            log.warning("executor: активация трейла #%s: %s", sid, e)
+        finally:
+            _trail_inflight.discard(sid)
+
+    _trail_inflight: set = set()
+    _trail_tasks: set = set()
+
+    async def _on_intrabar(symbol_ws: str, high: float, low: float, close: float,
+                           start_ms: int = 0):
         # реалтайм-филл: касание entry внутри бара -> мгновенный «вход исполнен».
         # Гонку с bar-скорингом решает атомарный try_mark_filled; официальный исход
         # сделки по-прежнему считает ТОЛЬКО bar-скоринг (контракт трек-рекорда).
         from app.data.stream import entry_touched, ws_symbol
         from app.delivery import alerts as alerts_mod
+        # executor (30.10): активация нативного трейла по цене ЖУРНАЛА в реальном времени.
+        # stream_tick — только память (кеш позиций пересобирает fast-цикл), сеть BingX —
+        # в потоке и не чаще раза в 30 с на сигнал; при выключенном executor кеш пуст
+        try:
+            from app.v2 import bingx_executor
+            for sid in bingx_executor.stream_tick(symbol_ws, high, low, close, start_ms):
+                if sid not in _trail_inflight:
+                    _trail_inflight.add(sid)
+                    # ссылка на таску обязательна: без неё GC может снять её на полпути
+                    task_ = asyncio.create_task(_activate_trail(sid))
+                    _trail_tasks.add(task_)
+                    task_.add_done_callback(_trail_tasks.discard)
+        except Exception as e:                         # noqa: BLE001 — стрим не падает
+            log.warning("executor stream_tick %s: %s", symbol_ws, e)
         for symbol in runtime.symbols():
             if ws_symbol(symbol) != symbol_ws:
                 continue
@@ -5768,6 +5797,33 @@ def main() -> None:
         # watchdog поллера не может жить внутри наблюдаемой таски (аудит-2 ops [1]:
         # зависший поллер отключал и watchdog, и весь жизненный цикл подписок)
         await run_poller(_broadcast, engine=None, on_tick=None, on_close=_on_close)
+
+    async def _executor_fast_loop():
+        """Быстрый цикл executor (30.10.2026, аудит docs/audits/2026-10-30-execution-parity.md).
+
+        Такт сверки — раз в 60 с + время обслуживания; его опоздание стоило: вход ставился
+        позже, чем стрим засчитывал касание (#698/#704 — пропущены), трейл активировался
+        опросом раз в такт (#715: −0.77R). Здесь каждые 2 с: (1) постановка входа только что
+        записанных сигналов — SQL-проверка, сеть BingX лишь при новом сигнале; (2) раз в
+        10 с — кеш позиций, ждущих активации трейла, для горячего обработчика стрима.
+        Bybit не трогается вовсе, у BingX — те же вызовы, что сделал бы такт, только раньше."""
+        from app.v2 import bingx_executor
+        last_arm = -1e9
+        while True:
+            try:
+                if not await asyncio.to_thread(runtime.executor_enabled):
+                    bingx_executor.disarm_all()
+                    await asyncio.sleep(10)
+                    continue
+                if _monotonic() - last_arm >= 10:
+                    last_arm = _monotonic()
+                    await asyncio.to_thread(bingx_executor.refresh_armed)
+                for line in await asyncio.to_thread(bingx_executor.place_fresh):
+                    log.info("executor(быстро): %s", line)
+            except Exception as e:                     # noqa: BLE001 — цикл живёт всегда
+                log.warning("executor fast-цикл: %s", e)
+                await asyncio.sleep(30)
+            await asyncio.sleep(2)
 
     async def _maintenance_loop():
         # 60с вместо часового такта поллера: USDT-активация/алерты не ждут закрытия свечи,
@@ -5924,6 +5980,10 @@ def main() -> None:
         stream_task.add_done_callback(_task_died)
         maint_task = asyncio.create_task(_maintenance_loop(), name="maintenance")
         maint_task.add_done_callback(_task_died)
+        # быстрый цикл executor: постановка входа сразу после записи сигнала + кеш позиций
+        # для активации трейла по стриму (при выключенном executor спит)
+        exec_fast_task = asyncio.create_task(_executor_fast_loop(), name="executor-fast")
+        exec_fast_task.add_done_callback(_task_died)
         # прогрев inline-карточек: первый load_markets Bybit — 12с, дольше окна ответа
         # Telegram; разовая задача, падение некритично (карточка догрузится по запросу)
         warm_task = asyncio.create_task(warm_inline_cards(), name="inline-warm")
@@ -5933,6 +5993,7 @@ def main() -> None:
             poller.cancel()
             stream_task.cancel()
             maint_task.cancel()
+            exec_fast_task.cancel()
             warm_task.cancel()
 
     # TODO: /calc интерактивный (пока формат через format_calc); USDT через CryptoBot.
