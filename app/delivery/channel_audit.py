@@ -376,6 +376,14 @@ def audit(posts: list[Post], bars_by_symbol: dict[str, pd.DataFrame],
         if bars is None or bars.empty:
             agg["no_bars"] += 1
             continue
+        # «81,500» — 81 500 или 81.5: прочтение выбирает цена рынка в момент поста; не
+        # решила и сам пост не подсказал — формат боту непонятен, в итог не входит
+        picked = signal_check.resolve_reading(sig, bars, p.posted)
+        if picked is None:
+            agg["signals"] -= 1
+            agg["unparsed"] += 1
+            continue
+        sig = picked
         res = signal_check.evaluate(sig, bars, p.posted)
         agg["checked"] += 1
         if sig.symbol in plan:

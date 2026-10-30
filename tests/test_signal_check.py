@@ -119,6 +119,73 @@ def test_parse_our_own_dm_format():
                                                               [4.374])
 
 
+# --- форматы цен VIP-каналов (30.10.2026: «81,500» читалось как 81.5) ---
+
+@pytest.mark.parametrize("txt,entry,stop,targets", [
+    ("#BTC/USDT LONG\nВход: 81 500\nСтоп: 80 900\nTP: 83 000",           # пробел — тысячи
+     81500, 80900, [83000]),
+    ("#BTC/USDT LONG\nВход: 81 500\nСтоп: 80 900\nTP: 83 000",   # неразрывный
+     81500, 80900, [83000]),
+    ("#ARB SHORT\nВход 0,0345\nСтоп 0,0360\nЦель 0,0320",                 # запятая — дробь
+     0.0345, 0.036, [0.032]),
+    ("#BTC LONG\nEntry 81.5k\nSL 80.9k\nTP 83k", 81500, 80900, [83000]),  # «k» — тысячи
+    ("#BTC LONG\nВход 81,5к\nСтоп 80,9к\nTP 83К", 81500, 80900, [83000]),
+    ("BTC/USDT LONG\nEntry $81,500.5\nSL $80,900\nTP $83,000",           # запятая + точка
+     81500.5, 80900, [83000]),
+    ("#BTC LONG\nВход 81.500,5\nСтоп 80.900\nЦель 83.000",               # европейская запись
+     81500.5, 80900, [83000]),
+    ("#BTC LONG\nВход 63000\nСтоп 62000\nЦели 64000,65000",              # склеенный список
+     63000, 62000, [64000, 65000]),
+    ("#XRP LONG\nВход 1.15\nСтоп 1.10\nЦели 1.2,1.3,1.4", 1.15, 1.1, [1.2, 1.3, 1.4]),
+])
+def test_parse_price_formats(txt, entry, stop, targets):
+    s = sc.parse_signal(txt)
+    assert (s.entry_lo, s.stop, s.targets) == (entry, stop, targets)
+    assert not s.unsure
+
+
+def test_ambiguous_comma_needs_market_to_decide():
+    """«81,500» без других подсказок в посте: и 81 500, и 81.5 — оба прочтения сохраняем,
+    выбирает цена рынка в момент поста; не подсказала и она — не угадываем."""
+    s = sc.parse_signal("#BTC/USDT LONG\nВход: 81,500\nСтоп: 80,900\nTP: 83,000")
+    assert s.unsure and (s.entry_lo, s.stop) == (81500, 80900)
+    assert [(a.entry_lo, a.stop, a.targets) for a in s.alternatives] == [(81.5, 80.9, [83.0])]
+    btc = sc.resolve_reading(s, _bars([(81600, 81700, 81400, 81500)]), T0)
+    alt = sc.resolve_reading(s, _bars([(81.6, 81.7, 81.4, 81.5)]), T0)
+    assert (btc.entry_lo, btc.targets) == (81500, [83000])
+    assert (alt.entry_lo, alt.targets) == (81.5, [83.0])
+    assert sc.resolve_reading(s, _bars([(5.0, 5.1, 4.9, 5.0)]), T0) is None    # ни одно
+    assert sc.resolve_reading(s, _bars([]), T0) is None                         # нет свечей
+    msg = sc.render_unsure(s)
+    assert "81500" in msg and "81.5" in msg and "BTC" in msg
+
+
+def test_post_style_decides_without_market():
+    """Стиль поста — по однозначным числам: «1.5%» за точку -> «81,500» — тысячи; «0,5%» за
+    запятую -> «2,345» — дробь. Тогда без свечей возвращаем основное прочтение."""
+    us = sc.parse_signal("#BTC/USDT LONG\nВход: 81,500\nСтоп: 80,900\nРиск 1.5%")
+    assert (us.entry_lo, us.unsure) == (81500, False)
+    assert sc.resolve_reading(us, _bars([]), T0) is us
+    ru = sc.parse_signal("#XRP/USDT LONG\nВход: 2,345\nСтоп: 2,210\nРиск 0,5%")
+    assert (ru.entry_lo, ru.stop, ru.unsure) == (2.345, 2.21, False)
+
+
+def test_dot_thousands_switched_by_market_only():
+    """«81.500» по умолчанию — дробь (так пишет большинство каналов), но если рынок явно
+    за тысячи, берём тысячи; без свечей — дробь, без отказа."""
+    s = sc.parse_signal("#BTC LONG\nВход 81.500\nСтоп 80.900\nTP 83.000")
+    assert (s.entry_lo, s.unsure) == (81.5, False)
+    assert sc.resolve_reading(s, _bars([(81600, 81700, 81400, 81500)]), T0).entry_lo == 81500
+    assert sc.resolve_reading(s, _bars([]), T0).entry_lo == 81.5
+    xrp = sc.parse_signal("#XRP LONG\nВход 2.345\nСтоп 2.210\nTP 2.600")
+    assert sc.resolve_reading(xrp, _bars([(2.35, 2.36, 2.33, 2.34)]), T0).entry_lo == 2.345
+
+
+def test_resolve_without_alternatives_is_identity():
+    s = sc.parse_signal("#DOGE LONG\nEntry 100\nSL 90\nTP1 110")
+    assert not s.alternatives and sc.resolve_reading(s, _bars([]), T0) is s
+
+
 @pytest.mark.parametrize("txt", [
     "",
     "Биткоин сегодня интересно себя ведёт",
@@ -148,6 +215,9 @@ _ADVERSARIAL = {
     "пробелы после ключа (номер позиции)": "BTC/USDT LONG\nstop" + " " * (_N - 30) + "x",
     "пробелы после coin:": "SHORT coin" + " " * (_N - 20) + "!",
     "сверхдлинный текст": "BTC/USDT LONG\nentry 100\nstop 90\n" + "1" * (3 * _N),
+    "запятые через цифру": "BTC/USDT LONG\nentry 100\nstop " + "1," * (_N // 2 - 20),
+    "точки до «k»": "BTC/USDT LONG\nentry " + "1." * (_N // 2 - 20) + "5k\nstop 1",
+    "группы тысяч": "BTC/USDT LONG\nstop 1\nentry " + "1,234" * (_N // 5 - 10) + ".5",
 }
 
 

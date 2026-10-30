@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import math
 import re
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -24,7 +25,7 @@ from app.brain import journal
 from app.brain.risk import calculate_position
 from app.brain.smc_setups import SMCEngine
 from app.core.signal_engine import Signal
-from app.delivery import graphics, my_account, templates
+from app.delivery import graphics, my_account, publication, templates
 from app.power import battery_alert_text, should_alert_battery
 from app.power import pmset_batt as _pmset_batt
 
@@ -313,6 +314,16 @@ def format_kelly_line() -> str:
             "Полный Келли агрессивен и растёт на шуме — больше половины не берут.")
 
 
+def _calc_num(x: float, digits: int = 6) -> str:
+    """Число для /calc фиксированной записью: {:g} уходил в экспоненту — объём мелких альтов
+    «2.94118e+07», депозит «1e+06» (аудит кода 30.10). ~6 значащих цифр, целую часть не режем:
+    объём копируют в форму ордера."""
+    if not math.isfinite(x) or x == 0:
+        return f"{x:g}"
+    dec = max(0, digits - 1 - math.floor(math.log10(abs(x))))
+    return f"{x:.{dec}f}".rstrip("0").rstrip(".") if dec else f"{x:.0f}"
+
+
 def format_calc(deposit: float, risk_pct: float, entry: float, stop: float,
                 max_leverage: int = 20) -> str:
     """Текст /calc: калькулятор позиции через risk.calculate_position."""
@@ -322,12 +333,12 @@ def format_calc(deposit: float, risk_pct: float, entry: float, stop: float,
     lines = [
         "🧮 Калькулятор позиции",
         "────────────────────",
-        f"Депозит: {deposit:g}  |  риск: {risk_pct:g}%",
-        f"Вход: {entry:g}  |  стоп: {stop:g}",
-        f"Объём: {pos['position_qty']:g}",
-        f"Номинал: {pos['notional_usd']:g}$",
-        f"Плечо: ×{pos['implied_leverage']:g}",
-        f"Убыток по стопу: {pos['loss_if_stop']:g}$",
+        f"Депозит: {_calc_num(deposit)}  |  риск: {risk_pct:g}%",
+        f"Вход: {_cornix_price(entry)}  |  стоп: {_cornix_price(stop)}",
+        f"Объём: {_calc_num(pos['position_qty'])}",
+        f"Номинал: {_calc_num(pos['notional_usd'])}$",
+        f"Плечо: ×{_calc_num(pos['implied_leverage'], 4)}",
+        f"Убыток по стопу: {_calc_num(pos['loss_if_stop'])}$",
     ]
     if pos.get("warning"):
         lines.append(f"⚠️ {pos['warning']}")
@@ -1572,6 +1583,32 @@ def main_menu_layout(is_admin: bool = False) -> list:
     ]
 
 
+MENU_TEXTS = frozenset(t for adm in (False, True) for row in main_menu_layout(adm) for t in row)
+
+
+def menu_resets_dialog(menu_texts: frozenset):
+    """Outer-middleware сообщений: кнопка меню или команда посреди пошагового ввода
+    (калькулятор, промокод, ввод в админке) сначала закрывает диалог, а затем идёт в свой
+    обычный хэндлер — с первого нажатия.
+
+    Аудит кода 30.10, §3.6 п. 7: в aiogram 3 хэндлер без state-фильтра срабатывает в любом
+    состоянии. Кнопки, зарегистрированные ДО FSM-шагов («О боте», «Бэктест», «Подписка»…),
+    отвечали, а диалог оставался — следующий свободный текст уходил как промокод или число
+    калькулятора. Кнопки ПОСЛЕ шагов ловил _fsm_menu_escape, и их приходилось нажимать
+    дважды. Команды проходили мимо шагов, но диалог тоже не закрывали. Сброс идёт до разбора
+    хэндлеров: FSMContextMiddleware уже положил state/raw_state, и StateFilter шагов видит
+    обнулённое состояние."""
+    async def _mw(handler, event, data):
+        text = getattr(event, "text", None) or ""
+        if data.get("raw_state") is not None and (text in menu_texts or text.startswith("/")):
+            state = data.get("state")
+            if state is not None:
+                await state.clear()
+            data["raw_state"] = None
+        return await handler(event, data)
+    return _mw
+
+
 BOT_DESCRIPTION = (
     "Сигналы по крипто-фьючерсам (SMC) с честной статистикой: публикуем 100% исходов, "
     "включая убыточные. Проверяемый CSV-трек-рекорд: sha256 + офлайн-верификатор "
@@ -1945,6 +1982,8 @@ def main() -> None:
     logging.getLogger().addHandler(_ERRBUF)   # ERROR из любых наших логгеров -> DM админам
     bot = Bot(token=cfg.tg_bot_token)
     dp = Dispatcher()
+    # кнопка меню или команда посреди пошагового ввода закрывает диалог (аудит кода 30.10)
+    dp.message.outer_middleware(menu_resets_dialog(MENU_TEXTS))
     # username бота для deep-link CTA под постами канала; заполняется в _main() после
     # get_me() — до этого кнопки просто нет (channel_cta_markup(None) -> None)
     bot_info: dict = {"username": None}
@@ -2599,8 +2638,6 @@ def main() -> None:
 
     @dp.message(PromoState.code, ~F.text.startswith("/"))
     async def _promo_step_code(m, state: FSMContext):
-        if await _fsm_menu_escape(m, state):
-            return
         await state.clear()
         await _apply_promo(m, (m.text or "").strip())
 
@@ -2819,23 +2856,9 @@ def main() -> None:
             lambda: format_calc(dep, risk, entry, stop, cfg.max_leverage)
             + format_kelly_line()))
 
-    # кнопка "Калькулятор" — пошаговый FSM-ввод вместо одной строки с 4 числами.
-    # ~F.text.startswith("/") на каждом шаге: если юзер вместо ответа набрал команду
-    # (передумал/нажал другую кнопку) — состояние НЕ перехватывает её молча, команда
-    # проходит в свой обычный хендлер (aiogram пробует следующий подходящий хендлер)
-    _MENU_TEXTS = frozenset(t for row in (main_menu_layout(False) + main_menu_layout(True))
-                            for t in row)
-
-    async def _fsm_menu_escape(m, state: FSMContext) -> bool:
-        """Кнопка меню посреди пошагового ввода — выход из состояния, а не «Не понял число»
-        (аудит-2 UX [6]: половина меню зарегистрирована ПОСЛЕ FSM-шагов и попадала в ловушку
-        «Статистика -> Не понял число» без выхода). -> True, если перехвачено."""
-        if (m.text or "") in _MENU_TEXTS:
-            await state.clear()
-            await m.answer("Ввод отменён — нажмите кнопку ещё раз.")
-            return True
-        return False
-
+    # кнопка "Калькулятор" — пошаговый FSM-ввод вместо одной строки с 4 числами. Кнопка
+    # меню или команда посреди ввода закрывает диалог ещё до шагов (menu_resets_dialog);
+    # ~F.text.startswith("/") на шагах — страховка, если middleware не подключён
     @dp.message(Command("cancel"))
     async def _cancel(m, state: FSMContext):
         await state.clear()
@@ -2849,8 +2872,6 @@ def main() -> None:
 
     @dp.message(CalcStates.deposit, ~F.text.startswith("/"))
     async def _calc_step_deposit(m, state: FSMContext):
-        if await _fsm_menu_escape(m, state):
-            return
         try:
             dep = float((m.text or "").replace(",", "."))
             assert dep > 0
@@ -2863,8 +2884,6 @@ def main() -> None:
 
     @dp.message(CalcStates.risk, ~F.text.startswith("/"))
     async def _calc_step_risk(m, state: FSMContext):
-        if await _fsm_menu_escape(m, state):
-            return
         try:
             risk = float((m.text or "").replace(",", "."))
             assert risk > 0
@@ -2877,8 +2896,6 @@ def main() -> None:
 
     @dp.message(CalcStates.entry, ~F.text.startswith("/"))
     async def _calc_step_entry(m, state: FSMContext):
-        if await _fsm_menu_escape(m, state):
-            return
         try:
             entry = float((m.text or "").replace(",", "."))
             assert entry > 0
@@ -2891,8 +2908,6 @@ def main() -> None:
 
     @dp.message(CalcStates.stop, ~F.text.startswith("/"))
     async def _calc_step_stop(m, state: FSMContext):
-        if await _fsm_menu_escape(m, state):
-            return
         try:
             stop = float((m.text or "").replace(",", "."))
             assert stop > 0
@@ -4180,8 +4195,6 @@ def main() -> None:
     async def _admin_numeric_receive(m, state: FSMContext):
         if not _is_admin(m):
             return
-        if await _fsm_menu_escape(m, state):            # заброшенный промпт не съедает число
-            return
         data = await state.get_data()
         field, kind = str(data.get("field", "")), str(data.get("kind", ""))
         label = _ADMIN_NUMERIC_FIELDS.get(field, (field, kind))[0]
@@ -4345,6 +4358,11 @@ def main() -> None:
         bars = fetch_history(sym, tf, int(age // tf_s) + 3, exchange_id=cfg.exchange_id)
         if scale != 1.0:
             bars[["open", "high", "low", "close"]] /= scale
+        # «81,500» — 81 500 или 81.5: прочтение выбирает цена рынка в момент поста
+        picked = signal_check.resolve_reading(sig, bars, pd.Timestamp(posted))
+        if picked is None:
+            return signal_check.render_unsure(sig)
+        sig = picked
         res = signal_check.evaluate(sig, bars, pd.Timestamp(posted))
         log.info("проверка сигнала: %s %s -> %s (целей %d)", sig.coin, sig.side,
                  res.status, res.hit)
@@ -4689,12 +4707,39 @@ def main() -> None:
             return
         await _deliver_signal(sig, sid)
 
-    async def _deliver_signal(sig, sid):
+    async def _pub_mark(fn, *args) -> None:
+        """Метка публикации — по возможности: сбой БД не должен ронять саму доставку."""
+        try:
+            await asyncio.to_thread(fn, *args)
+        except Exception as e:                         # noqa: BLE001
+            log.warning("метка публикации #%s (%s): %s", args[0], fn.__name__, e)
+
+    async def _deliver_signal(sig, sid, resume: bool = False):
         """Доставка ГОТОВОГО сигнала: пост в канал + рассылка по воронке.
 
-        Отдельно от _broadcast, потому что зовётся из ДВУХ мест: auto-ветки поллера
-        и /confirm в semiauto — раньше подтверждённый кандидат не доставлялся никому
-        (аудит 02.09: комментарий обещал «рассылка после /confirm», кода не было)."""
+        Отдельно от _broadcast, потому что зовётся из ТРЁХ мест: auto-ветки поллера,
+        /confirm в semiauto (раньше подтверждённый кандидат не доставлялся никому — аудит
+        02.09: комментарий обещал «рассылка после /confirm», кода не было) и досылки при
+        старте (resume=True — продолжение доставки, прерванной рестартом).
+
+        Метка публикации (publication, миграция 029; аудит надёжности 30.10, M5): доставку
+        начинает тот, кто её захватил, второй претендент молча выходит; пост в канал
+        помечается до и после отправки — обрыв на самой отправке повторно не шлётся."""
+        if resume:
+            if not await asyncio.to_thread(publication.claim_resume, sid):
+                log.warning("сигнал #%s: досылка уже была — второй раз не шлю", sid)
+                return
+            ch_state = await asyncio.to_thread(publication.channel_state, sid)
+        else:
+            try:
+                claimed = await asyncio.to_thread(publication.claim, sid)
+            except Exception as e:                     # noqa: BLE001 — без метки, но доставим
+                log.warning("метка публикации #%s: %s — доставляю без неё", sid, e)
+                claimed = True
+            if not claimed:
+                log.warning("сигнал #%s: доставка уже начата другим путём — пропускаю", sid)
+                return
+            ch_state = None
         try:
             full = templates.render_signal_dm(sig, sid)
         except Exception:                              # noqa: BLE001 — формат не роняет цикл
@@ -4712,8 +4757,18 @@ def main() -> None:
             unlock_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
                 text=f"🔓 Открыть этот сигнал — {unlock_price}⭐",
                 callback_data=f"unlock:{sid}")]])
-        # пост в канал (если включён) — полный или тизер, по режиму канала
-        if channel and runtime.channel_enabled():
+        # пост в канал (если включён) — полный или тизер, по режиму канала. При досылке канал
+        # решает метка: sent/failed/off — канал уже решён, досылается только личка
+        step = publication.channel_step(ch_state, bool(channel) and runtime.channel_enabled())
+        if step == "unknown":
+            # прошлый процесс оборвался на самой отправке: пост мог уйти, а дубль в публичном
+            # канале хуже ручной проверки
+            await _pub_mark(publication.set_channel, sid, "unknown")
+            log.error("сигнал #%s: пост в канал прервался на отправке (рестарт) и мог уйти — "
+                      "повторно не шлю, проверьте канал", sid)
+        elif step == "off":
+            await _pub_mark(publication.set_channel, sid, "off")
+        elif step == "post":
             ch_is_teaser = runtime.channel_mode() != "full"
             if not ch_is_teaser:
                 ch_text = templates.render_signal_channel(sig, sid)
@@ -4730,6 +4785,8 @@ def main() -> None:
                 except Exception as e:                 # noqa: BLE001
                     log.warning("график сигнала #%s: %s", sid, e)
             try:
+                # метка ДО отправки: обрыв на ней распознаётся при старте как «исход неизвестен»
+                await _pub_mark(publication.set_channel, sid, "sending")
                 if photo is not None and caption_fits(ch_text):
                     msg = await bot.send_photo(
                         channel, BufferedInputFile(photo, filename=f"signal_{sid}.png"),
@@ -4748,8 +4805,11 @@ def main() -> None:
                         else _channel_kb("chsig"))
                     log.info("сигнал #%s: пост в канал OK (msg_id=%s%s)", sid, msg.message_id,
                              ", фото отдельно" if photo is not None else "")
+                await _pub_mark(publication.set_channel, sid, "sent", msg.message_id)
             except Exception as e:                     # noqa: BLE001 — канал не роняет рассылку
-                log.warning("пост в канал %s: %s", channel, e)
+                await _pub_mark(publication.set_channel, sid, "failed", None, str(e)[:300])
+                # ERROR -> админам: сделка в журнале есть, а в публичном канале её нет
+                log.error("сигнал #%s: пост в канал %s не ушёл: %s", sid, channel, e)
         # воронка: админы/платные -> полный; free -> полный до лимита/нед, дальше тизер
         plan = await asyncio.to_thread(payments.plan_recipients, sid,
                                        runtime.free_per_week(), tuple(cfg.admin_ids),
@@ -4786,7 +4846,15 @@ def main() -> None:
             # пауза между отправками: ~20 msg/с — под глобальным лимитом Telegram,
             # без неё flood-wait гарантирован при росте базы
             await asyncio.sleep(0.05)
-        log.info("сигнал #%s: отправлено %d из %d (план)", sid, sent, len(plan))
+        await _pub_mark(publication.mark_done, sid)
+        log.info("сигнал #%s: отправлено %d из %d (план)%s", sid, sent, len(plan),
+                 ", досылка" if resume else "")
+
+    async def _deliver_by_id(sid: int, resume: bool) -> None:
+        """Доставка по id из журнала — для досылки при старте (publication.redeliver_on_start)."""
+        row = await asyncio.to_thread(journal.signal_row, sid)
+        if row is not None:
+            await _deliver_signal(journal.row_to_signal(row), sid, resume=resume)
 
     _webapp_watch = {"fails": 0}
 
@@ -5941,6 +6009,12 @@ def main() -> None:
             await asyncio.to_thread(runtime.set_value, "bot_username", bot_info["username"])
         except Exception as e:                         # noqa: BLE001 — кнопки не критичны
             log.warning("get_me (CTA-кнопки канала будут без ссылки): %s", e)
+        # досылка сигналов, записанных, но не доставленных до рестарта (аудит надёжности 30.10,
+        # M5), — ДО поллера и стрима: пост сигнала должен уйти раньше «вход исполнен» по нему
+        try:
+            await asyncio.wait_for(publication.redeliver_on_start(_deliver_by_id, log), 240)
+        except Exception:                              # noqa: BLE001 — досылка не роняет старт
+            log.exception("досылка недоставленных сигналов при старте")
         poller = asyncio.create_task(_poller(), name="poller")
         poller.add_done_callback(_task_died)
         # реалтайм-стрим (за флагом stream_enabled; при выключенном флаге тихо спит)

@@ -1,6 +1,7 @@
 """Тесты обвязки бота: scan_frames (движок -> журнал) и рендер команд."""
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -135,6 +136,23 @@ def test_format_stats_and_calc():
     assert "Winrate: <b>60%</b>" in filled     # /stats теперь HTML
     calc = bot.format_calc(1000, 2.0, 100.0, 98.0)
     assert "Объём" in calc and "Плечо" in calc
+
+
+@pytest.mark.parametrize("args,qty", [
+    ((1000, 1.0, 0.00001234, 0.000012), "Объём: 29411765\n"),     # мелкий альт: миллионы монет
+    ((1_000_000, 1.0, 104500.5, 103500.5), "Объём: 10\n"),
+    ((1000, 1.0, 2.3456, 2.3), "Объём: 219.298\n"),
+    ((50, 1.0, 64000.0, 63000.0), "Объём: 0.0005\n"),
+])
+def test_format_calc_never_uses_exponent(args, qty):
+    """{:g} печатал объём мелких альтов как «2.94118e+07», депозит — «1e+06», цену —
+    «1.234e-05» (аудит кода 30.10): объём копируют в форму ордера, экспонента там не
+    вставится."""
+    calc = bot.format_calc(*args)
+    assert qty in calc
+    assert not re.search(r"\de[+-]?\d", calc), calc
+    if args[2] < 0.001:
+        assert "Вход: 0.00001234" in calc
 
 
 def test_format_about_contains_disclaimer_parts(fresh_db):
@@ -867,6 +885,68 @@ def test_build_signal_chart_data():
     import pytest
     with pytest.raises(ValueError):
         bot.build_signal_chart_data(sig, 7, df.iloc[0:0], "10.07.2026")
+
+
+def test_menu_button_or_command_closes_dialog_in_one_press():
+    """Аудит кода 30.10, §3.6 п. 7 — на настоящем диспетчере aiogram. Кнопка, заведённая ДО
+    шага диалога, отвечала, а диалог оставался (следующее число уходило в калькулятор);
+    кнопку ПОСЛЕ шага шаг съедал как ввод — её жали дважды; команда диалог не закрывала."""
+    import asyncio
+    from datetime import datetime, timezone
+
+    from aiogram import Bot, Dispatcher, F
+    from aiogram.filters import Command
+    from aiogram.fsm.state import State, StatesGroup
+    from aiogram.types import Chat, Message, Update, User
+
+    class Calc(StatesGroup):
+        deposit = State()
+
+    seen: list[str] = []
+    dp = Dispatcher()
+    dp.message.outer_middleware(bot.menu_resets_dialog(frozenset({"ℹ️ О боте", "📊 Статистика"})))
+
+    @dp.message(F.text == "ℹ️ О боте")
+    async def _about(m):
+        seen.append("about")
+
+    @dp.message(Calc.deposit, ~F.text.startswith("/"))
+    async def _step(m):
+        seen.append(f"step:{m.text}")
+
+    @dp.message(F.text == "📊 Статистика")
+    async def _stats(m):
+        seen.append("stats")
+
+    @dp.message(Command("help"))
+    async def _help(m):
+        seen.append("help")
+
+    async def scenario() -> list:
+        tg = Bot("123:ABC")
+        ctx = dp.fsm.get_context(bot=tg, chat_id=42, user_id=42)
+
+        async def feed(text: str) -> None:
+            msg = Message(message_id=1, date=datetime.now(timezone.utc),
+                          chat=Chat(id=42, type="private"),
+                          from_user=User(id=42, is_bot=False, first_name="t"), text=text)
+            await dp.feed_update(tg, Update(update_id=1, message=msg))
+
+        states = []
+        for press in ("ℹ️ О боте", "📊 Статистика", "/help"):
+            await ctx.set_state(Calc.deposit)
+            await feed(press)
+            states.append(await ctx.get_state())
+            await feed("1000")                  # диалога уже нет: число — не депозит
+        await ctx.set_state(Calc.deposit)
+        await feed("1000")                      # а внутри диалога шаг работает как раньше
+        await tg.session.close()
+        return states
+
+    assert asyncio.run(scenario()) == [None, None, None]
+    assert seen == ["about", "stats", "help", "step:1000"]
+    assert bot.MENU_TEXTS >= {t for row in bot.main_menu_layout(False) for t in row}
+    assert "🛠 Админ-панель" in bot.MENU_TEXTS
 
 
 def test_main_menu_layout_user():
