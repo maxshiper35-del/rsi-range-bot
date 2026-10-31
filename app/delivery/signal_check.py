@@ -56,8 +56,11 @@ _MARKET = re.compile(r"по рынку|market|по текущ", re.I)
 _PAIR = re.compile(r"\b(?:([A-Z0-9]{1,15})\s*/|([A-Z0-9]{2,15})(?:\s*-)?)\s*"
                    r"(?:USDT|USDC|USD|PERP)\b", re.I)
 _TAG = re.compile(r"[#$]([A-Za-z0-9]{2,15})\b")
-_COIN_KW = re.compile(r"(?:монета|coin|pair|пара|тикер|ticker)\s*(?:[:\-]\s*)?[#$]?"
-                      r"([A-Za-z0-9]{2,15})\b", re.I)
+# метка — отдельным словом и с разделителем: «CoinGecko» давал монету GECKO, «Coinbase» — BASE,
+# «Bitcoin price» — PRICE (30.10.2026). После «:» тикер в любом регистре, после «-» или
+# пробела — только похожий на тикер (заглавные): «pair trading», «coin of the day» — не метка
+_COIN_KW = re.compile(r"\b(?i:монета|coin|pair|пара|тикер|ticker)"
+                      r"(?:\s*:\s*[#$]?([A-Za-z0-9]{2,15})|(?:\s*-\s*|\s+)[#$]?([A-Z0-9]{2,15}))\b")
 _NOT_COIN = {"LONG", "SHORT", "BUY", "SELL", "SIGNAL", "SIGNALS", "FUTURES", "SPOT", "VIP",
              "TP", "SL", "ENTRY", "USDT", "USD", "CRYPTO", "TRADE", "TRADING", "SCALP",
              "BINANCE", "BYBIT", "BINGX", "OKX", "MEXC", "BITGET"}
@@ -176,16 +179,49 @@ def _normalize(text: str) -> str:
 
 
 _PCT = re.compile(r"(?<!\d)" + _NUM + r"\s*%")                     # проценты — не цены
-_RMULT = re.compile(r"[+-]?(?<!\d)" + _NUM + r"\s*R\b")             # R-мультипликаторы «(3.0R)»
-_RATIO = re.compile(r"(?<!\d)\d+\s*:\s*" + _NUM)                     # соотношения «1:3.0»
+# R-мультипликаторы «(3.0R)»; «107 R:R 1.7:1» — цена перед R:R, не мультипликатор
+_RMULT = re.compile(r"[+-]?(?<!\d)" + _NUM + r"\s*R\b(?![:/]R\b)")
+_RATIO = re.compile(r"(?<!\d)" + _NUM + r"\s*:\s*" + _NUM)           # соотношения «1:3.0», «1.7:1»
 _LEVERAGE = re.compile(r"(?<![A-Za-zА-Яа-я])[xх×]\s*\d+|(?<!\d)\d+\s*[xх×](?![A-Za-zА-Яа-я])",
                        re.I)                                         # плечо «x10» / «10x»
 
 
-def _nums(s: str) -> list[float]:
+def _strip_junk(s: str) -> str:
+    """Числа, которые не цены (проценты, R, соотношения, плечо), -> пробел."""
     for rx in (_PCT, _RMULT, _RATIO, _LEVERAGE):
         s = rx.sub(" ", s)
-    return [float(x) for x in re.findall(_NUM, s)]
+    return s
+
+
+def _nums(s: str) -> list[float]:
+    return [float(x) for x in re.findall(_NUM, _strip_junk(s))]
+
+
+# явная цель «TP1: 1.23» / «TP 2: $4.5»: номер, двоеточие и сразу число. В абзаце разбора номер
+# пишут без двоеточия («SOL previously hit our TP2 $115 target») — цели оттуда не берём.
+# Метка без номера («Final tp: 44500») — только рядом с нумерованными
+_TP_LINE = re.compile(r"\bTP(?:\s*([1-9]))?\s*[:：]\s*(?:\$\s*)?(?=\d)", re.I)
+
+
+def _numbered_targets(lines: list[str]) -> list[float]:
+    """Цели из явных «TP1: x» (по одной на номер, первое упоминание) и «Final tp: x»; нет ни
+    одной нумерованной — []. Значение — число сразу после двоеточия, если это не процент, R
+    или соотношение («TP1: 1.35:1» — не цель)."""
+    numbered: dict[int, float] = {}
+    plain: list[float] = []
+    for ln in lines:
+        if _SKIP_LINE.search(ln):
+            continue
+        ms = list(_TP_LINE.finditer(ln))
+        for i, m in enumerate(ms):
+            # до следующей метки: «TP1: 107 | TP2: 101» в одной строке — две цели
+            end = ms[i + 1].start() if i + 1 < len(ms) else len(ln)
+            if v := re.match(_NUM, _strip_junk(ln[m.end():end])):
+                if m.group(1):
+                    numbered.setdefault(int(m.group(1)), float(v.group()))
+                else:
+                    plain.append(float(v.group()))
+    return [*numbered.values(), *plain] if numbered else []
 
 
 def _kind(ln: str) -> tuple[str, re.Match] | None:
@@ -205,7 +241,7 @@ def _coin(t: str) -> str | None:
         if c not in _NOT_COIN and not c.isdigit():
             return c
     for m in _COIN_KW.finditer(t):
-        c = m.group(1).upper()
+        c = (m.group(1) or m.group(2)).upper()
         if c not in _NOT_COIN and not c.isdigit():
             return c
     for m in _TAG.finditer(t):
@@ -302,6 +338,11 @@ def _parse_normalized(t: str) -> ParsedSignal | None:
             return None
         if side == "SHORT" and not stop > hi:
             return None
+    # есть явные «TP1: …» — цели только из них: «hit our TP2 $115 target» и «LINK was
+    # $13.98–$14.22» из абзаца разбора целями не становятся (30.10.2026). Порядок — по цене,
+    # как и раньше: evaluate считает цели подряд, а нумерация канала бывает с опечаткой
+    # («TP2: 0.0087 · TP3: 0.0080»)
+    targets = _numbered_targets(lines) or targets
     if side == "LONG":
         targets = sorted({x for x in targets if x > (hi if hi is not None else stop)})
     else:

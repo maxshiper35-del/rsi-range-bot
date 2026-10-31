@@ -202,6 +202,98 @@ def test_wrong_side_targets_dropped():
     assert s.targets == [110]
 
 
+# --- англоязычные VIP-посты (30.10.2026): тысячи при точечных дробях, цели из абзаца разбора,
+# «coin» внутри слова. Тексты синтетические — в форматах каналов, не копии постов ---
+
+_VIP_SHORT = """🔴 AVAX/USDT SHORT
+Entry: $31.40 - $31.90
+🎯 TP1: $29.60 (R:R 1.6:1)
+🎯 TP2: $28.10
+🛑 SL: $33.20
+
+📊 Why:
+• Last week AVAX hit our TP2 $31 target and now retests that level from below.
+• R:R by target → TP1: 1.6:1 · TP2: 2.4:1"""
+
+_VIP_LONG = """🟢 DOT/USDT LONG
+Entry: $4.30 - $4.38
+TP1: $4.55
+TP 2: $4.80
+SL: $4.12
+
+Recap: DOT LONG #41207 hit TP2 $4.62 yesterday — DOT was $4.48–$4.66 at the time."""
+
+
+def test_vip_thousands_with_dot_decimals():
+    """«62,800» при «+8.4%» в посте — тысячи (до 352b47a: 62 и 800, вход 62–800, стоп 59);
+    запятая-дробь в посте без точек — по-прежнему дробь."""
+    s = sc.parse_signal("#BTC/USDT LONG\nEntry Zone: 62,800 - 64,100\nTP1: 68,900 (+8.4%)\n"
+                        "TP2: 72,300 (+13.9%)\nSL: 59,700")
+    assert (s.entry_lo, s.entry_hi, s.stop, s.targets) == (62800, 64100, 59700, [68900, 72300])
+    assert not s.unsure and sc.resolve_reading(s, _bars([]), T0) is s
+    ru = sc.parse_signal("#WLD SHORT\nВход 0,4512\nСтоп 0,4690\nЦель 0,4310")
+    assert (ru.entry_lo, ru.stop, ru.targets) == (0.4512, 0.469, [0.431])
+
+
+def test_targets_only_from_numbered_tp_lines():
+    """Есть «TP1: …» — цели только из таких строк: «hit our TP2 $31 target» и «DOT was
+    $4.48–$4.66» из абзаца разбора — не цели, «R:R 1.6:1» — тоже."""
+    s = sc.parse_signal(_VIP_SHORT)
+    assert (s.coin, s.side, s.entry_lo, s.entry_hi, s.stop) == ("AVAX", "SHORT", 31.4, 31.9, 33.2)
+    assert s.targets == [29.6, 28.1]                 # было [31, 29.6, 28.1, 1.0, …]
+    assert sc.parse_signal(_VIP_LONG).targets == [4.55, 4.8]     # было [4.48, 4.55, 4.62, …]
+
+
+def test_vip_short_check_does_not_count_analysis_target():
+    """Итог проверки: TP1 = 31 из абзаца разбора засчитывался на первом откате — «взята цель,
+    затем стоп»; до настоящей первой цели (29.60) цена не дошла."""
+    bars = _bars([(31.5, 31.6, 31.3, 31.4), (31.4, 31.5, 30.8, 31.0), (31.0, 33.4, 30.9, 33.3)])
+    r = sc.evaluate(sc.parse_signal(_VIP_SHORT), bars, T0)
+    assert r.status == "stop" and r.hit == 0
+
+
+def test_numbered_target_values():
+    # значение — число сразу после двоеточия; соотношение, процент и R — не цель
+    assert sc._numbered_targets(["TP1: 107 | TP2: 101", "TP3: 1.6:1", "TP4: 8.5%",
+                                 "TP5: 3R", "Final tp: 95"]) == [107, 101, 95]
+    assert sc._numbered_targets(["Final tp: 95", "TP: 90", "hit our TP2 $115"]) == []
+    # строк «TP<n>:» нет — прежний разбор: список целей в строке «TP:» целиком
+    s = sc.parse_signal("#ADA LONG\nВход 0.50\nСтоп 0.48\nTP: 0.53, 0.56, 0.60")
+    assert s.targets == [0.53, 0.56, 0.6]
+
+
+def test_final_tp_label_and_price_order():
+    """«Final tp:» без номера рядом с «Tp 1:» — тоже цель; нумерация канала с опечаткой
+    («TP2» дальше «TP3») — цели всё равно по цене: evaluate считает их подряд."""
+    s = sc.parse_signal("#ETH/USDT SHORT\nEntry: 2450\nTp 1: 2380\nTp 2: 2300\nFinal tp: 2150\n"
+                        "Sl: 2520")
+    assert s.targets == [2380, 2300, 2150]
+    s = sc.parse_signal("#OP LONG\nEntry: 1.20\nSL: 1.10\nTP1: 1.30\nTP2: 1.55\nTP3: 1.40")
+    assert s.targets == [1.3, 1.4, 1.55]
+
+
+def test_rr_ratio_is_not_a_price():
+    assert sc._nums("TP 29.60 (R:R 1.6:1)") == [29.6]        # было [29.6, 1.0]
+    assert sc._nums("TP 29.60 R:R 1.6:1") == [29.6]          # цена перед R:R — не «29.60 R»
+    assert sc._nums("+1.5R 3R 1:3") == []
+
+
+@pytest.mark.parametrize("txt,coin", [
+    ("#SOL SHORT\nEntry 182.5 - 184\nSL 187.2\nTP1 178\nPrice source: CoinGecko", "SOL"),
+    ("#ETH LONG\nEntry 3100\nSL 3000\nTP1 3300\nCoinbase premium flipped positive", "ETH"),
+])
+def test_coin_word_inside_name_is_not_a_label(txt, coin):
+    assert sc.parse_signal(txt).coin == coin          # было GECKO и BASE
+
+
+def test_coin_label_needs_word_and_separator():
+    assert sc._coin("Bitcoin crashed overnight, shorts below 93000") is None    # было CRASHED
+    assert sc._coin("pair trading is back") is None
+    assert sc._coin("Coin: sol") == "SOL"             # после «:» — любой регистр
+    assert sc._coin("Trading pair ARB") == "ARB"      # после пробела — тикер заглавными
+    assert sc._coin("Пара - TON") == "TON"
+
+
 # --- ReDoS: разбор чужого текста обязан быть линейным (аудит безопасности 30.10.2026) ---
 # Каждый вход — ~4 КБ (потолок текста Telegram). ДО фикса: 0.35–5.5 с на ОДНО сообщение,
 # причём синхронно на event loop бота (весь бот стоял); после — единицы миллисекунд.
@@ -218,6 +310,13 @@ _ADVERSARIAL = {
     "запятые через цифру": "BTC/USDT LONG\nentry 100\nstop " + "1," * (_N // 2 - 20),
     "точки до «k»": "BTC/USDT LONG\nentry " + "1." * (_N // 2 - 20) + "5k\nstop 1",
     "группы тысяч": "BTC/USDT LONG\nstop 1\nentry " + "1,234" * (_N // 5 - 10) + ".5",
+    "пробелы между TP и номером": "BTC/USDT LONG\nentry 100\nstop 90\nTP" + " " * (_N // 2 - 30)
+                                  + "1" + " " * (_N // 2 - 30) + "x",
+    "метки TP1: подряд": "BTC/USDT LONG\nentry 100\nstop 90\n" + "TP1: 1:1 " * (_N // 9 - 5),
+    "соотношения с дробью": "BTC/USDT LONG\nentry 100\nstop 90\nTP " + "1.5:" * (_N // 4 - 10),
+    "пробелы вокруг «-» после coin": "SHORT coin" + " " * (_N // 2 - 20) + "-"
+                                     + " " * (_N // 2 - 20) + "!",
+    "цифры перед R:R": "BTC/USDT LONG\nentry 100\nstop 90\nTP " + "1" * (_N - 50) + " R:R",
 }
 
 
