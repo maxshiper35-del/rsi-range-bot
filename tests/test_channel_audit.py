@@ -536,6 +536,12 @@ def test_bot_routes_channel_reference(fresh_db, monkeypatch):
     assert route("📊 Статистика") == "_stats"
     assert route("@oracle_easy", chat="group") is None
     assert route("привет, как дела?") is None
+    # открыт опрос «как вам бот» — свободный текст становится отзывом, остальное как было
+    from app.delivery import feedback
+    feedback.record_send(42, "sent")
+    assert route("привет, как дела?") == "_survey_reply"
+    assert route("@oracle_easy") == "_audit_ref"
+    assert route("📊 Статистика") == "_stats"
 
 
 class _Sent:

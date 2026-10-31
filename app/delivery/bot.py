@@ -25,7 +25,7 @@ from app.brain import journal
 from app.brain.risk import calculate_position
 from app.brain.smc_setups import SMCEngine
 from app.core.signal_engine import Signal
-from app.delivery import graphics, my_account, publication, templates
+from app.delivery import feedback, graphics, my_account, publication, templates
 from app.power import battery_alert_text, should_alert_battery
 from app.power import pmset_batt as _pmset_batt
 
@@ -1505,6 +1505,7 @@ USER_COMMANDS = [
 
 ADMIN_COMMANDS = USER_COMMANDS + [
     ("admin", "панель управления"),
+    ("feedback", "опрос «как вам бот»: оценки и последние отзывы"),
     ("status", "снимок всех настроек"),
     ("health", "живой чек: аптайм, тик poller, бэкап, БД"),
     ("pause", "остановить поиск сигналов"),
@@ -2113,6 +2114,10 @@ def main() -> None:
 
     class PromoState(StatesGroup):
         code = State()
+
+    class FeedbackState(StatesGroup):
+        """Опрос «как вам бот» (миграция 031): после кнопки оценки ждём текст отзыва."""
+        text = State()
 
     def _main_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
         """Постоянное меню внизу чата — юзеру не нужно помнить команды.
@@ -2726,6 +2731,39 @@ def main() -> None:
     async def _promo_step_code(m, state: FSMContext):
         await state.clear()
         await _apply_promo(m, (m.text or "").strip())
+
+    # ---- опрос «как вам бот» (scripts/send_survey.py, миграция 031) ----
+    async def _take_feedback_text(m) -> None:
+        await asyncio.to_thread(feedback.save_text, m.from_user.id, m.text or "")
+        await m.answer(feedback.THANKS)
+        await notify_admins(bot, cfg.admin_ids, feedback.admin_note(
+            m.from_user.id, m.from_user.username, text=m.text), what="отзыв")
+
+    @dp.callback_query(F.data.startswith(feedback.CALLBACK_PREFIX))
+    async def _feedback_btn(cq, state: FSMContext):
+        key = cq.data[len(feedback.CALLBACK_PREFIX):]
+        if key not in feedback.RATINGS and key != feedback.WRITE:
+            await cq.answer()
+            return
+        uid = cq.from_user.id
+        await cq.answer("Спасибо!" if key in feedback.RATINGS else None)
+        if key in feedback.RATINGS:
+            await asyncio.to_thread(feedback.save_rating, uid, key)
+            await notify_admins(bot, cfg.admin_ids, feedback.admin_note(
+                uid, cq.from_user.username, rating=key), what="отзыв")
+        await state.set_state(FeedbackState.text)
+        await bot.send_message(uid, feedback.ASK_TEXT[key])
+
+    @dp.message(FeedbackState.text, F.text, ~F.text.startswith("/"))
+    async def _feedback_step_text(m, state: FSMContext):
+        await state.clear()
+        await _take_feedback_text(m)
+
+    @dp.message(Command("feedback"))
+    async def _feedback_cmd(m):
+        if not _is_admin(m):
+            return
+        await m.answer(await asyncio.to_thread(feedback.render_stats))
 
     @dp.callback_query(F.data.in_(tariffs.STARS_CALLBACKS))
     async def _pay_stars(cq):
@@ -4725,9 +4763,23 @@ def main() -> None:
     # стикер, фото или голос посреди диалога: шаги ждут только текст (F.text — ревью 31.10),
     # и без подсказки бот молчал бы, а диалог казался сломанным. Оплату и пересылку
     # menu_resets_dialog уже вывел из диалога; ~successful_payment — страховка без него
-    @dp.message(StateFilter(PromoState, CalcStates, AdminInput), ~F.text, ~F.successful_payment)
+    @dp.message(StateFilter(PromoState, CalcStates, AdminInput, FeedbackState), ~F.text,
+                ~F.successful_payment)
     async def _dialog_needs_text(m):
         await m.answer("Жду ответ текстом. Передумали — /cancel")
+
+    # Ответ на опрос текстом без кнопки, пока опрос открыт (feedback.open_survey) — тоже отзыв.
+    # Последний хэндлер: меню, команды, пересылки, ссылки на каналы и шаги диалогов разобраны
+    # выше. Открытость — фильтром: без опроса свободный текст, как и раньше, не обработан
+    async def _survey_is_open(m) -> bool:
+        if m.from_user is None or (m.text or "") in MENU_TEXTS:
+            return False
+        return bool(await asyncio.to_thread(feedback.open_survey, m.from_user.id))
+
+    @dp.message(F.chat.type == "private", F.text, ~F.text.startswith("/"), ~F.forward_origin,
+                StateFilter(None), _survey_is_open)
+    async def _survey_reply(m):
+        await _take_feedback_text(m)
 
     def _signal_chart_png(sig, sid):
         # синхронно (ccxt + Playwright) — вызывать только через asyncio.to_thread
