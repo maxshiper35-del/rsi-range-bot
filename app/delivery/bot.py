@@ -295,23 +295,15 @@ def format_stats(st: dict, epoch_st: dict | None = None,
         f"{epoch_block}"
         "────────────────────\n"
         f"{_small_sample_warning(st['trades'])}"
+        f"{templates.JOURNAL_NOTE}\n"
         f"{NO_MANUAL_EDITS_LINE}\n"
         "⚠️ Не финансовый совет. Прошлые результаты не определяют будущие."
     )
 
 
-def format_kelly_line() -> str:
-    """Справка Келли по трек-рекорду ТЕКУЩЕЙ стратегии — приложение к /calc.
-    Пустая строка, если выборка мала или эджа нет (journal.kelly_stats -> None):
-    Келли на шуме опаснее его отсутствия. Наружу — только ПОЛУ-Келли."""
-    from app import runtime
-    ks = journal.kelly_stats(runtime.strategy_epoch())
-    if not ks:
-        return ""
-    return ("\n📐 Справка по трек-рекорду стратегии: полу-Келли ≈ "
-            f"{ks['half']:g}% риска на сделку (WR {ks['wr']}%, "
-            f"плюс/минус ×{ks['b']:g}, n={ks['n']}).\n"
-            "Полный Келли агрессивен и растёт на шуме — больше половины не берут.")
+# Справки Келли под /calc больше нет (тексты 31.10): полу-Келли считался из перевеса журнала
+# до комиссий, а проверка исполнения по минутным свечам этот перевес не подтвердила — с
+# издержками Келли = 0, а «≈3% риска» спорило с нашей же рекомендацией 1–2%.
 
 
 def _calc_num(x: float, digits: int = 6) -> str:
@@ -648,11 +640,11 @@ def format_about() -> str:
         "RSI Range Signals — автоматический публикатор технических SMC-сетапов. "
         "Это НЕ инвестиционный совет, НЕ индивидуальная рекомендация и НЕ услуга "
         "управления капиталом — регистрации как CTA/RIA у сервиса нет.\n\n"
-        "По собственному walk-forward бэктесту за 12 мес на BTC/ETH/SOL устойчивого "
+        "По бэктесту за 5 лет и проверке исполнения по минутным свечам устойчивого "
         "преимущества после издержек не обнаружено (подробнее: /backtest). Сигналы — "
         "инструмент для проверки собственной гипотезы, не обещание результата. "
-        "Вся статистика по факту исполнения: /stats — исходы пишутся автоматически, "
-        "без ручных правок.\n\n"
+        f"Вся статистика (/stats) — {templates.JOURNAL_BASIS}: исходы опубликованных "
+        "сигналов пишутся автоматически, без ручных правок.\n\n"
         "Формат сигналов совместим с ручной настройкой парсера Cornix — "
         "Entry/Stop-Loss/Take-Profit размечены явно.\n\n"
         "18+. Не предназначено для юрисдикций, где такие услуги запрещены. "
@@ -765,7 +757,7 @@ def format_backtest_summary() -> str:
         "результаты имеют врождённые ограничения: hindsight bias, идеализированное "
         "исполнение, не учитывают реальную ликвидность. В отличие от бэктеста, /stats "
         "считает исходы по фактически опубликованным сигналам — автоматически и без "
-        "ручных правок.\n\n"
+        "ручных правок, но по той же часовой модели и до комиссий.\n\n"
         "Мы публикуем этот отрицательный результат сознательно: сервис продаёт "
         "инструмент и честную статистику, а не обещание доходности."
     )
@@ -1418,6 +1410,7 @@ def format_channel_live_board(st: dict, by_symbol: dict, cohort: dict | None = N
         lines.append(f"Всего закрыто: <b>{st['trades']}</b>")
         lines.append(f"Матожидание: <b>{st['expectancy_r']:+.2f}R</b> на сделку  |  "
                      f"Итог: <b>{st['total_r']:+.2f}R</b>  |  Winrate: {st['winrate']:.0%}")
+        lines.append(templates.CHANNEL_JOURNAL_NOTE)
         warn = _small_sample_warning(st["trades"]).rstrip()
         if warn:
             lines.append(warn)
@@ -1474,7 +1467,8 @@ def format_channel_stats(st: dict) -> str:
         f"Закрыто сделок: {st['trades']}  (открыто {st['open']})\n"
         f"Winrate: {st['winrate']:.0%}\n"
         f"Матожидание: {st['expectancy_r']:+.2f}R на сделку\n"
-        f"Итог: {st['total_r']:+.2f}R\n{_LINE}\n"
+        f"Итог: {st['total_r']:+.2f}R\n"
+        f"{templates.CHANNEL_JOURNAL_NOTE}\n{_LINE}\n"
         f"{_small_sample_warning(st['trades'])}"
         f"{NO_MANUAL_EDITS_LINE}\n"
         "🔔 Сигналы: @rsirange_bot"
@@ -2858,8 +2852,7 @@ def main() -> None:
             await m.answer("Не понял числа. Пример: /calc 1000 2 62340 62980")
             return
         await m.answer(await asyncio.to_thread(
-            lambda: format_calc(dep, risk, entry, stop, cfg.max_leverage)
-            + format_kelly_line()))
+            format_calc, dep, risk, entry, stop, cfg.max_leverage))
 
     # кнопка "Калькулятор" — пошаговый FSM-ввод вместо одной строки с 4 числами. Кнопка
     # меню или команда посреди ввода закрывает диалог ещё до шагов (menu_resets_dialog);
@@ -2922,8 +2915,7 @@ def main() -> None:
         data = await state.get_data()
         await state.clear()
         await m.answer(await asyncio.to_thread(
-            lambda: format_calc(data["deposit"], data["risk"], data["entry"], stop,
-                                cfg.max_leverage) + format_kelly_line()))
+            format_calc, data["deposit"], data["risk"], data["entry"], stop, cfg.max_leverage))
 
     @dp.message(Command("help"))
     @dp.message(F.text == "❓ Помощь")
@@ -4382,7 +4374,7 @@ def main() -> None:
     async def _check_demo(cq):
         """Пример проверки на нашем же последнем закрытом сигнале — человек видит, что
         получит, ещё до того, как найдёт, что переслать. Сигнал берётся последний по
-        закрытию, без выбора «удачного»; фактический итог журнала показан рядом."""
+        закрытию, без выбора «удачного»; итог журнала (до комиссий) показан рядом."""
         from app.delivery import signal_check
         await cq.answer()
         row = await asyncio.to_thread(
@@ -4408,7 +4400,7 @@ def main() -> None:
                 log.info("пример проверки #%s: %s", row["id"], e)
                 txt = "Не получилось загрузить свечи с биржи. Попробуйте через пару минут."
         txt = (f"<i>Пример на нашем сигнале #{row['id']}. Наш бот выходит по трейлинг-стопу, "
-               f"поэтому фактический итог в журнале — {row['result_r']:+.2f}R.</i>\n\n" + txt
+               f"поэтому итог по журналу — {row['result_r']:+.2f}R (до комиссий).</i>\n\n" + txt
                + "\n\nТеперь перешлите сюда сигнал из своего канала 👆")
         await wait.edit_text(txt, parse_mode="HTML", reply_markup=channel_join_markup())
 

@@ -891,7 +891,7 @@ def test_stats_period_and_epoch_total_move_pct(fresh_db):
     # дайджест показывает недельный ход
     from app.delivery import templates
     txt = templates.render_weekly_digest("18–24.08", wk, journal.stats())
-    assert "Чистого хода забрано: <b>+4.0%</b>" in txt
+    assert "Чистый ход сделок: <b>+4.0%</b>" in txt
 
 
 def _ins_closed(db, sid, r, closed):

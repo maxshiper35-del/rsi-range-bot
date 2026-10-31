@@ -70,6 +70,7 @@ def test_diary_days_and_numbering_keep_minus_days():
     assert d.close_balance == pytest.approx(10000 * 1.01 * 0.99 * 0.99 * 1.03)
     html = "".join(h for h, _d in diary.frames(d).frames)
     assert "расчёт по журналу" in html and kit.NOT_ADVICE in html and kit.BOT in html
+    assert "расчёт по журналу, до комиссий" in html               # и на крючке
     assert len(diary.caption(d).title) <= 100
 
 
@@ -127,6 +128,22 @@ def test_crash_frames_merge_twins_and_stay_public():
     assert "×2" in html
     assert 20 <= tl.t <= 35
     assert "стоп" in crash.caption(c).description
+    # выходы по трейлу — расчёт журнала на часовых свечах (минутная проверка 30.10 хуже):
+    # оговорка на кадре сделок и в подписи, без «трейлинг держал… от дна» в уроке
+    assert "по журналу (часовые свечи), до комиссий" in html
+    assert "трейлинг держал" not in html and "от дна" not in html
+    desc = crash.caption(c).description
+    assert "итог по журналу" in desc and "/backtest" in desc
+
+
+def test_crash_minute_chips_show_stops_not_journal_trail_exits():
+    c = _crash_fixture()
+    win = c.exits[2]
+    inside = crash.Exit(win.trade, pd.Timestamp("2026-10-29T20:40:00Z"), None, win.extreme)
+    c2 = crash.Crash(c.bar, c.context, c.m1, [c.exits[0], c.exits[1], inside],
+                     c.sharpest, c.bottom)
+    html = "".join(kit.visible_text(h) for h, _d in crash.frames(c2).frames)
+    assert "бота — стоп" in html and "бота — трейлинг" not in html
 
 
 # --- проверка канала -------------------------------------------------------------------

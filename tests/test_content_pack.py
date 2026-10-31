@@ -34,6 +34,10 @@ def test_carousel_lists_every_trade_without_taxonomy():
     assert "1/4" in slides[0] and "4/4" in slides[3]
     for leak in LEAKS:
         assert all(leak not in s for s in slides)
+    # R — расчёт журнала до комиссий; стоп — не «ровно как планировали», плюс — не «прибыль»
+    assert all("по журналу, до комиссий" in s for s in slides)
+    assert "прибыль" not in slides[2] and "ровно такой" not in slides[2]
+    assert "комиссии и проскальзывание" in slides[2]
 
 
 def test_carousel_caps_list_slides():
@@ -50,6 +54,8 @@ def test_story_and_captions():
     assert caps["video"].startswith("Итог дня 26.10.2026: 3 сделки, 1 в плюс / 2 в минус, −0.48R")
     assert "без отбора" in caps["video"] and "Не финансовый совет" in caps["video"]
     assert "(3 сделки)" in caps["carousel"]
+    assert "по журналу, до комиссий" in html
+    assert all("−0.48R по журналу, до комиссий" in caps[k] for k in ("video", "carousel"))
     for leak in LEAKS:
         assert all(leak not in c for c in caps.values())
 

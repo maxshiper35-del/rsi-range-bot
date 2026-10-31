@@ -203,7 +203,7 @@ _BODY = Template("""
 <div class="canvas square"><div class="wrap">
   $head
   <div class="hero">
-    <div class="stat-label">Итог недели · R до комиссий</div>
+    <div class="stat-label">Итог недели · по журналу, до комиссий</div>
     <div class="stat-value $total_r_class$total_r_long">$total_r</div>
     <div class="stat-sub"><b>$closed_words</b> · $open ещё в работе</div>
   </div>
@@ -236,7 +236,7 @@ _BODY = Template("""
   <div class="bottom">
     <div class="note honesty">
       <div class="note-label"><span class="icon">&check;</span>Почему мы публикуем убытки</div>
-      <p>Мы показываем <b>100% исходов</b> — прибыльные и убыточные сделки в равной степени. Если статистика ухудшится, вы увидите это здесь первыми, а не узнаете постфактум.</p>
+      <p>Мы показываем <b>100% исходов</b> — плюсовые и минусовые сделки в равной степени. Если статистика ухудшится, вы увидите это здесь первыми, а не узнаете постфактум.</p>
     </div>
     <div class="note warning">
       <div class="note-label"><span class="icon">!</span>Малая выборка</div>
@@ -916,7 +916,7 @@ _DASH_DOC = Template("""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-
   <div class="top"><div class="rr-wm">RSI Range · терминал</div>
     <div class="sub">@rsi_range · $period<br>офлайн-снимок</div></div>
   <div class="card hero">
-    <div class="hero-main"><div class="rr-label">Итог · R до комиссий</div>
+    <div class="hero-main"><div class="rr-label">Итог · по журналу, до комиссий</div>
       <div class="hero-num $total_class">$total_r</div>
       <div class="hero-sub">$closed закрытых · $wins побед · $losses пораж.</div></div>
     <div class="hero-side">
@@ -931,8 +931,9 @@ _DASH_DOC = Template("""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-
   <div class="card"><h3>По инструментам</h3>$by_symbol</div>
   <div class="card"><h3>Прогресс до следующей вехи</h3>$milestone</div>
   <div class="card note"><b>Честно:</b> публикуем 100% исходов, включая убыточные.
-    Бэктест устойчивого края не показал — это инструмент и проверяемая история,
-    не обещание прибыли. Каждая сделка — в CSV с sha256 (/trackrecord).
+    Бэктест устойчивого края не показал, проверка исполнения по минутным свечам&nbsp;— /backtest.
+    Это инструмент и проверяемая история, не обещание прибыли. Каждая сделка — в CSV
+    с sha256 (/trackrecord).
     Не финансовый совет.</div>
   $foot
   <div class="self">Страница самодостаточна: без внешних скриптов и запросов.</div>
@@ -1046,7 +1047,7 @@ html,body{{width:1200px;height:630px;overflow:hidden}}
 </style></head><body><div class="card">
 <div class="top"><span class="rr-wm">RSI Range</span><span class="live">Живой терминал</span></div>
 <div class="num">{sign}{abs(total_r):.1f}R</div>
-<div class="sub">итог за всю историю · <b>{trades} {words}</b> · каждая в проверяемом журнале</div>
+<div class="sub">итог за всю историю, до комиссий<br><b>{trades} {words}</b> · каждая в проверяемом журнале</div>
 <div class="eq">{_equity_svg(equity, w=1104, h=196, pad=10)}</div>
 {_foot("CSV + SHA-256 · минусы не скрываются · 18+")}
 </div></body></html>"""

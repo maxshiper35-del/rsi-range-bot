@@ -893,6 +893,7 @@ function renderOverview(noAnim) {
       <div class="hero-sub"><span class="pill ${exp >= 0 ? "pos" : "neg"}">${fmtR(exp, 2)} на сделку</span>
         <span class="pill">${st.trades || 0} закрытых</span>
         <span class="pill">PF ${d.pf ? d.pf.toFixed(2) : "—"}</span></div>
+      <div class="foot-note">Цифры — по журналу, до комиссий · проверка исполнения по минутным свечам — /backtest</div>
     </div>
     <div class="hero-chart" data-lwc="eq">${pts.length < 2 ? `<div class="chart-empty">мало закрытий для кривой</div>` : ""}<div class="chart-read" id="eqRead"></div></div>
     <div class="hero-foot">${seg("data-eqp", [["30", "30Д"], ["90", "90Д"], ["all", "Всё"]], EQP, true)}
@@ -1012,18 +1013,19 @@ function simCard() {
   const levs = pk.sp.filter(v => v > 0).map(v => SIM_RISK / v);
   const levAvg = levs.length ? levs.reduce((a, v) => a + v, 0) / levs.length : 0;
   const levMax = levs.length ? Math.max(...levs) : 0;
-  const kj = SCOPE === "epoch" && DATA.kelly_epoch ? DATA.kelly_epoch : DATA.kelly_all;
+  // полу-Келли (DATA.kelly_*) не показываем: он из перевеса журнала до комиссий, а проверка
+  // исполнения по минутным свечам перевес не подтвердила — подсказка размера риска врала бы
   return `<section><div class="card-h"><h3>Симулятор депозита</h3><span class="aside">модель по журналу</span></div>
     <div class="row-f">${chipRow("data-risk", [["1", "риск 1%"], ["2", "2%"], ["5", "5%"]], String(SIM_RISK))}
       <button class="chip${SIM_COSTS ? " on" : ""}" data-costs="1">издержки</button></div>
     <div class="sim-hero"><span class="sim-start">${fmtUsd(SIM_BASE)} →</span>
       <b class="sim-bal ${cls(sim.bal - SIM_BASE)}">${fmtUsd(sim.bal)}</b>
-      <span class="pill ${sim.pct >= 0 ? "pos" : "neg"}">${fmtPct(sim.pct)}</span></div>
+      <span class="pill ${sim.pct >= 0 ? "pos" : "neg"}">${fmtPct(sim.pct)}</span>${SIM_COSTS ? "" : `<span class="pill ghost">до комиссий</span>`}</div>
     ${simGross ? `<div class="mystat">без издержек ${fmtUsd(simGross.bal)} · издержки съели ${costR.toFixed(1)}R</div>` : ""}
     <div class="plot">${simSVG(sim.series)}</div>
-    <div class="mystat" style="margin-top:10px">${rsim.length} сделок · макс. просадка <b class="dn">${MINUS}${sim.maxDD.toFixed(1)}%</b> · риск от текущего баланса${kj ? ` · полу-Келли по журналу ≈ ${kj.half}%` : ""}</div>
+    <div class="mystat" style="margin-top:10px">${rsim.length} сделок · макс. просадка <b class="dn">${MINUS}${sim.maxDD.toFixed(1)}%</b> · риск от текущего баланса</div>
     ${levs.length ? `<div class="mystat">плечо при риске ${SIM_RISK}%: в среднем <b>×${levAvg.toFixed(1)}</b> · максимум <b class="${levMax > 20 ? "dn" : ""}">×${levMax.toFixed(1)}</b>${levMax > 20 ? " — выше ×20, такие сделки пришлось бы брать меньшим риском" : ""}</div>` : ""}
-    <div class="foot-note">Модель по закрытым сделкам журнала (порядок закрытий). Издержки — как в бэктесте: комиссия тейкера 0.055% на сторону, проскальзывание 0.02%, фандинг 0.01%/8ч по времени в позиции; в R — через ход до стопа каждой сделки. Не прогноз и не гарантия.</div>
+    <div class="foot-note">Модель по закрытым сделкам журнала (порядок закрытий): выходы по часовым свечам, издержки упрощённые — комиссия тейкера 0.055% на сторону, проскальзывание 0.02%, фандинг 0.01%/8ч по времени в позиции; в R — через ход до стопа каждой сделки. Проверка исполнения по минутным свечам с полными издержками — в минус: /backtest. Не прогноз и не гарантия.</div>
   </section>`;
 }
 function simSVG(series) {
@@ -1193,14 +1195,14 @@ function btCard() {
   const f = s => s ? s.slice(8, 10) + "." + s.slice(5, 7) + "." + s.slice(0, 4) : "?";
   return `<section><div class="card-h"><h3>Бэктест 5 лет</h3><span class="aside">модель, не живой журнал</span></div>
     <div class="bt-wrap"><div class="bt">${g}</div></div>
-    <div class="bt-legend"><span><i class="lg"></i>модель (до ${lastModel})</span><span><i class="lg f"></i>факт (живой журнал)</span><span><i class="lg p"></i>текущий месяц</span></div>
+    <div class="bt-legend"><span><i class="lg"></i>модель (до ${lastModel})</span><span><i class="lg f"></i>факт (живой журнал, до комиссий)</span><span><i class="lg p"></i>текущий месяц</span></div>
     ${fk.length ? `<div class="mystat" style="margin-top:10px">факт с ${fk[0]}: <b>${fk.length}</b> мес. · <b class="${cls(fSum)}">${fmtR(fSum)}</b> · плюсовых <b>${fPos}/${fk.length}</b> — по живому журналу</div>` : ""}
     <div class="bt-stats"><span>плюсовых месяцев <b>${pos}/${n}</b> (${Math.round(pos / n * 100)}%)</span>
       <span>медиана <b>${fmtR(sorted[Math.floor(n / 2)])}</b></span><span>худший <b class="dn">${fmtR(sorted[0])}</b></span>
       <span>убыточных подряд <b>≤${worstRun}</b></span><span>сделок <b>${T.trades || "—"}</b></span>
       <span>на сделку <b>${T.expectancy_r != null ? fmtR(T.expectancy_r, 2) : "—"}</b></span>
       <span>просадка <b class="dn">${MINUS}${T.max_dd_r != null ? T.max_dd_r.toFixed(0) : "—"}R</b>${w ? ` <span class="mut">(${f(w.peak)} → ${f(w.trough)}, ${w.days} дн.)</span>` : ""}</span></div>
-    <div class="foot-note">Текущая конфигурация на 5-летней истории ${(BT.symbols || []).length} эталонных монет (${(BT.period || []).join(" → ")}), 1h+4h, тейкерские издержки и фандинг учтены. Прошлое ≠ будущее: монеты выбраны из выживших, ликвидность и слип на тонких альтах не смоделированы.</div></section>`;
+    <div class="foot-note">Модель на часовых свечах: 5-летняя история ${(BT.symbols || []).length} эталонных монет (${(BT.period || []).join(" → ")}), 1h+4h, тейкерские издержки и фандинг учтены. Выход по трейлу в этой модели завышен ≈0,13R на сделку; на минутных свечах с издержками — минус (/backtest). Прошлое ≠ будущее: монеты выбраны из выживших, ликвидность и слип на тонких альтах не смоделированы.</div></section>`;
 }
 
 const SKEL_HERO = `<div class="skel"><div class="sk t"></div><div class="sk big"></div><div class="sk w40"></div><div class="sk-chart"></div></div>`;
@@ -1253,7 +1255,7 @@ function renderTrades() {
     h += `<div class="rows">${TR.items.map(o => tradeRow(o, `${ddmm(o.d)}${o.h != null ? " · " + holdTxt(o.h) + " в сделке" : ""}`)).join("")}</div>
       ${TR.items.length < TR.total ? `<button class="btn more" data-trmore="1"${TR.loading ? " disabled" : ""}>${TR.loading ? "загрузка…" : `Показать ещё · ${TR.total - TR.items.length}`}</button>` : ""}`;
   }
-  h += `</section><div class="foot">Это та же история, что в /trackrecord у бота (CSV + SHA-256). Сделки без входа (лимитка не исполнилась) не считаются. ⚠ Не финансовый совет.</div>`;
+  h += `</section><div class="foot">Это та же история, что в /trackrecord у бота (CSV + SHA-256); цифры — по журналу, до комиссий, проверка исполнения по минутным свечам — /backtest. Сделки без входа (лимитка не исполнилась) не считаются. ⚠ Не финансовый совет.</div>`;
   const focused = document.activeElement && document.activeElement.id === "trq";
   const caret = focused ? document.activeElement.selectionStart : null;
   $("#app").innerHTML = h;
@@ -1314,7 +1316,8 @@ function renderAccount(noAnim) {
       <div class="eyebrow">Мой счёт<i class="sep"></i>с ${ddmm(a.since)}.${a.since.slice(0, 4)}${a.is_default ? `<span class="pill ghost" style="height:20px;font-size:10.5px">по умолчанию</span>` : ""}</div>
       <div class="hero-num" id="accNum">${heroUsd(a.balance)}</div>
       <div class="hero-sub"><span class="pill ${pnlC}">${fmtUsd(a.pnl_usd, true)} · ${fmtPct(a.pnl_pct)}</span>
-        <span class="pill">старт ${fmtUsd(a.start)} · риск ${+a.risk_pct}%</span></div>
+        <span class="pill">старт ${fmtUsd(a.start)} · риск ${+a.risk_pct}%</span>
+        <span class="pill ghost">по журналу, до комиссий</span></div>
     </div>
     <div class="hero-chart" data-lwc="acct">${pts.length < 2 ? `<div class="chart-empty">Сделок с твоего прихода ещё не закрылось — кривая появится с первой закрытой.</div>` : ""}<div class="chart-read" id="accRead"></div></div>
     <div class="hero-foot"><div class="meta" style="text-align:left">вчера ${y.trades ? `<b class="${cls(y.pnl_usd)}">${fmtUsd(y.pnl_usd, true)}</b> · ${y.wins}✓ ${y.losses}✕` : "<b>без сделок</b>"}</div>
@@ -1358,7 +1361,7 @@ function renderAccount(noAnim) {
     ${a.push_on === false ? "" : `<div class="set" style="margin-top:14px;border-top:1px solid var(--line2);padding-top:14px"><div class="lbl">Утренний отчёт в личку<small>около 06:00 UTC — что вчерашние сделки сделали со счётом (только если они были)</small></div>
       <div class="tgl ${a.push ? "on" : ""}" data-acpush="1" role="switch" aria-checked="${!!a.push}" aria-label="Утренний отчёт" tabindex="0"></div></div>`}
   </section>`);
-  h += sec(`<div class="foot">Это расчёт по опубликованным сделкам, не реальный счёт: сложный процент от текущего баланса, комиссии и проскальзывание не учтены, сделки до твоего прихода не входят. ⚠ Не финансовый совет. Прошлые результаты не определяют будущие.</div>`);
+  h += sec(`<div class="foot">Это расчёт по журналу опубликованных сделок, не реальный счёт: сложный процент от текущего баланса, до комиссий и проскальзывания, сделки до твоего прихода не входят. Проверка исполнения по минутным свечам — /backtest. ⚠ Не финансовый совет. Прошлые результаты не определяют будущие.</div>`);
   app.innerHTML = h;
   if (!noAnim && !REDUCED && !ACC_INTRO) { ACC_INTRO = true; countUp($("#accNum"), a.start, a.balance, heroUsd); }
 }
@@ -1476,7 +1479,7 @@ function renderMine(noAnim) {
   const ss = ME.since_stats, pos = ME.positions || [], tk = ME.taken || [];
   const fmtP = v => String(+v);
   let stat = ss && ss.trades
-    ? `с подписки${ME.since ? " · " + ddmm(ME.since) : ""}: <b class="${cls(ss.total_r || 0)}">${fmtR(ss.total_r || 0)}</b> · ${ss.trades} закрытых`
+    ? `с подписки${ME.since ? " · " + ddmm(ME.since) : ""} · по журналу, до комиссий: <b class="${cls(ss.total_r || 0)}">${fmtR(ss.total_r || 0)}</b> · ${ss.trades} закрытых`
     : "с подписки: закрытых сделок пока нет";
   const urs = pos.filter(o => o.ur != null);
   if (urs.length) {

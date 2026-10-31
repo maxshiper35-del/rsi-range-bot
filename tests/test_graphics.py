@@ -269,6 +269,18 @@ def test_weekly_card_footer_and_grammar():
     assert "Не финансовый совет" in html
 
 
+def test_cards_carry_journal_qualifier():
+    """Недельный отчёт канала, дашборд и og-карточка: итог — «по журналу, до комиссий»
+    (та же формулировка, что templates.JOURNAL_BASIS); плюс журнала не зовём «прибыльным»."""
+    from app.delivery import templates
+    week = graphics.build_weekly_card_html(_DATA)
+    assert f"Итог недели · {templates.JOURNAL_BASIS}" in week
+    assert "прибыльные" not in week and "плюсовые и минусовые" in week
+    dash = graphics.build_dashboard_html(_DASH)
+    assert templates.JOURNAL_BASIS in dash and "по минутным свечам&nbsp;— /backtest" in dash
+    assert "итог за всю историю, до комиссий" in graphics.build_og_card_html(9.2, 228, [1.0])
+
+
 def test_signal_chart_tags_fit_card_and_never_overlap():
     """DOOD-случай (сигнал 23.10): свечи на порядок шире уровней — теги вход/стоп/тейк
     наползали друг на друга нечитаемой кашей, а SVG был шире карточки (теги за краем)."""

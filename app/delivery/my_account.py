@@ -33,7 +33,9 @@ PUBLIC_STATUSES = ("tp1", "tp2", "tp3", "stopped")
 # Позже полудня «утренний» отчёт про вчера уже не к месту — пропуск лучше вечернего пуша
 PUSH_HOUR_START, PUSH_HOUR_END = 6, 12
 
-_DISCLAIMER = "Это расчёт по опубликованным сделкам, не реальный счёт. Не финансовый совет."
+# «по журналу, до комиссий» — общая оговорка агрегатов (templates.JOURNAL_BASIS, замер 30.10)
+_DISCLAIMER = ("Это расчёт по журналу опубликованных сделок до комиссий, а не реальный счёт. "
+               "Не финансовый совет.")
 _LINE = "━━━━━━━━━━━━━━"
 _MINUS = "−"                                   # типографский минус, как в дашборде
 
@@ -290,8 +292,7 @@ def render_push(acc: Account | None) -> str | None:
     hint = "\n💡 <code>/depo 500</code> — на свой депозит" if acc.is_default else ""
     return (f"💼 Твой счёт за вчера: <b>{fmt_usd(y.pnl_usd, True)}</b> ({_wl(y)}) · "
             f"с {_ddmm(acc.since)}: {fmt_usd(acc.start)} → <b>{fmt_usd(acc.balance)}</b>"
-            f"{hint}\n<i>Расчёт по опубликованным сделкам, не реальный счёт. "
-            f"Не финансовый совет.</i>")
+            f"{hint}\n<i>{_DISCLAIMER}</i>")
 
 
 def card_data(acc: Account, bot_username: str | None = None) -> dict:

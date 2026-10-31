@@ -104,6 +104,7 @@ def test_render_push_text_and_silence_on_empty_day():
     assert "Твой счёт за вчера: <b>+$20</b> (2 ✅ / 1 🛑)" in txt
     assert "с 28.10: $1 000 → <b>$1 020</b>" in txt
     assert "не реальный счёт" in txt and "Не финансовый совет" in txt
+    assert "по журналу" in txt and "до комиссий" in txt           # $ из R — расчёт журнала
     # вчера ничего не закрылось -> не шлём вовсе; юзер неизвестен -> тоже
     assert M.render_push(_acc([_row(2.0, "2026-10-28T20:00:00+00:00")])) is None
     assert M.render_push(None) is None
@@ -120,6 +121,7 @@ def test_render_account_texts():
     txt = M.render_account(acc)
     assert "$1 000 → <b>$1 020</b>" in txt and "+2.0%" in txt
     assert M._DISCLAIMER in txt and "Вчера: <b>+$20</b>" in txt
+    assert "по журналу" in M._DISCLAIMER and "до комиссий" in M._DISCLAIMER
     default = M.compute_account([], start_usd=1000, risk_pct=1, joined_at=_JOIN, now=_NOW,
                                 is_default=True)
     empty = M.render_account(default)

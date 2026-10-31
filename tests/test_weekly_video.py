@@ -28,7 +28,7 @@ def test_summary_honest_worst_and_no_taxonomy():
     html = wv.build_week_frame_html("p", TRADES, 5, summary=True, outro=1.0)
     assert "стоп −1R × 3" in html                      # не «случайная» худшая из равных −1R
     assert "Монеты недели" in html and "ZEC" in html
-    assert "все закрытые сделки, без отбора" in html and "до комиссий" in html
+    assert "все закрытые сделки, без отбора" in html and "по журналу, до комиссий" in html
     for leak in ("6226", "LTF", "SMC", "setup", "scores"):
         assert leak not in html
 

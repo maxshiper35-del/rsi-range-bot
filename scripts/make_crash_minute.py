@@ -297,15 +297,16 @@ def frames(c: Crash) -> kit.Timeline:
             "Bybit, BTC/USDT</div></div>")
     tl.add(kit.page(hook, _CSS, glow="rgba(241,101,101,.18)"), 1.9, "loss")
 
-    # 2. поминутно: свеча растёт, цена и время тикают, события — чипами
+    # 2. поминутно: свеча растёт, цена и время тикают, события — чипами. Только стопы:
+    # стоп стоит на уровне, и минута его касания — реальная. Выход по трейлу журнал судит
+    # по часовым свечам, а настоящий трейлинг-стоп на минутах выходит раньше и хуже (замер
+    # 30.10) — чип «трейлинг» в минуту касания уровня журнала выдавал бы расчёт за факт
     events: list[tuple[pd.Timestamp, str, str]] = []
     for e in c.exits:
-        if e.minute is not None and t0 <= e.minute < t0 + pd.Timedelta(hours=1):
-            win = float(e.trade["result_r"]) > 0
-            what = "трейлинг" if win else "стоп"
-            events.append((e.minute, "w" if win else "l",
-                           f"{'✅' if win else '🛑'} {esc(coin(e.trade['symbol']))} "
-                           f"{_SIDE[e.trade['side']]} бота — {what}"))
+        if e.minute is not None and t0 <= e.minute < t0 + pd.Timedelta(hours=1) \
+                and float(e.trade["result_r"]) <= 0:
+            events.append((e.minute, "l", f"🛑 {esc(coin(e.trade['symbol']))} "
+                                          f"{_SIDE[e.trade['side']]} бота — стоп"))
     sh = c.sharpest
     events.append((sh["dt"], "a", f"⚡ {money(float(sh['close']) - float(sh['open']), sign=True)} "
                                   "за 60 секунд"))
@@ -354,7 +355,7 @@ def frames(c: Crash) -> kit.Timeline:
     win_end = max((e.minute for e in c.exits if e.minute is not None), default=t0)
     head = (f"<div class='sh'>Сделки бота</div><div class='ss'>{t0:%H:%M}–"
             f"{(win_end + pd.Timedelta(minutes=1)).ceil('h'):%H:%M} UTC · все закрытые, без отбора"
-            "</div>")
+            "<br>по журналу (часовые свечи), до комиссий</div>")
 
     def rows_html(k: int) -> str:
         out = []
@@ -415,17 +416,11 @@ def frames(c: Crash) -> kit.Timeline:
                 "</div></div>")
         tl.add(kit.page(body, _CSS, glow="rgba(241,101,101,.12)"), 4.4, "loss")
 
-    # 5. урок
-    gaps = [abs(float(e.trade["exit_price"]) / e.extreme - 1) * 100 for e in c.exits
-            if float(e.trade["result_r"]) > 0 and e.extreme]
-    tail = ""
-    if gaps and c.down:
-        tail = ("А трейлинг держал шорты, пока цена падала: выход не дальше "
-                f"<b>{num(max(gaps), 1)}%</b> от дна.")
+    # 5. урок — только про стоп. «Трейлинг держал шорты… выход не дальше X% от дна» снят:
+    # X считался от выхода журнала (часовые свечи), реальный трейл на минутах вышел бы хуже
     body = (kit.brand_row(tag) +
             "<div class='sc'><div class='ls1'>Стоп не спасает от минуса.<br>"
-            "<em>Он делает минус маленьким.</em></div>"
-            f"<div class='ls2'>{tail}</div></div>")
+            "<em>Он делает минус маленьким.</em></div></div>")
     tl.add(kit.page(body, _CSS), 3.4, "tick")
 
     # 6. финал
@@ -453,8 +448,9 @@ def caption(c: Crash) -> kit.Caption:
             f"{t0:%d.%m.%Y} в {t0:%H:%M} UTC биткоин за час упал с {money(float(c.bar['open']))} "
             f"до {money(c.extreme)} ({pct(c.move_pct)}). Сделки бота в этот час и сразу после — "
             f"все, без отбора: {kit.plural(n_loss, 'стоп', 'стопа', 'стопов')} по −1R, шорты "
-            f"вышли по трейлингу, итог {rr(total)}. {no_stop}R — в долях риска, до комиссий. "
-            f"Все сделки — в Telegram: {kit.BOT}. {kit.NOT_ADVICE}."),
+            f"вышли по трейлингу журнала (часовые свечи), итог по журналу {rr(total)}. "
+            f"{no_stop}R — в долях риска, до комиссий; проверка исполнения по минутным "
+            f"свечам — /backtest в боте. Все сделки — в Telegram: {kit.BOT}. {kit.NOT_ADVICE}."),
         hashtags="#биткоин #крипта #трейдинг #стоплосс #обвал",
     )
 

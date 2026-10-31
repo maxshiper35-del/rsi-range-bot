@@ -18,6 +18,22 @@ from app.core.signal_engine import Signal
 
 LINE = "━━━━━━━━━━━━━━"
 
+
+def _cap(s: str) -> str:
+    return s[:1].upper() + s[1:]
+
+
+# --- оговорка агрегатов журнала (замер 30.10.2026: docs/measurements/2026-10-30-trail-realism.md)
+# Журнал судит выходы по часовым свечам и без издержек: на минутных свечах трейлинг-стоп
+# выходит хуже (~0.13R на сделку), а после комиссии, слипа и фандинга (~0.15R) те же правила
+# в минусе на всех проверенных отрезках. Любой агрегат журнала на юзер-поверхности (итог R,
+# матожидание, $ из R) идёт с этой оговоркой — одной короткой строкой на экран или пост, не
+# стеной дисклеймеров. «Демо»/«виртуальные деньги» не пишем (запрет владельца 30.10).
+JOURNAL_BASIS = "по журналу, до комиссий"
+EXEC_CHECK = "проверка исполнения по минутным свечам — /backtest"
+JOURNAL_NOTE = f"ℹ️ Цифры — {JOURNAL_BASIS}. {_cap(EXEC_CHECK)}"          # экраны статистики
+CHANNEL_JOURNAL_NOTE = f"{_cap(JOURNAL_BASIS)}. {_cap(EXEC_CHECK)} у @rsirange_bot"  # канал
+
 # --- граница публикации стратегии (мандат владельца: конструкция сетапов — секрет) ---
 # Санитизация ТОЛЬКО на рендере: snapshot_json хранит полные reasons для админ-разбора,
 # а наружу конструкция (фибо-рецепт, параметры входа от блока) не уходит. Найдено
@@ -167,7 +183,8 @@ def _proof_line(stats: dict | None) -> str:
     if not stats or not stats.get("trades"):
         return ""
     return (f"📊 {stats['trades']} закрытых · winrate {stats['winrate'] * 100:.0f}% · "
-            f"матож. {stats['expectancy_r']:+.2f}R/сделку — всё проверяемо (/trackrecord)\n")
+            f"матож. {stats['expectancy_r']:+.2f}R/сделку {JOURNAL_BASIS} — "
+            "всё проверяемо (/trackrecord)\n")
 
 
 def render_teaser(sig: Signal, signal_id: int, stats: dict | None = None,
@@ -295,6 +312,7 @@ def render_weekly_digest(period_label: str, wk: dict, st: dict,
     а не в абстрактных R (ретеншн 28.10); ask_depo — без депозита предложить /depo."""
     wr = wk.get("winrate", 0) * 100
     usd_line = ""
+    usd_shown = bool(depo and wk.get("trades"))     # сумма в $ из R — оговорка называет и её
     if depo and wk.get("trades"):
         dep, risk = depo
         usd = wk.get("total_r", 0) * dep * risk / 100
@@ -312,8 +330,9 @@ def render_weekly_digest(period_label: str, wk: dict, st: dict,
             "Полные сигналы без лимита: /subscribe\n"
         )
     # «сколько чистого движения забрали» (фидбэк владельца 30.08): сумма хода цены
-    # в пользу сделок за неделю, без плеча — плюсовые ходы минус отданное стопами
-    week_move = (f"Чистого хода забрано: <b>{wk['total_move_pct']:+.1f}%</b> (без плеча)\n"
+    # в пользу сделок за неделю, без плеча — плюсовые ходы минус отданное стопами.
+    # Не «забрано»: это ход по выходам журнала, а не взятая кем-то прибыль (замер 30.10)
+    week_move = (f"Чистый ход сделок: <b>{wk['total_move_pct']:+.1f}%</b> (без плеча)\n"
                  if wk.get("total_move_pct") is not None and wk.get("trades") else "")
     all_move = (f" · хода {st['total_move_pct']:+.0f}%"
                 if st.get("total_move_pct") is not None else "")
@@ -328,8 +347,9 @@ def render_weekly_digest(period_label: str, wk: dict, st: dict,
         f"{missed_block}{LINE}\n"
         f"За всё время: {st.get('trades', 0)} сделок · матож. "
         f"<b>{st.get('expectancy_r', 0):+.2f}R</b> · итог {st.get('total_r', 0):+.1f}R{all_move}\n"
-        "Полная статистика и журнал: /stats\n"
-        "⚠️ Не финсовет. Прошлые результаты не определяют будущие."
+        f"Полная статистика и журнал: /stats · {EXEC_CHECK}\n"
+        f"⚠️ {'R и $' if usd_shown else 'R'} — расчёт {JOURNAL_BASIS}. Не финсовет. "
+        "Прошлые результаты не определяют будущие."
     )
 
 
@@ -392,8 +412,8 @@ def render_trial_last_day(free_per_week: int, st: dict) -> str:
     proof = ""
     if st.get("trades"):
         proof = (f"📊 Журнал как есть: {st['trades']} закрытых сделок, в плюс "
-                 f"{st.get('winrate', 0) * 100:.0f}%, итог {st.get('total_r', 0):+.1f}R — "
-                 "минусы не прячем (/stats).\n\n")
+                 f"{st.get('winrate', 0) * 100:.0f}%, итог {st.get('total_r', 0):+.1f}R "
+                 "до комиссий — минусы не прячем (/stats).\n\n")
     return (
         "⏳ <b>Полный доступ заканчивается завтра</b>\n"
         "Бесплатно остаётся навсегда:\n"
@@ -455,6 +475,7 @@ def render_milestone(milestone: int, st: dict) -> str:
         f"Winrate: <b>{st.get('winrate', 0) * 100:.0f}%</b> · "
         f"матожидание <b>{st.get('expectancy_r', 0):+.2f}R</b> · "
         f"итог <b>{st.get('total_r', 0):+.1f}R</b>\n"
+        f"{CHANNEL_JOURNAL_NOTE}\n"
         "Каждый исход записан автоматически по ценам биржи — без ручных правок.\n"
         "Полный CSV с sha256: /trackrecord у @rsirange_bot\n"
         f"{LINE}\n⚠️ Не финансовый совет. Прошлые результаты не определяют будущие."
@@ -498,12 +519,14 @@ def render_result(c: dict, display_leverage: float = 0.0, streak: dict | None = 
                          f"  (движение цены {pct:+.2f}%)\n")
         else:
             move_line = f"Движение цены: {pct:+.2f}%\n"
+    # одна строка оговорки на пост: R сделки, сумма серии и «при плече ×N» — всё из журнала
     return (
         f"{head}\n{_c_head(c)}\n"
         f"Результат: <b>{r:+.2f}R</b>  {emoji}\n"
         f"{move_line}{LINE}\n"
         f"{_streak_footer(streak)}"
-        "Вся статистика честно: /stats у @rsirange_bot"
+        f"{'R и %' if move_line else 'R'} — расчёт {JOURNAL_BASIS}. "
+        "Вся статистика: /stats у @rsirange_bot"
     )
 
 
@@ -531,25 +554,18 @@ def personal_size_line(sig, depo_usd: float, risk_pct: float, max_leverage: int 
             f"\n   Настроено /depo: ${depo_usd:g}, {risk_pct:g}% на сделку")
 
 
-_XRAY_SCORE_LABELS = (
-    ("bias", "контекст старшего ТФ"),
-    ("trigger", "качество слома структуры"),
-    ("sweep", "съём ликвидности"),
-    ("confl", "конфлюэнс зоны входа"),
-)
-
-
 def render_xray(x: dict) -> str:
     """«Рентген сделки» (deep-link из канала): почему движок вошёл и как вёл позицию.
 
-    Никто на рынке не показывает «почему» — все показывают «что». Рентген = наше УТП
-    честности: суб-скоры confidence, путь трейлинга, тайминги. Только факты журнала.
-    x — journal.signal_xray; scores может не быть (сигналы до 11.08.2026)."""
+    Никто на рынке не показывает «почему» — все показывают «что». Рентген: уверенность
+    движка (то же число, что в посте сигнала), путь трейлинга, тайминги — только факты
+    журнала. Суб-скоры confidence (x["scores"]) наружу не идут: это внутренняя таксономия
+    скоринга, та же граница, что у публичного CSV и /api/backtest (правило владельца)."""
     r = x.get("result_r")
     if x["status"] == "expired":
         head_r = "не исполнился (лимитка истекла)"
     else:
-        head_r = f"итог <b>{r:+.2f}R</b>" if r is not None else "итог —"
+        head_r = f"итог по журналу <b>{r:+.2f}R</b>" if r is not None else "итог —"
     lines = [
         f"🔬 <b>Рентген сделки #{x['id']}</b>",
         # тег сетапа НЕ публикуется (собственность стратегии — фидбэк владельца 13.08;
@@ -564,17 +580,7 @@ def render_xray(x: dict) -> str:
         lines.append(f"Лимитка ждала филла {x['wait_hours']:g}ч"
                      + (f", в позиции {x['hold_hours']:g}ч"
                         if x.get("hold_hours") is not None else ""))
-    scores = x.get("scores")
-    if scores:
-        lines.append(f"{LINE}\nПочему вход (confidence {x['confidence']:.2f}):")
-        for key, label in _XRAY_SCORE_LABELS:
-            if key in scores:
-                v = float(scores[key])
-                bar = "█" * round(v * 5) + "░" * (5 - round(v * 5))
-                lines.append(f" {bar} {label}: {v:.2f}")
-    else:
-        lines.append(f"{LINE}\nConfidence {x['confidence']:.2f} "
-                     "(суб-скоры не записывались — сигнал до 11.08.2026)")
+    lines.append(f"{LINE}\nУверенность движка: {int(x['confidence'] * 100)}% (как в сигнале)")
     flags = []
     if x.get("swept"):
         flags.append("свип ликвидности перед входом — был")

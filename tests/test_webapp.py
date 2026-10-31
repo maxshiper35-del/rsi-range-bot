@@ -87,6 +87,12 @@ def test_index_served(fresh_db):
         assert r.status_code == 200
         body = r.get_data(as_text=True)
         assert "живой терминал" in body and "Не финансовый совет" in body
+        # итоги журнала — с оговоркой и ссылкой на минутную проверку; полу-Келли (размер
+        # риска под перевес журнала до комиссий, не подтверждённый проверкой) не показываем
+        from app.delivery import templates
+        assert body.count(templates.JOURNAL_BASIS) >= 4      # обзор, сделки, счёт, «моё»
+        assert "проверка исполнения по минутным свечам — /backtest" in body
+        assert "полу-Келли по журналу" not in body and "kj.half" not in body
 
 def test_api_me_rejects_without_or_bad_signature(fresh_db, webapp_token):
     """Платный слой без валидной подписи Telegram не отдаётся: 401 и no-store."""
