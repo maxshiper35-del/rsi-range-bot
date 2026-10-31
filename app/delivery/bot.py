@@ -2553,11 +2553,13 @@ def main() -> None:
                                         my_account.card_data(acc, bot_info["username"]))
             except Exception as e:                     # noqa: BLE001 — рендер не критичен
                 log.warning("счёт png %s: %s", uid, e)
-        if png:
+        if png and caption_fits(text):
             await bot.send_photo(chat_id, BufferedInputFile(png, filename="my_account.png"),
                                  caption=text, parse_mode="HTML", reply_markup=kb)
-        else:
-            await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+            return
+        if png:                                         # подпись > 1024: карточка, текст ниже
+            await bot.send_photo(chat_id, BufferedInputFile(png, filename="my_account.png"))
+        await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
 
     @dp.message(Command("account"))
     async def _account_cmd(m):
