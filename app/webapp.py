@@ -1255,8 +1255,6 @@ def api_stats() -> Response:
         "last_closed": _last_closed_public(),
         "r_all": r_all, "sp_all": sp_all, "h_all": h_all,
         "r_epoch": r_ep, "sp_epoch": sp_ep, "h_epoch": h_ep,
-        "kelly_all": journal.kelly_stats(),
-        "kelly_epoch": journal.kelly_stats(epoch) if epoch else None,
         "split_all": _splits(),
         "split_epoch": _splits(epoch) if epoch else None,
         "daily_all": _daily(),

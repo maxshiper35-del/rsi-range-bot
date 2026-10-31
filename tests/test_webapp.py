@@ -52,6 +52,8 @@ def test_api_stats_shape_and_no_strategy_leak(fresh_db):
         for key in ("all", "equity_all", "open_signals", "generated_at"):
             assert key in payload
         assert "setup" not in raw and "6226" not in raw        # стратегия не утекает
+        # полу-Келли из журнала до комиссий снят со страницы (31.10) — и из публичного JSON
+        assert "kelly_all" not in payload and "kelly_epoch" not in payload
         o = payload["open_signals"][0]
         assert o["symbol"] == "BTC" and o["side"] == "LONG"
         assert o["in_pos"] is False                            # лимитка ещё не исполнена
