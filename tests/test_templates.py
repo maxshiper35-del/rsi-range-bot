@@ -260,6 +260,31 @@ def test_trail_only_exit_line_states_tp_is_reference():
     assert "ориентир" not in templates.trail_line(sig)
 
 
+def test_journal_qualifier_on_paywall_digest_and_channel_posts():
+    """Агрегаты журнала на пейволле, в дайджесте и постах канала — «по журналу, до комиссий»
+    (минутная проверка 30.10 ушла в минус); $ из R названы расчётом; «забрано» не пишем."""
+    basis = templates.JOURNAL_BASIS
+    st = {"trades": 431, "open": 5, "winrate": 0.39, "expectancy_r": 0.11, "total_r": 48.6}
+    teaser = templates.render_teaser(_sig(), 812, stats=st, open_channel="@rsi_range")
+    assert f"матож. +0.11R/сделку {basis}" in teaser
+    assert basis in templates.render_winback("wb1", 7, 5, stats=st)
+    assert "итог +48.6R до комиссий" in templates.render_trial_last_day(7, st)
+    assert templates.CHANNEL_JOURNAL_NOTE in templates.render_milestone(500, st)
+    res = templates.render_result(_closed(), display_leverage=10.0,
+                                  streak={"n": 10, "sum_r": 3.4, "wins": 5})
+    assert f"R и % — расчёт {basis}" in res and "/stats" in res
+    old = _closed()
+    del old["price_move_pct"]
+    assert f"R — расчёт {basis}" in templates.render_result(old)
+    wk = {"trades": 10, "wins": 4, "losses": 6, "winrate": 0.4, "total_r": 5.0,
+          "total_move_pct": 7.4}
+    plain = templates.render_weekly_digest("20.10–26.10", wk, st)
+    assert f"⚠️ R — расчёт {basis}" in plain and templates.EXEC_CHECK in plain
+    assert "Чистый ход сделок: <b>+7.4%</b>" in plain and "забрано" not in plain
+    usd = templates.render_weekly_digest("20.10–26.10", wk, st, depo=(1000.0, 1.0))
+    assert f"⚠️ R и $ — расчёт {basis}" in usd and usd.count(basis) == 1
+
+
 def test_weekly_digest_usd_line_for_user_deposit():
     wk = {"trades": 10, "wins": 4, "losses": 6, "winrate": 0.4, "total_r": 5.0}
     st = {"trades": 417, "open": 3, "expectancy_r": 0.12, "total_r": 48.8}

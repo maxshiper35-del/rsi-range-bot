@@ -195,7 +195,8 @@ def build_week_frame_html(period: str, trades: list[dict], k: int, *, summary: b
                 f"<div class='oline'>{n_trades(st['n'])} · винрейт {wr}%<br>"
                 f"все закрытые сделки, без отбора</div>"
                 f"<div class='cta'>{cta} {_esc(channel)}</div>"
-                f"<div class='note'>R — в долях риска, до комиссий · не финансовый совет"
+                f"<div class='note'>R — в долях риска, по журналу, до комиссий · "
+                f"не финансовый совет"
                 f"</div></div>")
     return (
         f"<style>{_CSS}{_WEEK_CSS}</style><div class='page'>"
@@ -205,7 +206,7 @@ def build_week_frame_html(period: str, trades: list[dict], k: int, *, summary: b
         f"<div class='hero'><div class='hl'>{hero}</div>"
         f"<div class='hv {cls}'>{val}</div><div class='hs'>{sub}</div></div>"
         f"<div class='eq'>{equity_svg(st['cum'], k)}</div>{body}"
-        f"<div class='foot'><div>R — в долях риска, до комиссий</div>"
+        f"<div class='foot'><div>R — в долях риска, по журналу, до комиссий</div>"
         f"<div>не финансовый совет</div></div>{over}</div>")
 
 

@@ -255,8 +255,8 @@ def frames(d: Diary, notes: dict[int, str] | None = None) -> kit.Timeline:
                 "<div class='h-q'>Сколько на&nbsp;счёте?</div>"
                 f"<div class='vault'><div class='v-l'>НА СЧЁТЕ</div><div class='v-box'>"
                 f"<div class='v-n'>{scr}</div><div class='v-q'>{q}</div></div>"
-                f"<div class='sub'>старт {d.days[0][0]:%d.%m} · {money(START_BALANCE)} · "
-                "расчёт по журналу</div></div></div>")
+                f"<div class='sub'>старт {d.days[0][0]:%d.%m} · {money(START_BALANCE)}<br>"
+                "расчёт по журналу, до комиссий</div></div></div>")
         tl.add(kit.page(body, _CSS), 0.1, "tick" if k == 0 else None)
 
     # 2. вчера: честно, даже если минус

@@ -166,6 +166,25 @@ def test_format_about_contains_disclaimer_parts(fresh_db):
     assert "Cornix" in txt
 
 
+def test_journal_qualifier_on_stats_about_and_channel(fresh_db):
+    """Агрегаты журнала (итог R, матожидание) — с оговоркой «по журналу, до комиссий» и
+    ссылкой на минутную проверку /backtest: журнал судит по часовым свечам и без издержек,
+    минутная проверка 30.10 ушла в минус. Одна строка на экран/пост, не стена дисклеймеров."""
+    from app.delivery import templates
+    st = {"trades": 150, "open": 2, "wins": 60, "losses": 90, "winrate": 0.4,
+          "expectancy_r": 0.11, "total_r": 16.5}
+    stats = bot.format_stats(st)
+    assert templates.JOURNAL_NOTE in stats and stats.count(templates.JOURNAL_BASIS) == 1
+    assert "/backtest" in stats and "без ручных правок" in stats
+    about = bot.format_about()
+    assert templates.JOURNAL_BASIS in about and "по минутным свечам" in about
+    assert "по факту исполнения" not in about and "12 мес" not in about
+    assert "часовой модели и до комиссий" in bot.format_backtest_summary()
+    for txt in (bot.format_channel_stats(st), bot.format_channel_live_board(st, {})):
+        assert templates.CHANNEL_JOURNAL_NOTE in txt and "@rsirange_bot" in txt
+    assert "/backtest" not in bot.format_stats({"trades": 0, "open": 0})   # нет цифр — нет оговорки
+
+
 def test_format_backtest_summary():
     txt = bot.format_backtest_summary()
     assert "смоделированный" in txt          # CFTC 4.41-стиль дисклеймера
@@ -1360,7 +1379,26 @@ def test_render_xray_without_scores_survives():
          "scores": None, "swept": False, "clean_impulse": False, "reasons": [],
          "wait_hours": None, "hold_hours": None, "trail_moves": 0, "trail_peak_r": None}
     txt = templates.render_xray(x)
-    assert "не исполнился" in txt and "до 11.08.2026" in txt
+    assert "не исполнился" in txt and "Уверенность движка: 61%" in txt
+    assert "суб-скор" not in txt
+
+
+def test_render_xray_hides_sub_scores():
+    """Суб-скоры confidence — внутренняя таксономия скоринга: в рентгене только итоговая
+    уверенность (то же число, что «🔎 N%» в посте сигнала), итог — «по журналу»."""
+    from app.delivery import templates
+    x = {"id": 812, "symbol": "SOL/USDT:USDT", "side": "LONG", "timeframe": "1h",
+         "status": "stopped", "setup": "LTF-OB", "entry": 150.0, "stop": 147.0,
+         "exit_price": 157.8, "result_r": 2.6, "confidence": 0.72, "stop_pct": 2.0,
+         "scores": {"bias": 0.8, "trigger": 0.6, "sweep": 1.0, "confl": 0.4},
+         "swept": True, "clean_impulse": True, "reasons": [], "wait_hours": 2.0,
+         "hold_hours": 9.0, "trail_moves": 4, "trail_peak_r": 2.85}
+    txt = templates.render_xray(x)
+    assert "Уверенность движка: 72% (как в сигнале)" in txt
+    assert "итог по журналу <b>+2.60R</b>" in txt
+    for leak in ("█", "░", "контекст старшего ТФ", "слома структуры", "конфлюэнс",
+                 "0.80", "confidence", "LTF"):
+        assert leak not in txt, leak
 
 
 def test_parse_alert_args():

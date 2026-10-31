@@ -89,7 +89,8 @@ def _head(channel: str, eyebrow: str) -> str:
 
 def _slide(inner: str, page: int, pages: int) -> str:
     return (f"<style>{_SLIDE_CSS}</style><div class='sl'>{inner}"
-            f"<div class='foot'><div>R — в долях риска, до комиссий · не финансовый совет</div>"
+            f"<div class='foot'><div>R — в долях риска, по журналу, до комиссий · "
+            f"не финансовый совет</div>"
             f"<div>{page}/{pages}</div></div></div>")
 
 
@@ -134,10 +135,10 @@ def build_carousel_html(period: str, trades: list[dict],
         + "<div class='h1'>Что такое R</div><div class='pts'>"
           "<div class='pt'><b>1R</b> — сумма, которую готовы потерять на сделке: "
           "расстояние от входа до стопа.</div>"
-          "<div class='pt'><b class='neg'>−1R</b> — сработал стоп. Убыток ровно такой, "
-          "как и планировали.</div>"
-          "<div class='pt'><b class='pos'>+2R</b> — прибыль в два риска. "
-          "Риск 10 $ → +20 $.</div>"
+          "<div class='pt'><b class='neg'>−1R</b> — сработал стоп: минус в один риск "
+          "(плюс комиссии и проскальзывание).</div>"
+          "<div class='pt'><b class='pos'>+2R</b> — плюс в два риска: "
+          "риск 10 $ → +20 $ до комиссий.</div>"
           "<div class='pt'>Считаем все сделки подряд, с минусами — "
           "иначе статистика врёт.</div></div>", pages - 1, pages))
     out.append(_slide(
@@ -169,16 +170,17 @@ def build_story_html(period: str, trades: list[dict], channel: str = "@rsi_range
           f"{_tiles(trades, st['n'])}"
         + f"<div class='scta'>Все сделки — в {_esc(channel)}</div>"
         + "<div class='hs' style='margin-top:22px'>все закрытые сделки, без отбора · "
-          "R до комиссий · не финансовый совет</div></div>")
+          "R по журналу, до комиссий · не финансовый совет</div></div>")
 
 
 def captions(period: str, trades: list[dict], channel: str = "@rsi_range") -> dict[str, str]:
     """Подписи к видео-итогу и карусели — в формате, согласованном для публикаций."""
     st = week_stats(trades)
     base = (f"Итог дня {period}: {n_trades(st['n'])}, {st['wins']} в плюс / {st['losses']} "
-            f"в минус, {_r(st['total'])} до комиссий. Все сделки, без отбора. "
+            f"в минус, {_r(st['total'])} по журналу, до комиссий. Все сделки, без отбора. "
             f"Сигналы — в Telegram: {channel}. Не финансовый совет. {TAGS}")
-    carousel = (f"Итог дня {period}: {_r(st['total'])} до комиссий ({n_trades(st['n'])}). "
+    carousel = (f"Итог дня {period}: {_r(st['total'])} по журналу, до комиссий "
+                f"({n_trades(st['n'])}). "
                 "Листайте: все сделки дня и как читать R. "
                 f"Сигналы — в Telegram: {channel}. Не финансовый совет. {TAGS}")
     return {"video": base, "carousel": carousel, "story": f"Итог дня: {_r(st['total'])}"}
