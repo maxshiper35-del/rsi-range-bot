@@ -88,24 +88,26 @@ def cohorts(rows: list[sqlite3.Row], now: str) -> list[str]:
 
 def payments_by_day(conn: sqlite3.Connection, now: datetime, admins: set[int]) -> list[str]:
     since = (now - timedelta(days=7)).isoformat()
-    out = ["| день | Stars, оплат | Stars, ⭐ | USDT-заявок подтверждено |", "|---|---:|---:|---:|"]
-    days: dict[str, list[float]] = collections.defaultdict(lambda: [0, 0.0, 0])
-    for r in conn.execute("SELECT tg_id, amount, paid_at FROM payments WHERE status='paid' "
-                          "AND method='stars' AND paid_at >= ?", (since,)):
+    out = ["| день | Stars, оплат | Stars, ⭐ | USDT авто, оплат | USDT авто, $ "
+           "| USDT вручную (/grant) |", "|---|---:|---:|---:|---:|---:|"]
+    days: dict[str, list[float]] = collections.defaultdict(lambda: [0, 0.0, 0, 0.0, 0])
+    for r in conn.execute("SELECT tg_id, method, amount, paid_at FROM payments "
+                          "WHERE status='paid' AND paid_at >= ?", (since,)):
         if r["tg_id"] in admins:
             continue
         d = days[r["paid_at"][:10]]
-        d[0] += 1
-        d[1] += r["amount"]
+        col = 0 if r["method"] == "stars" else 2        # cryptobot — авто-USDT (Crypto Pay)
+        d[col] += 1
+        d[col + 1] += r["amount"]
     for r in conn.execute("SELECT tg_id, resolved_at FROM usdt_claims "
                           "WHERE resolved_at >= ?", (since,)):
         if r["tg_id"] not in admins:
-            days[r["resolved_at"][:10]][2] += 1
+            days[r["resolved_at"][:10]][4] += 1
     for day in sorted(days):
-        n, stars, usdt = days[day]
-        out.append(f"| {day} | {int(n)} | {stars:g} | {int(usdt)} |")
+        n, stars, un, usd, claims = days[day]
+        out.append(f"| {day} | {int(n)} | {stars:g} | {int(un)} | {usd:g} | {int(claims)} |")
     if len(out) == 2:
-        out.append("| — | 0 | 0 | 0 |")
+        out.append("| — | 0 | 0 | 0 | 0 | 0 |")
     return out
 
 

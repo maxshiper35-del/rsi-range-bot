@@ -1875,8 +1875,19 @@ def _bg_task_done(task: asyncio.Task) -> None:
 
 # сбой одного и того же блока обслуживания — алерт админам не чаще раза в 6 ч
 MAINT_ALERT_EVERY_S = 6 * 3600
-# сообщение об истечении доступа, не ушедшее из-за сети/Telegram, повторяем до суток
+# сообщение об истечении доступа, не ушедшее из-за сети/Telegram: повтор раз в 5 мин, до суток
 EXPIRE_NOTIFY_RETRY_S = 24 * 3600
+EXPIRE_NOTIFY_RETRY_EVERY_S = 300
+
+
+def _transient_send_error(e: Exception) -> bool:
+    """Сбой, который проходит сам: сеть, 5xx/429 Telegram, занятая БД. Битый текст,
+    Forbidden и ошибки в коде повтором не лечатся."""
+    import sqlite3
+
+    from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter, TelegramServerError
+    return isinstance(e, (TelegramNetworkError, TelegramRetryAfter, TelegramServerError,
+                          OSError, sqlite3.OperationalError))
 
 
 class ExpiryNotices:
@@ -1884,16 +1895,22 @@ class ExpiryNotices:
 
     expire_overdue() понижает юзера в free до отправки, и следующий такт его уже не видит:
     сбой сети или Telegram в минуту истечения терял сообщение насовсем, без следа. Теперь
-    такой юзер ждёт в очереди и получает сообщение на следующих тактах — до суток, если
-    за это время не оплатил. Очередь в памяти процесса: рестарт её очищает. Мёртвый
-    получатель (заблокировал бота) — пометка и без повтора; BadRequest (битый текст) не
-    исправится повтором — сразу ERROR."""
+    каждый понижённый сразу встаёт в очередь (до первого await — сбой БД посреди такта его не
+    потеряет) и снимается с неё после доставки. Временный сбой (_transient_send_error) —
+    повтор раз в retry_every_s, до retry_s, если за это время юзер не оплатил. Мёртвый
+    получатель — пометка без повтора; прочие ошибки (битый текст, Forbidden, баг) повтором
+    не исправить — сразу ERROR, он дойдёт до админов. Очередь в памяти процесса: рестарт её
+    очищает. Доставка «хотя бы раз»: если ответ Telegram потерялся уже после доставки,
+    сообщение может прийти дважды — сознательно, потеря кнопок оплаты хуже."""
 
     def __init__(self, *, retry_s: float = EXPIRE_NOTIFY_RETRY_S,
+                 retry_every_s: float = EXPIRE_NOTIFY_RETRY_EVERY_S,
                  clock: Callable[[], float] = _monotonic) -> None:
         self._retry_s = retry_s
+        self._every = retry_every_s
         self._clock = clock
-        self._pending: dict[int, float] = {}            # tg_id -> время первой неудачи
+        # tg_id -> (время первой неудачи, время следующей попытки)
+        self._pending: dict[int, tuple[float, float]] = {}
 
     @property
     def pending(self) -> list[int]:
@@ -1904,28 +1921,35 @@ class ExpiryNotices:
                   still_expired: Callable[[int], Awaitable[bool]],
                   dead: Callable[[Exception], bool],
                   mark_blocked: Callable[[int], Awaitable[object]]) -> None:
-        retry = []
-        for uid in [u for u in self._pending if u not in due]:
-            if await still_expired(uid):
-                retry.append(uid)
-            else:                                       # успел оплатить — не «закончился»
-                self._pending.pop(uid, None)
+        now = self._clock()
+        fresh = set(due)
+        for uid in due:
+            self._pending.setdefault(uid, (now, now))
         log = logging.getLogger("bot")
-        for uid in [*due, *retry]:
+        for uid in list(self._pending):
+            first, next_at = self._pending[uid]
+            if uid not in fresh and next_at > now:
+                continue
             try:
+                if uid not in fresh and not await still_expired(uid):
+                    self._pending.pop(uid, None)        # успел оплатить — не «закончился»
+                    continue
                 await notify(uid)
             except Exception as e:                      # noqa: BLE001 — один юзер не роняет такт
-                from aiogram.exceptions import TelegramBadRequest
-                first = self._pending.setdefault(uid, self._clock())
                 if dead(e):
                     self._pending.pop(uid, None)
                     log.warning("expire notify %s: %s", uid, e)
-                    await mark_blocked(uid)
-                elif isinstance(e, TelegramBadRequest) or self._clock() - first > self._retry_s:
+                    try:
+                        await mark_blocked(uid)
+                    except Exception as e2:             # noqa: BLE001
+                        log.warning("expire notify %s: mark_blocked: %s", uid, e2)
+                elif not _transient_send_error(e) or now - first > self._retry_s:
                     self._pending.pop(uid, None)
-                    log.error("expire notify %s: не доставлено, повторов не будет: %s", uid, e)
+                    log.error("expire notify %s: не доставлено, повторов не будет: %r", uid, e)
                 else:
-                    log.warning("expire notify %s: %s — повторю на следующем такте", uid, e)
+                    self._pending[uid] = (first, now + self._every)
+                    log.warning("expire notify %s: повторю через %d мин: %s",
+                                uid, self._every // 60, e)
             else:
                 self._pending.pop(uid, None)
 
@@ -4704,6 +4728,13 @@ def main() -> None:
     async def _audit_ref(m):
         await _audit_channel(m, channel_audit.parse_channel_ref(m.text) or "")
 
+    # стикер, фото или голос посреди диалога: шаги ждут только текст (F.text — ревью 31.10),
+    # и без подсказки бот молчал бы, а диалог казался сломанным. Оплату и пересылку
+    # menu_resets_dialog уже вывел из диалога; ~successful_payment — страховка без него
+    @dp.message(StateFilter(PromoState, CalcStates, AdminInput), ~F.text, ~F.successful_payment)
+    async def _dialog_needs_text(m):
+        await m.answer("Жду ответ текстом. Передумали — /cancel")
+
     def _signal_chart_png(sig, sid):
         # синхронно (ccxt + Playwright) — вызывать только через asyncio.to_thread
         from app.data.market_data import fetch_closed_ohlcv
@@ -5336,12 +5367,21 @@ def main() -> None:
                     await asyncio.to_thread(payments.mark_blocked, row["tg_id"])
             await asyncio.to_thread(payments.mark_reminded, row["tg_id"])
 
+    _usdt_poll_err_at = [-1e9]
+
     async def _mt_usdt_activate():
-        # автоактивация оплаченных USDT-инвойсов (уведомления изолированы per-юзер)
+        # автоактивация оплаченных USDT-инвойсов (уведомления изолированы per-юзер).
+        # Сбой опроса при живых pending-инвойсах = оплаченный USDT без доступа: ERROR (дойдёт
+        # до админов) раз в час, остальное WARNING. Блок не падает — чужой API не должен
+        # гасить пульс dead-man (ревью 31.10)
         try:
             activated = await asyncio.to_thread(payments.poll_cryptobot)
         except Exception as e:                         # noqa: BLE001
-            log.warning("poll_cryptobot: %s", e)
+            if _monotonic() - _usdt_poll_err_at[0] > 3600:
+                _usdt_poll_err_at[0] = _monotonic()
+                log.error("poll_cryptobot: %s — оплаченные USDT-инвойсы не активируются", e)
+            else:
+                log.warning("poll_cryptobot: %s", e)
             activated = []
         for uid, paid_days in activated:
             try:

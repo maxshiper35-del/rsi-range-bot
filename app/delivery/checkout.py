@@ -142,7 +142,8 @@ async def send_usdt_invoice(bot, cq, tier: tariffs.UsdtTier | None) -> None:
         res = await asyncio.to_thread(payments.create_cryptobot_invoice,
                                       cq.from_user.id, tier.days, tier.amount)
     except Exception as e:                              # noqa: BLE001 — сеть/невалидный токен
-        log.warning("create_cryptobot_invoice %s: %s", cq.from_user.id, e)
+        # ERROR, а не WARNING: мёртвые USDT-кнопки (403 Cloudflare) месяцами жили незамеченными
+        log.error("create_cryptobot_invoice %s: %s", cq.from_user.id, e)
         res = None
     if res is None:
         await cq.answer("USDT временно недоступен, попробуй позже "

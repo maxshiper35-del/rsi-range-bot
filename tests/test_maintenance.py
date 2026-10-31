@@ -124,6 +124,7 @@ def test_send_raw_alerts_isolates_admins(monkeypatch):
     assert sent == [1, 3]
 
 
+
 def _expiry_run(notices, due, *, notify, still_expired=None, blocked=None):
     async def _still(uid):
         return True if still_expired is None else still_expired(uid)
@@ -140,7 +141,7 @@ def _expiry_run(notices, due, *, notify, still_expired=None, blocked=None):
 
 def test_expiry_notice_retried_after_network_failure_until_delivered():
     """Ревью 31.10: юзер понижен в free до отправки, и сбой сети в минуту истечения терял
-    К-24 насовсем. Теперь он ждёт в очереди и уходит на следующем такте — один раз."""
+    К-24 насовсем. Теперь он ждёт в очереди и уходит на следующей попытке — один раз."""
     from app.delivery import bot
     sent: list[int] = []
     fail = {"on": True}
@@ -151,24 +152,53 @@ def test_expiry_notice_retried_after_network_failure_until_delivered():
         sent.append(uid)
 
     clock = _Clock()
-    notices = bot.ExpiryNotices(retry_s=3600, clock=clock)
+    notices = bot.ExpiryNotices(retry_s=3600, retry_every_s=300, clock=clock)
     _expiry_run(notices, [7, 8], notify=notify)
     assert notices.pending == [7, 8] and sent == []
     clock.t = 60
     fail["on"] = False
-    _expiry_run(notices, [9], notify=notify)            # новый истёкший + повтор двух старых
+    _expiry_run(notices, [9], notify=notify)            # новый уходит сразу, повтор — не чаще 5 мин
+    assert sent == [9] and notices.pending == [7, 8]
+    clock.t = 300
+    _expiry_run(notices, [], notify=notify)
     assert sorted(sent) == [7, 8, 9] and notices.pending == []
     _expiry_run(notices, [], notify=notify)             # доставленным второго раза нет
     assert sorted(sent) == [7, 8, 9]
 
 
-def test_expiry_notice_gives_up_after_limit_and_skips_paid_and_dead():
+def test_expiry_notice_db_failure_mid_tick_keeps_fresh_users():
+    """Сбой БД в проверке оплаты у повторяемого юзера не должен терять только что
+    понижённых: они в очереди до первого await, а сам повторяемый остаётся в ней."""
+    import sqlite3
+
+    from app.delivery import bot
+    sent: list[int] = []
+    fail = {"on": True}
+
+    async def notify(uid):
+        if fail["on"]:
+            raise ConnectionError("сеть")
+        sent.append(uid)
+
+    def still(uid):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    clock = _Clock()
+    notices = bot.ExpiryNotices(retry_s=3600, retry_every_s=300, clock=clock)
+    _expiry_run(notices, [1], notify=notify)
+    fail["on"] = False
+    clock.t = 300
+    _expiry_run(notices, [2, 3], notify=notify, still_expired=still)
+    assert sent == [2, 3] and notices.pending == [1]
+
+
+def test_expiry_notice_gives_up_after_limit_and_skips_paid_dead_and_bugs():
     from aiogram.exceptions import TelegramBadRequest
     from aiogram.methods import SendMessage
 
     from app.delivery import bot
     clock = _Clock()
-    notices = bot.ExpiryNotices(retry_s=3600, clock=clock)
+    notices = bot.ExpiryNotices(retry_s=3600, retry_every_s=300, clock=clock)
     calls: list[int] = []
     blocked: list[int] = []
 
@@ -180,18 +210,21 @@ def test_expiry_notice_gives_up_after_limit_and_skips_paid_and_dead():
             raise RuntimeError("Forbidden: bot was blocked by the user")
         if uid == 3:
             raise TelegramBadRequest(SendMessage(chat_id=3, text="x"), "can't parse entities")
+        if uid == 4:
+            raise KeyError("week")                      # баг в рендере повтором не лечится
 
-    _expiry_run(notices, [1, 2, 3], notify=notify, blocked=blocked)
-    assert notices.pending == [1]                       # мёртвый и BadRequest не повторяются
+    _expiry_run(notices, [1, 2, 3, 4], notify=notify, blocked=blocked)
+    assert notices.pending == [1]                       # повторяется только сеть
     assert blocked == [2]
-    clock.t = 3601                                      # сутки (тут — час) вышли: сдаёмся
+    clock.t = 3601                                      # предел (тут — час) вышел: сдаёмся
     _expiry_run(notices, [], notify=notify)
     assert notices.pending == [] and calls.count(1) == 2
 
     calls.clear()
     clock.t = 0
-    notices = bot.ExpiryNotices(retry_s=3600, clock=clock)
+    notices = bot.ExpiryNotices(retry_s=3600, retry_every_s=300, clock=clock)
     _expiry_run(notices, [5], notify=lambda uid: (_ for _ in ()).throw(ConnectionError("x")))
     assert notices.pending == [5]
+    clock.t = 300
     _expiry_run(notices, [], notify=notify, still_expired=lambda uid: False)  # успел оплатить
     assert notices.pending == [] and calls == []

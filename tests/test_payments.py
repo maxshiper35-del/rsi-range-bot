@@ -449,6 +449,31 @@ def test_cryptobot_call_sends_own_user_agent(fresh_db, monkeypatch):
     assert sent["crypto-pay-api-token"] == "tok"
 
 
+def test_poll_cryptobot_asks_for_all_pending_invoices(fresh_db, monkeypatch):
+    """Ревью 31.10: getInvoices без count отдаёт 100 — оплаченный 101-й pending не
+    активировался. Опрос просит count и все pending-инвойсы."""
+    from app import runtime
+    from app.delivery import payments
+    runtime.set_value("cryptobot_token", "tok")
+    seq = iter(range(1000, 1200))
+    calls: list[dict] = []
+
+    def fake_call(method, params, post=True):
+        if method == "createInvoice":
+            n = next(seq)
+            return {"invoice_id": n, "bot_invoice_url": f"https://t.me/x{n}"}
+        calls.append(params)
+        ids = params["invoice_ids"].split(",")
+        return {"items": [{"invoice_id": int(i), "status": "paid" if i == "1101" else "active"}
+                          for i in ids]}
+
+    monkeypatch.setattr(payments, "_cryptobot_call", fake_call)
+    for uid in range(102):
+        payments.create_cryptobot_invoice(9000 + uid, 30, amount=7)
+    assert payments.poll_cryptobot() == [(9101, 30.0)]
+    assert calls[0]["count"] == 1000 and len(calls[0]["invoice_ids"].split(",")) == 102
+
+
 def test_cryptobot_invoice_and_poll(fresh_db, monkeypatch):
     from app.config import get_settings
     monkeypatch.setenv("CRYPTOBOT_TOKEN", "tok")

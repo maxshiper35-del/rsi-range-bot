@@ -601,9 +601,15 @@ def poll_cryptobot() -> list[tuple[int, float]]:
     pending = db.query("SELECT * FROM payments WHERE method='cryptobot' AND status='pending'")
     if not pending:
         return []
-    res = _cryptobot_call("getInvoices",
-                          {"invoice_ids": ",".join(p["invoice_id"] for p in pending)}, post=False)
-    items = res.get("items", res) if isinstance(res, dict) else res
+    # count: по умолчанию Crypto Pay отдаёт 100 инвойсов — оплаченный 101-й не активировался
+    # бы, пока лишние не истекут (ревью 31.10). Максимум API — 1000, поэтому пачками
+    items: list = []
+    for i in range(0, len(pending), 1000):
+        res = _cryptobot_call("getInvoices",
+                              {"invoice_ids": ",".join(p["invoice_id"]
+                                                       for p in pending[i:i + 1000]),
+                               "count": 1000}, post=False)
+        items += res.get("items", res) if isinstance(res, dict) else res
     paid = {str(it["invoice_id"]) for it in items if it.get("status") == "paid"}
     dead = {str(it["invoice_id"]) for it in items if it.get("status") == "expired"}
     activated = []
