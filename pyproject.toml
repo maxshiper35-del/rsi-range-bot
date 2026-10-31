@@ -20,6 +20,10 @@ dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.8"]
 [tool.ruff]
 line-length = 100
 target-version = "py39"
+# docs/measurements/* — архив скриптов замеров ровно в том виде, в каком они дали результат
+# (воспроизводимость важнее стиля); код проекта в app/, scripts/, tests/
+extend-exclude = ["docs"]
+force-exclude = true
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
