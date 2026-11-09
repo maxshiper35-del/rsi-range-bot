@@ -662,7 +662,7 @@ def build_signal_chart_html(data: dict) -> str:
         right=right,
         sub=sub,
         svg=svg,
-        foot=_foot(_esc(data["updated_label"]), extra=" · риск 1–2% на сделку"),
+        foot=_foot(_esc(data["updated_label"]), extra=" · риск 0,5–1% на сделку"),
     )
     return f"<style>{brand_css()}{_STYLE}{_CHART_STYLE}</style>{body}"
 
