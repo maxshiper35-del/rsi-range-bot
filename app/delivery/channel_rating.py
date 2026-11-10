@@ -360,11 +360,13 @@ def rating_card_html(rows: list[dict], week_label: str, bot: str = "rsirange_bot
     for row in rows[:max_rows]:
         v = verdict(row)
         f = row["filled"]
+        sig_word = channel_audit._plural(row["checked"], "сигнал", "сигнала", "сигналов")
         body_rows.append(
             f'<div class="row"><div class="ltr">{esc(row["letter"])}</div>'
             f'<div class="cell">{esc(_subs(row["subscribers"]).replace("подписчиков", "").strip())}'
-            f'<small>{row["checked"]} сигналов</small></div>'
-            f'<div class="cell">{_pct(row["tp1"], f)}<small>из {f} исполненных</small></div>'
+            f'<small>{row["checked"]} {sig_word}</small></div>'
+            f'<div class="cell">{_pct(row["tp1"], f)}'
+            f'<small>из {f} {"исполненного" if f == 1 else "исполненных"}</small></div>'
             f'<div class="cell {v.cls}">{_r(row["r_total"]).replace("-", "−")}'
             f'<small>{row["r_trades"]} сд.</small></div>'
             f'<div class="cell {v.cls}">{v.label}</div></div>')

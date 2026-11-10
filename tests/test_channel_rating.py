@@ -328,3 +328,16 @@ def test_rating_with_only_empty_channels_and_wording(fresh_db):
     assert cr.empty_line([dict(subscribers=None)] * 5).startswith("Ещё 5 каналов: в последних")
     assert "(от ~900 до ~1.2 млн подписчиков)" in cr.empty_line(
         [dict(subscribers=900), dict(subscribers=1_200_000), dict(subscribers=None)])
+
+
+def test_rating_card_declines_counts(fresh_db):
+    """Карточка идёт в ролики: «1 сигнал», «3 сигнала», «24 сигнала», «из 1 исполненного»."""
+    for i, (name, checked, filled) in enumerate((("one", 1, 1), ("three", 3, 2), ("many", 24, 17))):
+        ch = cr.add_channel(name, "test")
+        cr.record_run(ch["id"], _agg(filled=filled, tp1=min(filled, 1), stop=0, r_total=0.1,
+                                     r_trades=filled, checked=checked), name, 1_000 * (i + 1))
+    html = cr.rating_card_html(cr.latest_rows(), "неделя 46")
+    for want in ("<small>1 сигнал</small>", "<small>3 сигнала</small>", "<small>24 сигнала</small>",
+                 "<small>из 1 исполненного</small>", "<small>из 17 исполненных</small>"):
+        assert want in html
+    assert "1 сигналов" not in html and "из 1 исполненных" not in html
