@@ -1007,6 +1007,11 @@ def api_me() -> Response:
         return _no_store({"ok": False}, 401)
     uid = int(user["id"])
     from app.delivery import payments
+    try:                                               # счётчик использования не мешает ответу
+        from app.delivery import usage
+        usage.record(uid, usage.WEBAPP_OPEN, once_minutes=usage.WEBAPP_ONCE_MIN)
+    except Exception:                                  # noqa: BLE001
+        pass
     # has_full_access: в режиме «сигналы бесплатны всем» приватный слой открыт каждому
     # юзеру с валидной подписью Telegram — те же уровни лежат в открытом канале
     private = payments.has_full_access(uid) or uid in get_settings().admin_ids

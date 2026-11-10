@@ -25,7 +25,7 @@ from app.brain import journal
 from app.brain.risk import calculate_position
 from app.brain.smc_setups import SMCEngine
 from app.core.signal_engine import Signal
-from app.delivery import feedback, graphics, my_account, publication, templates
+from app.delivery import feedback, graphics, my_account, publication, templates, usage
 from app.power import battery_alert_text, should_alert_battery
 from app.power import pmset_batt as _pmset_batt
 
@@ -1580,6 +1580,7 @@ USER_COMMANDS = [
 ADMIN_COMMANDS = USER_COMMANDS + [
     ("admin", "панель управления"),
     ("feedback", "опрос «как вам бот»: оценки и последние отзывы"),
+    ("usage", "кто чем пользуется: люди и действия за сутки и за неделю"),
     ("status", "снимок всех настроек"),
     ("health", "живой чек: аптайм, тик poller, бэкап, БД"),
     ("pause", "остановить поиск сигналов"),
@@ -1706,6 +1707,36 @@ def menu_resets_dialog(menu_texts: frozenset):
     return _mw
 
 
+def usage_recorder(menu_texts: frozenset, kind: str):
+    """Outer-middleware счётчика использования (app.delivery.usage): одна строка на действие
+    человека — команда, кнопка меню, пересылка, инлайн-кнопка. kind: "message" | "callback".
+
+    Счётчик не должен мешать боту: сбой записи (БД занята, нет таблицы) глотается, хэндлер
+    вызывается всегда; в лог идёт одно предупреждение на процесс. Сообщения считаются только
+    в личке. Содержимое не пишется — только название действия."""
+    warned = {"done": False}
+
+    async def _mw(handler, event, data):
+        try:
+            user = getattr(event, "from_user", None)
+            action = None
+            if user is not None and not getattr(user, "is_bot", False):
+                if kind == "callback":
+                    action = usage.callback_action(getattr(event, "data", None))
+                elif getattr(getattr(event, "chat", None), "type", None) == "private":
+                    action = usage.message_action(
+                        getattr(event, "text", None),
+                        getattr(event, "forward_origin", None) is not None, menu_texts)
+            if action:
+                await asyncio.to_thread(usage.record, user.id, action)
+        except Exception as e:                         # noqa: BLE001 — счётчик не роняет хэндлер
+            if not warned["done"]:
+                warned["done"] = True
+                logging.getLogger("bot").warning("usage: запись не удалась: %s", e)
+        return await handler(event, data)
+    return _mw
+
+
 BOT_DESCRIPTION = (
     "Сигналы по крипто-фьючерсам (SMC) с честной статистикой: публикуем 100% исходов, "
     "включая убыточные. Проверяемый CSV-трек-рекорд: sha256 + офлайн-верификатор "
@@ -1715,9 +1746,15 @@ BOT_DESCRIPTION = (
 )
 
 
-async def register_bot_profile(bot) -> None:
+async def register_bot_profile(bot, free_for_all: bool = False) -> None:
     """Описание в профиле бота («Что умеет этот бот?») — было пустым. Идемпотентно,
-    ставится на старте. Короткое описание задано владельцем вручную и НЕ трогается."""
+    ставится на старте. Короткое описание задано владельцем вручную и НЕ трогается.
+
+    free_for_all — режим «сигналы бесплатны всем»: описание НЕ перезаписывается. В
+    BOT_DESCRIPTION стоит «Триал при старте», которого в этом режиме нет; новый текст
+    владелец ставит в BotFather сам, и каждый запуск бота затирал бы его старым."""
+    if free_for_all:
+        return
     try:
         await bot.set_my_description(description=BOT_DESCRIPTION)
     except Exception:                                  # noqa: BLE001 — профиль не роняет старт
@@ -2172,6 +2209,9 @@ def main() -> None:
     dp = Dispatcher()
     # кнопка меню или команда посреди пошагового ввода закрывает диалог (аудит кода 30.10)
     dp.message.outer_middleware(menu_resets_dialog(MENU_TEXTS))
+    # счётчик использования: кто какой раздел открывал (название действия, без текста)
+    dp.message.outer_middleware(usage_recorder(MENU_TEXTS, "message"))
+    dp.callback_query.outer_middleware(usage_recorder(MENU_TEXTS, "callback"))
     # username бота для deep-link CTA под постами канала; заполняется в _main() после
     # get_me() — до этого кнопки просто нет (channel_cta_markup(None) -> None)
     bot_info: dict = {"username": None}
@@ -2936,6 +2976,13 @@ def main() -> None:
         if not _is_admin(m):
             return
         await m.answer(await asyncio.to_thread(feedback.render_stats))
+
+    @dp.message(Command("usage"))
+    async def _usage_cmd(m):
+        """Админ: кто чем пользуется — люди и действия за сутки и за неделю, без админов."""
+        if not _is_admin(m):
+            return
+        await m.answer(await asyncio.to_thread(usage.render, tuple(cfg.admin_ids)))
 
     @dp.callback_query(F.data.in_(tariffs.STARS_CALLBACKS))
     async def _pay_stars(cq):
@@ -6482,7 +6529,7 @@ def main() -> None:
     async def _main():
         try:
             await register_bot_commands(bot, cfg.admin_ids)
-            await register_bot_profile(bot)
+            await register_bot_profile(bot, runtime.signals_free_for_all())
         except Exception as e:                         # noqa: BLE001 — меню не критично для работы
             log.warning("register_bot_commands: %s", e)
         # bot.me() кешируется aiogram; start_polling зовёт его без защиты — при старте без

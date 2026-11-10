@@ -896,3 +896,19 @@ def test_index_has_free_for_all_wording(fresh_db):
     for text in ("Сигналы бесплатны для всех — подписка не нужна",
                  "уровни — бесплатно в боте", "с вашего прихода", "Поделиться ботом"):
         assert text in body
+
+
+def test_webapp_open_is_counted_once(fresh_db, webapp_token):
+    """Заход в мини-приложение виден в счётчике; повторный опрос страницы — не новый заход.
+    Без подписи Telegram ничего не пишется."""
+    from app.delivery import payments, usage
+    from app.webapp import app as flask_app
+    payments.register_user(500901, "u")
+    auth = {"Authorization": "tma " + _init_data("123:TEST", 500901)}
+    with flask_app.test_client() as c:
+        assert c.get("/api/me").status_code == 401
+        assert fresh_db.query("SELECT 1 FROM usage_events") == []
+        for _ in range(3):
+            assert json.loads(c.get("/api/me", headers=auth).get_data(as_text=True))["ok"]
+    rows = fresh_db.query("SELECT tg_id, action FROM usage_events")
+    assert [(r["tg_id"], r["action"]) for r in rows] == [(500901, usage.WEBAPP_OPEN)]
