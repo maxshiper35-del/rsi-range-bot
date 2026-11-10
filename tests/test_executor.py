@@ -809,6 +809,9 @@ def _exec_state_reset():
         ex._ACT_TRIED.clear()
         ex._JLEVEL_SEEN.clear()
         ex._TRAIL_WARNED.clear()
+        ex._FLAT_SEEN.clear()
+        ex._TRAIL_STATUS.clear()
+        ex._DIVERGENCE_WARNED["at"] = None
         ex._drain_report()
     _clear()
     yield
@@ -1117,3 +1120,225 @@ def test_close_beyond_journal_trail_cancels_moved_hourly_stop(fresh_db):
     ex._STREAM_SEEN["TTTUSDT"] = 0.0                           # стрим давно молчит
     assert ex._sync_native_trails(fake, []) == set()
     assert "SL7" in fake.cancelled and ("market", "sell", 10.0) in fake.created
+
+
+# --- 10.11.2026: алерты «журнал открыт — позиция плоская» и FAILED нативного трейла (#825) ---
+class _DivEx:
+    """Биржа для сверки расхождений: позиция TTT LONG и статус трейлинг-ордера."""
+
+    def __init__(self, pos=10.0, trail_status="NEW", broken=False):
+        self.pos, self.trail_status, self.broken = pos, trail_status, broken
+        self.pos_calls, self.order_calls = 0, 0
+
+    def fetch_positions(self, symbols):
+        self.pos_calls += 1
+        if self.broken:
+            raise RuntimeError("timeout")
+        if not self.pos:
+            return []                                          # BingX отдаёт только ненулевые
+        return [{"symbol": "TTT/USDT:USDT", "side": "long", "contracts": self.pos}]
+
+    def fetch_order(self, oid, symbol):
+        self.order_calls += 1
+        # ccxt сводит FAILED в 'canceled' — различаем по сырому статусу биржи
+        return {"id": oid, "status": "canceled", "info": {"status": self.trail_status}}
+
+
+def _judge_1m(sid):
+    from app import db
+    db.execute("UPDATE signals SET snapshot_json=replace(snapshot_json, '\"tp_exit\"', "
+               "'\"judge\": \"1m\", \"tp_exit\"') WHERE id=?", (sid,))
+
+
+_T0 = 1_794_000_000.0                                          # unix-секунды: «сейчас» тестов
+_FLAT_TEXT = ("журнал открыт, а позиция на бирже плоская — биржа закрыла её сама, журнал на "
+              "своём такте выход не записал (ликвидация, сбой демо или стоп, которого нет "
+              "в журнале)")
+
+
+def _poller_tick(ts):
+    """Поллер (он же такт журнала) проснулся в момент ts."""
+    from datetime import datetime, timezone
+
+    from app import runtime
+    runtime.set_last_poller_tick_at(datetime.fromtimestamp(ts, tz=timezone.utc).isoformat())
+
+
+@pytest.mark.parametrize("minute_judge", [False, True])
+def test_flat_position_alerts_once_after_journal_tick(fresh_db, minute_judge):
+    """#825: журнал держит сделку, позиции на бирже нет. Журнал пишет исходы на такте
+    поллера (раз в час, минутный судья — тоже): тишина, пока после обнаружения не прошёл
+    такт и не истёк запас на оценку исходов; затем одна строка. Повтора нет ни следующим
+    тактом, ни после рестарта (отметка в settings). Учёт executor не меняется."""
+    from app import db, runtime
+    from app.v2 import bingx_executor as ex
+    _seed_native(1101)
+    if minute_judge:
+        _judge_1m(1101)
+    _poller_tick(_T0 - 1800)                                   # такт ДО обнаружения
+    fake, report = _DivEx(pos=0.0), []
+    ex._divergence_alerts(fake, report, now=_T0)               # обнаружили: таймер пошёл
+    ex._divergence_alerts(fake, report, now=_T0 + 86400)       # такта не было — хоть сутки
+    assert report == []
+    _poller_tick(_T0 + 1800)                                   # такт после обнаружения
+    ex._divergence_alerts(fake, report, now=_T0 + 1800 + ex.FLAT_GRACE_S - 1)
+    assert report == []                                        # такт ещё оценивает исходы
+    ex._divergence_alerts(fake, report, now=_T0 + 1800 + ex.FLAT_GRACE_S)
+    assert report == ["⚠️ #1101 TTT LONG: " + _FLAT_TEXT]
+    assert runtime._raw("executor_flat_alerted") == "1101"
+    calls = fake.pos_calls
+    ex._divergence_alerts(fake, report, now=_T0 + 3600)        # следующий такт
+    ex._FLAT_SEEN.clear()                                      # «рестарт»: память пуста
+    _poller_tick(_T0 + 5400)
+    ex._divergence_alerts(fake, report, now=_T0 + 7200)
+    assert len(report) == 1 and fake.pos_calls == calls        # и позиции больше не читаем
+    row = db.query_one("SELECT state, note FROM executor_orders WHERE signal_id=1101")
+    assert (row["state"], row["note"]) == ("filled", None)
+
+
+@pytest.mark.parametrize("tick", [None, "не дата"])
+def test_flat_position_waits_when_poller_tick_unknown(fresh_db, tick):
+    """Время такта поллера пусто или не разбирается — ждём такт, не алертим."""
+    from app import runtime
+    from app.v2 import bingx_executor as ex
+    _seed_native(1102)
+    if tick is not None:
+        runtime.set_last_poller_tick_at(tick)
+    fake, report = _DivEx(pos=0.0), []
+    ex._divergence_alerts(fake, report, now=_T0)
+    ex._divergence_alerts(fake, report, now=_T0 + 86400)
+    assert report == [] and 1102 in ex._FLAT_SEEN
+
+
+def test_flat_timer_resets_when_position_seen(fresh_db):
+    from app.v2 import bingx_executor as ex
+    _seed_native(1103)
+    fake, report = _DivEx(pos=0.0), []
+    ex._divergence_alerts(fake, report, now=_T0)
+    _poller_tick(_T0 + 600)
+    fake.pos = 10.0                                            # пустой ответ был разовым
+    ex._divergence_alerts(fake, report, now=_T0 + 1200)
+    assert report == [] and 1103 not in ex._FLAT_SEEN
+    fake.pos = 0.0                                             # снова плоско: отсчёт заново,
+    ex._divergence_alerts(fake, report, now=_T0 + 1260)        # прежний такт уже не в счёт
+    assert report == []
+
+
+def test_flat_position_with_closed_journal_is_silent(fresh_db):
+    """Журнал закрыл сделку — это ветка close такта, не расхождение; биржу не опрашиваем."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1104)
+    db.execute("UPDATE signals SET status='tp1', result_r=1.2 WHERE id=1104")
+    _poller_tick(_T0 + 600)
+    fake, report = _DivEx(pos=0.0), []
+    ex._divergence_alerts(fake, report, now=_T0 + 1200)
+    assert report == [] and fake.pos_calls == 0 and ex._FLAT_SEEN == {}
+
+
+def test_flat_position_alerts_each_signal_of_shared_position(fresh_db):
+    """Hedge: два сигнала одной монеты и стороны делят позицию. Объём ниже минимального
+    шага — плоско, алерт по каждому; живая позиция (пусть и меньше учёта) — тишина."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1105)
+    db.execute("UPDATE signals SET timeframe='4h' WHERE id=1105")   # ключ уникальности
+    _seed_native(1106)
+    fake, report = _DivEx(pos=12.0), []                        # частичное расхождение: 12 из 20
+    ex._divergence_alerts(fake, report, now=_T0)
+    assert report == [] and ex._FLAT_SEEN == {}
+    fake.pos = 0.0005                                          # пыль меньше шага
+    fake.markets = {"TTT/USDT:USDT": {"limits": {"amount": {"min": 0.001}}}}
+    ex._divergence_alerts(fake, report, now=_T0 + 60)
+    _poller_tick(_T0 + 600)
+    ex._divergence_alerts(fake, report, now=_T0 + 600 + ex.FLAT_GRACE_S)
+    assert [x.split()[1] for x in report] == ["#1105", "#1106"] and fake.pos_calls == 3
+    ex._divergence_alerts(fake, report, now=_T0 + 3600)
+    assert len(report) == 2
+
+
+def test_flat_after_filled_native_trail_is_planned_exit(fresh_db):
+    """Позицию закрыл исполнившийся нативный трейл — плановый выход: даже если журнал на
+    своём такте его не записал, тишина; конечный статус трейла второй раз не читается."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1107)
+    db.execute("UPDATE executor_orders SET trail_order_id='TR7' WHERE signal_id=1107")
+    fake, report = _DivEx(pos=0.0, trail_status="FILLED"), []
+    ex._divergence_alerts(fake, report, now=_T0)
+    _poller_tick(_T0 + 600)
+    ex._divergence_alerts(fake, report, now=_T0 + 3600)
+    assert report == [] and fake.order_calls == 1
+
+
+def test_native_trail_failed_alerts_once(fresh_db):
+    """#825, 14:39: трейл встал на несуществующую позицию, биржа ответила FAILED. Одна
+    строка; повтора нет ни следующим тактом, ни после рестарта, статус больше не читаем."""
+    from app import db, runtime
+    from app.v2 import bingx_executor as ex
+    _seed_native(1108)
+    db.execute("UPDATE executor_orders SET trail_order_id='TR8' WHERE signal_id=1108")
+    fake, report = _DivEx(pos=10.0, trail_status="FAILED"), []
+    ex._divergence_alerts(fake, report)
+    assert report == ["⚠️ #1108 TTT/USDT:USDT: нативный трейл отклонён биржей (FAILED) — "
+                      "трейла на бирже нет"]
+    assert runtime._raw("executor_trail_failed_alerted") == "1108"
+    ex._divergence_alerts(fake, report)
+    ex._TRAIL_STATUS.clear()                                   # «рестарт»
+    ex._divergence_alerts(fake, report)
+    assert len(report) == 1 and fake.order_calls == 1
+    row = db.query_one("SELECT state, trail_order_id FROM executor_orders "
+                       "WHERE signal_id=1108")
+    assert (row["state"], row["trail_order_id"]) == ("filled", "TR8")
+
+
+def test_divergence_silent_when_position_and_trail_alive(fresh_db):
+    """Обычный случай: позиция есть, трейл жив — тишина, в settings ничего не пишется;
+    статус живого трейла читается не чаще раза в TRAIL_STATUS_EVERY_S."""
+    from app import db, runtime
+    from app.v2 import bingx_executor as ex
+    _seed_native(1109)
+    db.execute("UPDATE executor_orders SET trail_order_id='TR9' WHERE signal_id=1109")
+    fake, report = _DivEx(pos=10.0, trail_status="NEW"), []
+    ex._divergence_alerts(fake, report)
+    ex._divergence_alerts(fake, report)
+    assert report == [] and (fake.pos_calls, fake.order_calls) == (2, 1)
+    assert runtime._raw("executor_flat_alerted") is None
+    assert runtime._raw("executor_trail_failed_alerted") is None
+    oid, status, at = ex._TRAIL_STATUS[1109]
+    ex._TRAIL_STATUS[1109] = (oid, status, at - ex.TRAIL_STATUS_EVERY_S - 1)
+    ex._divergence_alerts(fake, report)
+    assert report == [] and fake.order_calls == 2
+
+
+def test_divergence_positions_outage_is_not_flat(fresh_db):
+    """Позиции не читаются — это «неизвестно», а не «плоско»: алерта нет, таймер не идёт,
+    предупреждение о сбое — не чаще раза в час."""
+    from app.v2 import bingx_executor as ex
+    _seed_native(1110)
+    _judge_1m(1110)
+    fake, report = _DivEx(broken=True), []
+    ex._divergence_alerts(fake, report)
+    ex._divergence_alerts(fake, report)
+    assert len(report) == 1 and "позиции не читаются" in report[0]
+    assert ex._FLAT_SEEN == {}
+
+
+def test_reconcile_survives_divergence_check_crash(fresh_db, monkeypatch):
+    """Сбой самой проверки не роняет такт: строки такта доходят, сбой — одной строкой."""
+    from app import clock, runtime
+    from app.v2 import bingx_executor as ex
+    _seed_halt_case()
+    _fake_exchange(monkeypatch, ex, balance=1000)
+    runtime.set_value("executor_since", "2026-10-01T00:00:00+00:00")
+    monkeypatch.setattr(clock, "utcnow_iso", lambda: "2026-10-04T12:00:00+00:00")
+    monkeypatch.setattr(ex, "_place_entry",
+                        lambda e, sid, r, bal, report, **k: report.append(f"place {sid}"))
+
+    def boom(e, report):
+        raise RuntimeError("сломалось")
+    monkeypatch.setattr(ex, "_divergence_alerts", boom)
+    report = ex.reconcile()
+    assert "place 912" in report
+    assert sum("сверка «журнал/позиция»" in x for x in report) == 1
+    assert sum("сверка «журнал/позиция»" in x for x in ex.reconcile()) == 0

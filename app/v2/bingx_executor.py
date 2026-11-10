@@ -446,6 +446,14 @@ def reconcile() -> list[str]:
         if orph:
             _ORPHAN_ALERT["at"] = _time.monotonic()
             report.extend(orph)
+    # расхождения, которые раньше всплывали только при закрытии журналом (#825): позиции
+    # на бирже уже нет / нативный трейл отклонён. Только алерты, раз на сигнал
+    try:
+        _divergence_alerts(ex, report)
+    except Exception as e:                              # noqa: BLE001 — алерты не роняют такт
+        if _alert_due(_DIVERGENCE_WARNED, _time.monotonic()):
+            _DIVERGENCE_WARNED["at"] = _time.monotonic()
+            report.append(f"⚠️ сверка «журнал/позиция»: {type(e).__name__}: {str(e)[:80]}")
     return report
 
 
@@ -1524,6 +1532,151 @@ def sweep_orphans(close: bool = False) -> list[str]:
     if not close:
         out.append("→ /executor sweep закроет их по рынку")
     return out
+
+
+# --- алерты расхождения журнал/биржа (#825, 10.11.2026) -------------------------------------
+# 05.11 демо-биржа ликвидировала шорт SOL на сбое цены VST; executor узнал через 8 часов,
+# когда журнал закрыл сделку, а по дороге поставил нативный трейл на несуществующую позицию
+# (биржа ответила FAILED — тоже молча). Здесь ТОЛЬКО алерты: ничего не ставится, не снимается,
+# состояния ордеров не меняются.
+# Журнал судит исходы на такте поллера — раз в закрытие младшего ТФ (сейчас час); минутный
+# судья зовётся оттуда же: он точнее в цене и времени выхода, но пишет не чаще. Плановый
+# выход биржи (аварийный стоп, нативный трейл) журнал запишет на ближайшем такте. Тревога —
+# если после обнаружения плоской позиции такт прошёл, а журнал всё ещё открыт.
+FLAT_GRACE_S = 300.0                # с начала такта поллера: он успел оценить исходы
+TRAIL_STATUS_EVERY_S = 300.0        # статус живого трейла читаем не чаще (лимиты BingX)
+# «Уже предупреждали» — в settings (csv id сигналов), переживает рестарт. Не в
+# executor_orders.note: её метки разбирает код ('sl:<id>', 'retry#N'). Список сам чистится
+# до сигналов, которые ещё filled при открытом журнале, — не растёт.
+_FLAT_ALERTED_KEY = "executor_flat_alerted"
+_TRAIL_FAILED_KEY = "executor_trail_failed_alerted"
+_FLAT_SEEN: dict[int, float] = {}       # sid -> unix-время (UTC) первой плоской позиции
+_TRAIL_STATUS: dict[int, tuple] = {}    # sid -> (id трейла, статус биржи, monotonic чтения)
+_DIVERGENCE_WARNED: dict = {"at": None}
+_TRAIL_DONE = ("FILLED", "CLOSED")              # трейл исполнился — плановый выход
+_TRAIL_REJECTED = ("FAILED", "REJECTED")
+_TRAIL_FINAL = _TRAIL_DONE + _TRAIL_REJECTED + ("CANCELED", "CANCELLED", "EXPIRED")
+
+
+def _alerted(key: str) -> set:
+    return {int(x) for x in runtime._csv(runtime._raw(key) or "") if x.isdigit()}
+
+
+def _store_alerted(key: str, before: set, now: set) -> None:
+    if now != before:
+        runtime.set_value(key, ",".join(str(x) for x in sorted(now)))
+
+
+def _order_status(o) -> str:
+    """Статус ордера как его назвала биржа: ccxt сводит FAILED и CANCELLED в 'canceled'."""
+    raw = str(((o or {}).get("info") or {}).get("status") or "").upper()
+    return raw or str((o or {}).get("status") or "").upper()
+
+
+def _flat_sids(ex, rows: list) -> set:
+    """Сигналы, у чьей монеты/стороны на бирже нет позиции. ОДИН fetch_positions на все
+    символы. Hedge: позиция общая на сигналы одной монеты и стороны — плоская, когда её
+    объём 0 или меньше минимального шага; частичные расхождения сюда не попадают."""
+    symbols = sorted({t["symbol"] for t in rows})
+    qty: dict = {}
+    for p in ex.fetch_positions(symbols) or []:
+        key = (p.get("symbol"), (p.get("side") or "").upper())
+        qty[key] = qty.get(key, 0.0) + float(p.get("contracts") or 0.0)
+    markets = getattr(ex, "markets", None) or {}
+    out = set()
+    for t in rows:
+        lim = ((markets.get(t["symbol"]) or {}).get("limits") or {}).get("amount") or {}
+        have = qty.get((t["symbol"], t["side"]), 0.0)
+        if have <= 0 or have < float(lim.get("min") or 0.0):
+            out.add(t["signal_id"])
+    return out
+
+
+def _poller_tick_ts() -> float | None:
+    """Unix-время начала последнего такта поллера (он же такт журнала); нет/битое — None."""
+    try:
+        return _iso_ms(runtime.last_poller_tick_at() or "") / 1000.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _divergence_alerts(ex, report: list[str], now: float | None = None) -> None:
+    """Два алерта по сигналам «вход исполнен, журнал открыт», каждый — раз на сигнал:
+      * позиция на бирже плоская, это не исполнившийся нативный трейл, и после её
+        обнаружения журнал уже отработал свой такт (начался ≥ FLAT_GRACE_S назад);
+      * нативный трейл получил от биржи FAILED/отклонён.
+    now — unix-секунды UTC (тесты передают явно): сравнивается с временем такта поллера.
+    Запросы: один fetch_positions за такт (пока есть сигналы без алерта) и fetch_order
+    трейла — раз в TRAIL_STATUS_EVERY_S на сигнал, при плоской позиции каждый такт до
+    конечного статуса; конечный статус помнится и больше не читается."""
+    import time as _t
+
+    rows = db.query(_TRAIL_ROWS_SQL)
+    live = {t["signal_id"] for t in rows}
+    for cache in (_FLAT_SEEN, _TRAIL_STATUS):
+        for sid in [k for k in cache if k not in live]:
+            del cache[sid]
+    flat_was, failed_was = _alerted(_FLAT_ALERTED_KEY), _alerted(_TRAIL_FAILED_KEY)
+    flat_done, failed_done = flat_was & live, failed_was & live
+    if now is None:
+        now = clock.utcnow().timestamp()
+    mono = _t.monotonic()                               # троттлинг — по монотонным часам
+    lines: list[str] = []
+
+    need = [t for t in rows if t["signal_id"] not in flat_done]
+    flat: set | None = set()
+    if need:
+        try:
+            flat = _flat_sids(ex, need)
+        except Exception as e:                          # noqa: BLE001 — сеть: следующим тактом
+            flat = None                                 # неизвестно: таймеры не трогаем
+            if _alert_due(_DIVERGENCE_WARNED, mono):
+                _DIVERGENCE_WARNED["at"] = mono
+                lines.append(f"⚠️ сверка «журнал/позиция»: позиции не читаются — "
+                             f"{type(e).__name__}: {str(e)[:80]}")
+
+    for t in rows:
+        sid, oid = t["signal_id"], t["trail_order_id"] or ""
+        if not oid or oid.startswith(_PENDING_TRAIL) or sid in failed_done:
+            continue
+        seen = _TRAIL_STATUS.get(sid)
+        if seen is not None and seen[0] == oid:
+            if seen[1] in _TRAIL_FINAL:
+                continue
+            if not (flat and sid in flat) and mono - seen[2] < TRAIL_STATUS_EVERY_S:
+                continue
+        try:
+            status = _order_status(ex.fetch_order(oid, t["symbol"]))
+        except Exception:                               # noqa: BLE001 — сеть/не найден: позже
+            status = ""
+        _TRAIL_STATUS[sid] = (oid, status, mono)
+        if status in _TRAIL_REJECTED:
+            failed_done.add(sid)
+            lines.append(f"⚠️ #{sid} {t['symbol']}: нативный трейл отклонён биржей "
+                         f"({status}) — трейла на бирже нет")
+
+    if flat is not None:
+        tick = _poller_tick_ts()
+        for t in need:
+            sid = t["signal_id"]
+            if sid not in flat:
+                _FLAT_SEEN.pop(sid, None)
+                continue
+            first = _FLAT_SEEN.setdefault(sid, now)
+            if _TRAIL_STATUS.get(sid, ("", "", 0.0))[1] in _TRAIL_DONE:
+                continue                                # плановый выход: трейл исполнился
+            if tick is None or tick <= first or now - tick < FLAT_GRACE_S:
+                continue                                # журнал ещё не отработал свой такт
+            flat_done.add(sid)
+            lines.append(f"⚠️ #{sid} {t['symbol'].split('/')[0]} {t['side']}: журнал открыт, "
+                         "а позиция на бирже плоская — биржа закрыла её сама, журнал на "
+                         "своём такте выход не записал (ликвидация, сбой демо или стоп, "
+                         "которого нет в журнале)")
+
+    # отметка ДО выдачи строк: потерянный алерт лучше повтора каждый такт
+    _store_alerted(_FLAT_ALERTED_KEY, flat_was, flat_done)
+    _store_alerted(_TRAIL_FAILED_KEY, failed_was, failed_done)
+    report.extend(lines)
 
 
 # начало эпохи входа TRIGGER_MARKET (коммит 6eac140, первый ордер #434 02.09 11:10 UTC);
