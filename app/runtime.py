@@ -647,6 +647,17 @@ def bot_username() -> str | None:
     return _raw("bot_username") or None
 
 
+def trail_judge_1m() -> bool:
+    """Минутный судья трейла для НОВЫХ сигналов (app.brain.judge_1m). Дефолт ВЫКЛ.
+
+    Замер 30.10.2026 (docs/measurements/2026-10-30-trail-realism.md): часовая модель журнала
+    завышает итог примерно на 0.13R за сделку — откат внутри часа она не видит. С флагом
+    в снапшот нового сигнала пишется trail.judge="1m", и исход судится биржевым путём по
+    минутным свечам. Уже опубликованные сигналы не пересуживаются никогда (контракт
+    честности): их снапшот ключа judge не содержит. Включается /judge1m on."""
+    return (_raw("trail_judge_1m") or "0").lower() in _TRUE
+
+
 def trail_max_hold_hours() -> float:
     """Потолок удержания позиции в часах (0 = без потолка). Дефолт 168 (7 дней): без
     фиксированного тейка сделка иначе может висеть неделями (в симуляции до 36 дней),
@@ -768,6 +779,7 @@ def effective() -> dict:
         "trail_distance_r": trail_distance_r(),
         "trail_only_exit": trail_only_exit(),
         "trail_max_hold_hours": trail_max_hold_hours(),
+        "trail_judge_1m": trail_judge_1m(),
         "enabled_setups": enabled_setups(),
         "late_entry_gate": late_entry_gate(),
         "price_stars": price_stars(),

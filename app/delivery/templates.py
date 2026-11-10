@@ -98,6 +98,21 @@ def _market_line(sig: Signal) -> str:
     return f"💹 Цена сейчас:  <code>{_price(market)}</code>\n" if market else ""
 
 
+def trail_judge_line(since_iso: str | None, backtest: bool = False) -> str:
+    """Строка о методике для /stats, /about, /trackrecord и /backtest: с какой даты выход
+    по трейлу судится по минутным свечам (journal.trail_judge_1m_since). Пусто, пока таких
+    сигналов нет. Прежние сигналы судились по часовым свечам — это в тексте сказано прямо;
+    в /backtest — что сам бэктест остался часовым."""
+    if not since_iso or len(since_iso) < 10:
+        return ""
+    d = f"{since_iso[8:10]}.{since_iso[5:7]}.{since_iso[:4]}"
+    if backtest:
+        return (f"С {d} живой журнал считает выход по трейлу по минутным свечам, как на "
+                "бирже; этот бэктест — по часовым.")
+    return (f"С {d} выход по трейлу считается по минутным свечам, как на бирже "
+            "(раньше — по часовым).")
+
+
 def trail_line(sig: Signal, entry_prefix: str = "🔁 Трейлинг-стоп ордером на бирже:") -> str:
     """Правило подтяжки стопа ИЗ СНАПШОТА сигнала — то же, по которому судит журнал.
 

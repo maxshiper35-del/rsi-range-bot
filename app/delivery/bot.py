@@ -257,10 +257,13 @@ def scan_watchlist(symbols: list[str], engine: SMCEngine | None = None,
 # Рендер команд
 # ---------------------------------------------------------------------------
 def format_stats(st: dict, epoch_st: dict | None = None,
-                 epoch_label: str | None = None) -> str:
+                 epoch_label: str | None = None, judge_since: str | None = None) -> str:
     """Текст /stats из journal.stats(). epoch_st/epoch_label — блок «новый код»
     (journal.stats_since_created от runtime.strategy_epoch): легаси-бэклог не
-    смешивается с оценкой обновлённой стратегии."""
+    смешивается с оценкой обновлённой стратегии. judge_since — дата первого сигнала с
+    минутным судьёй трейла (journal.trail_judge_1m_since): строка о методике."""
+    judge_line = templates.trail_judge_line(judge_since)
+    judge_block = f"{judge_line}\n" if judge_line else ""
     if st["trades"] == 0:
         return ("📊 Статистика пока пустая — сделки ещё не закрывались.\n"
                 f"Открытых сигналов: {st['open']}.\n"
@@ -297,6 +300,7 @@ def format_stats(st: dict, epoch_st: dict | None = None,
         f"{_small_sample_warning(st['trades'])}"
         f"{templates.JOURNAL_NOTE}\n"
         f"{NO_MANUAL_EDITS_LINE}\n"
+        f"{judge_block}"
         "⚠️ Не финансовый совет. Прошлые результаты не определяют будущие."
     )
 
@@ -632,8 +636,11 @@ def _small_sample_warning(trades: int) -> str:
             f"значимости нужно 100+. Не делай выводов о точности на этом объёме.\n")
 
 
-def format_about() -> str:
-    """/about — честный трёхчастный дисклеймер + анти-имперсонация (стандарт UK FCA / Bracewell)."""
+def format_about(judge_since: str | None = None) -> str:
+    """/about — честный трёхчастный дисклеймер + анти-имперсонация (стандарт UK FCA / Bracewell).
+    judge_since — дата первого сигнала с минутным судьёй трейла (строка о методике)."""
+    judge_line = templates.trail_judge_line(judge_since)
+    judge_block = f" {judge_line}" if judge_line else ""
     return (
         "ℹ️ Как устроен RSI Range Signals\n"
         f"{_LINE}\n"
@@ -644,7 +651,7 @@ def format_about() -> str:
         "преимущества после издержек не обнаружено (подробнее: /backtest). Сигналы — "
         "инструмент для проверки собственной гипотезы, не обещание результата. "
         f"Вся статистика (/stats) — {templates.JOURNAL_BASIS}: исходы опубликованных "
-        "сигналов пишутся автоматически, без ручных правок.\n\n"
+        f"сигналов пишутся автоматически, без ручных правок.{judge_block}\n\n"
         "Формат сигналов совместим с ручной настройкой парсера Cornix — "
         "Entry/Stop-Loss/Take-Profit размечены явно.\n\n"
         "18+. Не предназначено для юрисдикций, где такие услуги запрещены. "
@@ -727,12 +734,19 @@ def format_terms() -> str:
     )
 
 
-def format_backtest_summary() -> str:
+def format_backtest_summary(judge_since: str | None = None) -> str:
     """/backtest — честный итог бэктеста + дисклеймер в духе CFTC Rule 4.41 (статический текст).
 
     Цифры — замер 27.10.2026 (docs/measurements/2026-10-27-equity-curve-filter.md, база
     воспроизведена в 2026-10-27-1h-only-trail10-m2.md): прод-конфиг, живой судья, M2′.
-    Ротационный вотчлист — 2026-10-24-rotating-universe.md. Менять только новым замером."""
+    Ротационный вотчлист — 2026-10-24-rotating-universe.md. Менять только новым замером.
+    judge_since — дата первого сигнала с минутным судьёй трейла: с неё живой бот судит
+    выход иначе, чем этот бэктест, — строка о методике."""
+    judge_line = templates.trail_judge_line(judge_since, backtest=True)
+    judge_block = f"{judge_line}\n" if judge_line else ""
+    # с минутным судьёй новые сигналы /stats уже не «по той же часовой модели»
+    stats_tail = ("ручных правок, до комиссий." if judge_line else
+                  "ручных правок, но по той же часовой модели и до комиссий.")
     return (
         "🧪 Бэктест стратегии — честный итог\n"
         f"{_LINE}\n"
@@ -741,7 +755,8 @@ def format_backtest_summary() -> str:
         "Метод: те же правила, что у живого бота — движку подаются только закрытые бары, "
         "исход судится по часовым свечам, выход только трейлинг-стопом, не больше 6 "
         "позиций в одну сторону. Издержки реальные: комиссия тейкера 0,055%, "
-        "проскальзывание 0,15%, фандинг.\n\n"
+        "проскальзывание 0,15%, фандинг.\n"
+        f"{judge_block}\n"
         "Итог текущих правил: 4045 сделок, +229R за 5 лет — в среднем +0,057R на сделку. "
         "Первые 4 года +170R, последний год +59R (+0,067R на сделку). Отказ от 4h выбран "
         "в том числе по этим же данным, поэтому честная проверка — только последний год "
@@ -757,7 +772,7 @@ def format_backtest_summary() -> str:
         "результаты имеют врождённые ограничения: hindsight bias, идеализированное "
         "исполнение, не учитывают реальную ликвидность. В отличие от бэктеста, /stats "
         "считает исходы по фактически опубликованным сигналам — автоматически и без "
-        "ручных правок, но по той же часовой модели и до комиссий.\n\n"
+        f"{stats_tail}\n\n"
         "Мы публикуем этот отрицательный результат сознательно: сервис продаёт "
         "инструмент и честную статистику, а не обещание доходности."
     )
@@ -2309,7 +2324,28 @@ def main() -> None:
     @dp.message(Command("about"))
     @dp.message(F.text == "ℹ️ О боте")
     async def _about(m):
-        await m.answer(format_about())
+        since = await asyncio.to_thread(journal.trail_judge_1m_since)
+        await m.answer(format_about(since))
+
+    @dp.message(Command("judge1m"))
+    async def _judge1m_cmd(m):
+        """Админ: минутный судья трейла для НОВЫХ сигналов (замер 30.10). on/off/без
+        аргумента — статус. История не пересуживается: ключ judge живёт в снапшоте сигнала."""
+        if m.from_user.id not in cfg.admin_ids:
+            return
+        arg = ((m.text or "").split(maxsplit=1) + [""])[1].strip().lower()
+        if arg in ("on", "off"):
+            await asyncio.to_thread(runtime.set_value, "trail_judge_1m",
+                                    "1" if arg == "on" else "0")
+        on = await asyncio.to_thread(runtime.trail_judge_1m)
+        since = await asyncio.to_thread(journal.trail_judge_1m_since)
+        lines = [f"⏱ Минутный судья трейла: <b>{'ВКЛ' if on else 'ВЫКЛ'}</b> "
+                 f"(/judge1m on|off).",
+                 "Новые сигналы получают trail.judge=1m и судятся по минутным свечам; "
+                 "опубликованные раньше — по-прежнему по часовым."]
+        if since:
+            lines.append(f"Первый такой сигнал: {since[:16].replace('T', ' ')} UTC.")
+        await m.answer("\n".join(lines), parse_mode="HTML")
 
     @dp.message(Command("terms"))
     async def _terms(m):
@@ -2318,7 +2354,8 @@ def main() -> None:
     @dp.message(Command("backtest"))
     @dp.message(F.text == "🧪 Бэктест")
     async def _backtest(m):
-        await m.answer(format_backtest_summary())
+        since = await asyncio.to_thread(journal.trail_judge_1m_since)
+        await m.answer(format_backtest_summary(since))
 
     @dp.message(Command("glossary"))
     @dp.message(F.text == "📖 Глоссарий")
@@ -3087,10 +3124,12 @@ def main() -> None:
         def _collect():
             st = journal.stats()
             epoch = runtime.strategy_epoch()
+            since = journal.trail_judge_1m_since()
             if not epoch:
-                return format_stats(st)
+                return format_stats(st, judge_since=since)
             label = f"{epoch[8:10]}.{epoch[5:7]}"        # ISO -> ДД.ММ
-            return format_stats(st, journal.stats_since_created(epoch), label)
+            return format_stats(st, journal.stats_since_created(epoch), label,
+                                judge_since=since)
         await m.answer(await asyncio.to_thread(_collect), parse_mode="HTML")
 
     @dp.message(Command("trackrecord"))
@@ -3099,12 +3138,13 @@ def main() -> None:
         def _build():
             rows = journal.export_public_trades()
             csv_bytes = build_trackrecord_csv(rows)
-            return rows, csv_bytes, trackrecord_checksum(csv_bytes)
-        rows, csv_bytes, checksum = await asyncio.to_thread(_build)
+            return (rows, csv_bytes, trackrecord_checksum(csv_bytes),
+                    templates.trail_judge_line(journal.trail_judge_1m_since()))
+        rows, csv_bytes, checksum, judge_line = await asyncio.to_thread(_build)
         await m.answer_document(
             BufferedInputFile(csv_bytes, filename="rsirange_trackrecord.csv"),
             caption=f"📄 Полный публичный журнал ({len(rows)} сигналов). "
-                   f"SHA-256: {checksum[:16]}…")
+                   f"SHA-256: {checksum[:16]}…" + (f"\n{judge_line}" if judge_line else ""))
         await m.answer_document(
             BufferedInputFile(load_verifier_html(), filename="verifier.html"),
             caption="🔍 Проверка в 1 клик: откройте файл в браузере, перетащите CSV — "
