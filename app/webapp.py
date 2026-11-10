@@ -1007,9 +1007,12 @@ def api_me() -> Response:
         return _no_store({"ok": False}, 401)
     uid = int(user["id"])
     from app.delivery import payments
-    private = payments.is_paid(uid) or uid in get_settings().admin_ids
+    # has_full_access: в режиме «сигналы бесплатны всем» приватный слой открыт каждому
+    # юзеру с валидной подписью Telegram — те же уровни лежат в открытом канале
+    private = payments.has_full_access(uid) or uid in get_settings().admin_ids
     payload: dict = {"ok": True, "private": private,
-                     "admin": uid in get_settings().admin_ids}
+                     "admin": uid in get_settings().admin_ids,
+                     "free_for_all": runtime.signals_free_for_all()}
     if private:
         since = _paid_since(uid)
         payload["positions"] = _open_signals_private()
@@ -1068,7 +1071,7 @@ def api_prefs() -> Response:
         return _no_store({"ok": False}, 401)
     uid = int(user["id"])
     from app.delivery import payments
-    if not (payments.is_paid(uid) or uid in get_settings().admin_ids):
+    if not (payments.has_full_access(uid) or uid in get_settings().admin_ids):
         return _no_store({"ok": False}, 403)
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -1202,7 +1205,7 @@ def api_take() -> Response:
         return _no_store({"ok": False}, 401)
     uid = int(user["id"])
     from app.delivery import payments
-    if not (payments.is_paid(uid) or uid in get_settings().admin_ids):
+    if not (payments.has_full_access(uid) or uid in get_settings().admin_ids):
         return _no_store({"ok": False}, 403)
     body = request.get_json(silent=True)
     if not isinstance(body, dict):                # [1,2]/"abc"/5 — валидный JSON, но не объект
@@ -1262,6 +1265,8 @@ def api_stats() -> Response:
         # флаг секции «Бэктест 5 лет»: фронт не дёргает /api/backtest вслепую (404 в
         # консоли на каждом открытии, пока секция снята с витрины)
         "bt": runtime.backtest_public(),
+        # режим «сигналы бесплатны всем»: витрина не пишет «по подписке»
+        "free_for_all": runtime.signals_free_for_all(),
     }
     body = json.dumps(payload, ensure_ascii=False)
     with _STATS_CACHE_LOCK:
@@ -1312,7 +1317,7 @@ def api_trade_chart() -> Response:
     private = False
     if user is not None:
         from app.delivery import payments
-        private = payments.is_paid(int(user["id"])) \
+        private = payments.has_full_access(int(user["id"])) \
             or int(user["id"]) in get_settings().admin_ids
     with _CHART_CACHE_LOCK:
         hit = _CHART_CACHE.get(sid)

@@ -543,6 +543,8 @@ if (inTg) {
 }
 
 let DATA = null, ME = null, ADM = null, BT = null, ACC = null, SCOPE = "epoch";
+// режим «сигналы бесплатны всем»: подписку не продаём — без «по подписке» и «оформить»
+const FFA = () => !!((ME && ME.free_for_all) || (DATA && DATA.free_for_all));
 const CAN_ACC = inTg && !!tg.initData;          // «Счёт» — любому юзеру бота с подписью Telegram
 // виброотклик Telegram: выбор (вкладки, чипы), касание (действия), итог (успех/ошибка)
 const hap = t => { try { const h = tg && tg.HapticFeedback; if (!h) return;
@@ -914,7 +916,7 @@ function renderOverview(noAnim) {
   </div>`);
   if (open.length) {
     h += sec(`<section><div class="card-h"><h3>Открыты сейчас</h3>
-      <span class="aside">${ME && ME.private ? "уровни — во вкладке «Моё»" : "уровни — по подписке"}</span></div>
+      <span class="aside">${ME && ME.private ? "уровни — во вкладке «Моё»" : FFA() ? "уровни — бесплатно в боте" : "уровни — по подписке"}</span></div>
       <div class="rows">${open.map(o => `<div class="row nohit">${ava(o.symbol, o.side)}
         <div class="mid"><div class="t1">${esc(o.symbol)} <span class="tf">${esc(o.tf)}</span></div>
           <div class="t2">${o.side === "LONG" ? "лонг" : "шорт"}${o.age_h != null ? " · " + holdTxt(o.age_h) + (o.in_pos ? " в позиции" : " ждёт") : ""}</div></div>
@@ -1420,6 +1422,10 @@ function sizing(o) {
 function subCard() {
   const sb = ME.sub;
   if (!sb) return "";
+  if (FFA()) {
+    return `<section><div class="card-h"><h3>Доступ</h3><span class="aside"><span class="badge pos">бесплатно</span></span></div>
+      <div class="mystat">Сигналы бесплатны для всех — подписка не нужна. Все сигналы приходят в личку бота и публикуются в канале.</div></section>`;
+  }
   const active = sb.days_left != null && sb.days_left > 0;
   if (!active && ME.admin) {
     return `<section><div class="card-h"><h3>Доступ</h3><span class="aside"><span class="badge acc">админ</span></span></div>
@@ -1441,6 +1447,14 @@ function subCard() {
 function refCard() {
   const rf = ME.referral;
   if (!rf || !rf.link) return "";
+  if (FFA()) {
+    return `<section><div class="card-h"><h3>Поделиться ботом</h3><span class="aside">ваша ссылка</span></div>
+    <div class="row-f"><input class="inp wide mono" readonly value="${esc(rf.link)}" id="reflink" style="font-size:12px">
+      <button class="btn" data-ref="copy">Копировать</button>
+      ${inTg ? `<button class="btn" data-ref="share">Поделиться</button>` : ""}</div>
+    <div class="mystat">пришли по ссылке <b>${rf.invited}</b></div>
+    </section>`;
+  }
   return `<section><div class="card-h"><h3>Пригласи друга</h3>
       <span class="aside">+${rf.reward_days} дн. за каждого оплатившего</span></div>
     <div class="row-f"><input class="inp wide mono" readonly value="${esc(rf.link)}" id="reflink" style="font-size:12px">
@@ -1474,13 +1488,13 @@ function notifyCard() {
 }
 function renderMine(noAnim) {
   const sec = stagger(noAnim);
-  if (!(ME && ME.private)) { $("#app").innerHTML = `<div class="empty">Раздел для подписчиков</div>`; return; }
+  if (!(ME && ME.private)) { $("#app").innerHTML = `<div class="empty">${FFA() ? "Раздел бесплатный — откройте приложение из бота @rsirange_bot" : "Раздел для подписчиков"}</div>`; return; }
   let h = sec(subCard());
   const ss = ME.since_stats, pos = ME.positions || [], tk = ME.taken || [];
   const fmtP = v => String(+v);
   let stat = ss && ss.trades
-    ? `с подписки${ME.since ? " · " + ddmm(ME.since) : ""} · по журналу, до комиссий: <b class="${cls(ss.total_r || 0)}">${fmtR(ss.total_r || 0)}</b> · ${ss.trades} закрытых`
-    : "с подписки: закрытых сделок пока нет";
+    ? `${FFA() ? "с вашего прихода" : "с подписки"}${ME.since ? " · " + ddmm(ME.since) : ""} · по журналу, до комиссий: <b class="${cls(ss.total_r || 0)}">${fmtR(ss.total_r || 0)}</b> · ${ss.trades} закрытых`
+    : `${FFA() ? "с вашего прихода" : "с подписки"}: закрытых сделок пока нет`;
   const urs = pos.filter(o => o.ur != null);
   if (urs.length) {
     const urSum = urs.reduce((a, o) => a + o.ur, 0);

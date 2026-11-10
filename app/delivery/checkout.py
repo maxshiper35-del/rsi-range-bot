@@ -23,6 +23,16 @@ PRECHECKOUT_REJECT_TEXT = "Тариф изменился — откройте /s
 GRANT_FAILED_TEXT = ("✅ Оплата получена, но доступ не включился из-за технического сбоя. "
                      "Администратор уже получил уведомление и включит доступ вручную. "
                      "Статус: /subscribe")
+# Режим «сигналы бесплатны всем» (10.11.2026): подписку не продаём. Кнопки тарифов и старые
+# инвойсы остаются в истории чатов — оплату по ним не принимаем: брать деньги за то, что
+# бесплатно, нельзя. Текст уходит и в алерт кнопки (до 200 символов), и в отказ pre_checkout.
+SALES_CLOSED_TEXT = ("Сигналы теперь бесплатны для всех — платить не нужно. "
+                     "Оплата подписки отключена.")
+
+
+def sales_closed() -> bool:
+    """Продажа подписки на сигналы закрыта: действует режим «бесплатно всем»."""
+    return runtime.signals_free_for_all()
 
 
 async def send_stars_invoice(bot, chat_id: int, tier: tariffs.Tier) -> None:
@@ -44,6 +54,9 @@ async def pay_stars_tier(bot, cq, tier: tariffs.Tier | None) -> None:
     """Кнопка тарифа. Гейт выключенного тарифа: старые /subscribe-сообщения в истории чата
     хранят кнопки выключенных тарифов — без гейта клик слал бы invoice с amount=0
     (Bad Request) и вечный спиннер юзеру (аудит-2 [12])."""
+    if sales_closed():
+        await cq.answer(SALES_CLOSED_TEXT, show_alert=True)
+        return
     if tier is None or not tier.enabled:
         await cq.answer("Этот тариф сейчас недоступен — см. актуальные в /subscribe.",
                         show_alert=True)
@@ -56,6 +69,12 @@ async def answer_pre_checkout(q) -> bool:
     """Отказ — до списания, Stars не уходят. Старые инвойсы (выключенный тариф, прежняя
     цена, пересланные копии) иначе оплачивались бы вечно, а нечитаемый payload — сначала
     списание, потом фолбэк на 30 дн (аудит 05.10)."""
+    if sales_closed():
+        # инвойс выдан до закрытия продаж и оплачивается сейчас: отказ ДО списания
+        log.warning("pre_checkout отклонён (продажа закрыта): payload=%r amount=%s %s от %s",
+                    q.invoice_payload, q.total_amount, q.currency, q.from_user.id)
+        await q.answer(ok=False, error_message=SALES_CLOSED_TEXT)
+        return False
     ok = tariffs.precheckout_ok(q.invoice_payload, q.total_amount, q.currency,
                                 tariffs.stars_tiers())
     if ok:
@@ -135,6 +154,9 @@ async def send_usdt_invoice(bot, cq, tier: tariffs.UsdtTier | None) -> None:
     бонус-дни добавляются там же."""
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+    if sales_closed():
+        await cq.answer(SALES_CLOSED_TEXT, show_alert=True)
+        return
     if tier is None or not tier.enabled:
         await cq.answer("Тариф выключен.", show_alert=True)
         return

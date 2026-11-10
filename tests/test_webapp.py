@@ -847,3 +847,52 @@ def test_api_account_post_depo_and_push(fresh_db, webapp_token):
     assert ok.status_code == 200 and d["start"] == 2500 and d["risk_pct"] == 1.5
     assert d["is_default"] is False and d["push"] is False
     assert payments.depo_prefs(500401) == (2500.0, 1.5) and not my_account.push_enabled(500401)
+
+
+def test_free_for_all_opens_private_layer(fresh_db, webapp_token):
+    """Режим «сигналы бесплатны всем» (10.11.2026): юзер без подписки видит «Моё», может
+    отмечать сделки и менять настройки; витрина и /api/me несут флаг режима. Без подписи
+    Telegram по-прежнему 401. Выключили режим — слой снова закрыт."""
+    from app import clock, db, runtime, webapp
+    from app.delivery import payments
+    from app.webapp import app as flask_app
+    payments.register_user(500900, "freeuser")
+    db.execute(
+        "INSERT INTO signals(symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at) VALUES "
+        "('ETH/USDT:USDT','SHORT','1h',2500,2600,2.0,0.7,'{}','open',?)",
+        (clock.utcnow_iso(),))
+    sid = db.query_one("SELECT id FROM signals")["id"]
+    auth = {"Authorization": "tma " + _init_data("123:TEST", 500900)}
+    with flask_app.test_client() as c:
+        closed = json.loads(c.get("/api/me", headers=auth).get_data(as_text=True))
+        assert closed["private"] is False and closed["free_for_all"] is False
+        assert c.post("/api/take", headers=auth,
+                      json={"signal_id": sid, "taken": True}).status_code == 403
+
+        runtime.set_value("free_signals_per_week", "10000")
+        webapp._STATS_CACHE["body"] = None
+        me = json.loads(c.get("/api/me", headers=auth).get_data(as_text=True))
+        assert me["private"] is True and me["free_for_all"] is True and me["admin"] is False
+        assert [p["id"] for p in me["positions"]] == [sid] and me["positions"][0]["entry"] == 2500
+        assert c.post("/api/take", headers=auth,
+                      json={"signal_id": sid, "taken": True}).status_code == 200
+        assert c.post("/api/prefs", headers=auth, json={"muted": True}).status_code == 200
+        assert json.loads(c.get("/api/stats").get_data(as_text=True))["free_for_all"] is True
+        assert c.get("/api/me").status_code == 401                     # подпись обязательна
+
+        runtime.set_value("free_signals_per_week", "3")
+        again = json.loads(c.get("/api/me", headers=auth).get_data(as_text=True))
+        assert again["private"] is False and "positions" not in again
+
+
+def test_index_has_free_for_all_wording(fresh_db):
+    """Страница умеет режим «бесплатно всем»: карточка доступа без «оформить подписку»,
+    подсказка об уровнях и «с вашего прихода» — за флагом FFA()."""
+    from app.webapp import app as flask_app
+    with flask_app.test_client() as c:
+        body = c.get("/").get_data(as_text=True)
+    assert "const FFA = () =>" in body
+    for text in ("Сигналы бесплатны для всех — подписка не нужна",
+                 "уровни — бесплатно в боте", "с вашего прихода", "Поделиться ботом"):
+        assert text in body

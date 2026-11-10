@@ -83,6 +83,34 @@ def free_active_ids() -> list[int]:
         "OR (tier='paid' AND paid_until <= ?))", (now,))]
 
 
+def has_full_access(tg_id: int) -> bool:
+    """Полный доступ к сигналам и личным функциям: активная подписка или триал ЛИБО режим
+    «сигналы бесплатны всем» (runtime.signals_free_for_all, решение 10.11.2026).
+
+    Гейты «для подписчиков» спрашивают это, а не is_paid: иначе в день, когда юзеру пришло
+    «сигналы теперь бесплатны для всех», у него закрывались «Мой счёт», карточка итога и
+    кнопки под сигналом."""
+    from app import runtime
+
+    return runtime.signals_free_for_all() or is_paid(tg_id)
+
+
+def full_access_ids() -> list[int]:
+    """Кто получает все сигналы — аудитория /announce и недельного дайджеста: активные
+    подписчики, а в режиме «бесплатно всем» — все живые юзеры."""
+    from app import runtime
+
+    return all_user_ids() if runtime.signals_free_for_all() else active_subscriber_ids()
+
+
+def limited_ids() -> list[int]:
+    """Живые юзеры на бесплатном лимите (дайджест с блоком «что ты упустил»). В режиме
+    «бесплатно всем» таких нет: все в full_access_ids."""
+    from app import runtime
+
+    return [] if runtime.signals_free_for_all() else free_active_ids()
+
+
 def missed_teaser_r(tg_id: int, start_iso: str, end_iso: str) -> dict:
     """«Что ты упустил»: итог ПОЛНОЙ версии сигналов, которые юзер получил ТИЗЕРАМИ,
     а их сделка закрылась на этой неделе [start, end).
@@ -255,6 +283,22 @@ def grant_trial(tg_id: int, days: float) -> bool:
             return False
         _extend_and_activate(conn, tg_id, days)
     return True
+
+
+def start_onboarding(tg_id: int) -> bool:
+    """Режим «сигналы бесплатны всем» (10.11.2026): новому юзеру триал не нужен, но
+    онбординг-дрип (как читать сигнал, как проверить нас) считает дни от trial_granted_at.
+    Ставим только эту отметку, без paid_until: нет доступа «на время» — нет и сообщения о
+    его конце. Условие то же, что у grant_trial: отметки ещё нет и подписки не было никогда.
+    -> True, если юзер новый (отметка поставлена сейчас).
+
+    Если продажу подписки вернут, такие юзеры триал уже не получат (отметка стоит): они и
+    так пользовались полным доступом."""
+    register_user(tg_id)
+    return db.execute(
+        "UPDATE users SET trial_granted_at=? WHERE tg_id=? "
+        "AND trial_granted_at IS NULL AND paid_until IS NULL",
+        (clock.utcnow_iso(), tg_id)) == 1
 
 
 def paid_ever_sql(alias: str = "u") -> str:
@@ -1004,3 +1048,25 @@ def subscription_status_text(tg_id: int) -> str:
         return head + (f"\n✅ <b>Подписка активна до {u['paid_until'][:10]}</b>. "
                        "Можно продлить кнопкой ниже.")
     return head + "\nНажми кнопку ниже, чтобы оплатить через Telegram Stars 👇"
+
+
+def free_for_all_status_text(tg_id: int) -> str:
+    """Экран /subscribe в режиме «сигналы бесплатны всем» (10.11.2026): подписку не продаём,
+    кнопок оплаты нет. Оплаченный раньше доступ называем отдельно — он остаётся в силе."""
+    text = (
+        "🆓 <b>Сигналы бесплатны для всех</b>\n"
+        "────────────────────\n"
+        "Подписку мы больше не продаём — платить не нужно. Все сигналы приходят сюда, "
+        "в личку, и публикуются в канале @rsi_range.\n\n"
+        "Что есть в боте:\n"
+        "• 🔎 проверка чужого сигнала — перешлите пост из любого канала (/check)\n"
+        "• 📡 проверка канала целиком — /audit @канал\n"
+        "• 🏆 рейтинг сигнальных каналов — /rating\n"
+        "• 📊 наш журнал как есть, с минусами — /stats\n\n"
+        "Прибыль не обещаем: показываем каждую сделку."
+    )
+    u = get_user(tg_id)
+    if u and is_paid(tg_id) and has_paid_ever(tg_id):
+        text += (f"\n\n✅ Ваш оплаченный доступ до {u['paid_until'][:10]} остаётся в силе. "
+                 "Продлевать его не нужно.")
+    return text

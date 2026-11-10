@@ -625,7 +625,29 @@ _LINE = "━━━━━━━━━━━━━━"
 ANTISCAM_LINE = ("🔒 Мы никогда не пишем первыми в личку с предложениями инвестировать "
                  "и не просим оплату вне этого бота (только кнопки /subscribe).")
 
+# режим «сигналы бесплатны всем» (10.11.2026): кнопок оплаты в боте нет вовсе
+ANTISCAM_LINE_FREE = ("🔒 Мы никогда не пишем первыми в личку и не просим перевести деньги. "
+                      "Сигналы и проверка — бесплатно.")
+
 NO_MANUAL_EDITS_LINE = "✅ 100% исходов — автоматический скоринг по OHLCV, без ручных правок"
+
+# /start в режиме «сигналы бесплатны всем»: первым идёт то, ради чего теперь бот, —
+# проверка чужого сигнала и канала; свои сигналы — бесплатный открытый журнал
+START_FREE_TEXT = (
+    "👋 <b>RSI Range</b> — проверка сигналов и честный журнал сделок.\n\n"
+    "🔎 <b>Проверьте любой сигнал.</b> Перешлите сюда пост из любого канала — бот покажет "
+    "по свечам биржи, чем он закончился: был ли вход, какие цели взяты, был ли стоп.\n"
+    "📡 <b>Проверьте канал целиком:</b> пришлите его @username. Рейтинг каналов — /rating.\n\n"
+    "📊 <b>Наши сигналы — бесплатно</b>, здесь и в канале @rsi_range. Каждая сделка в "
+    "журнале, минусы тоже: /stats, проверяемый CSV — /trackrecord.\n\n"
+    "Меню внизу экрана — всё в один тап; команды — /help.\n"
+    f"{ANTISCAM_LINE_FREE}\n"
+    "⚠️ Не финансовый совет. Прибыль не обещаем. Риск на сделку 0,5–1%.\n\n"
+    "📣 Понравится — поделитесь: t.me/rsirange_bot?start=src_share"
+)
+
+PROMO_CLOSED_TEXT = ("Промокоды добавляли дни подписки. Сейчас сигналы бесплатны для всех — "
+                     "промокод не нужен.")
 
 
 def _small_sample_warning(trades: int) -> str:
@@ -636,17 +658,24 @@ def _small_sample_warning(trades: int) -> str:
             f"значимости нужно 100+. Не делай выводов о точности на этом объёме.\n")
 
 
-def format_about(judge_since: str | None = None) -> str:
+def format_about(judge_since: str | None = None, free_for_all: bool = False) -> str:
     """/about — честный трёхчастный дисклеймер + анти-имперсонация (стандарт UK FCA / Bracewell).
-    judge_since — дата первого сигнала с минутным судьёй трейла (строка о методике)."""
+    judge_since — дата первого сигнала с минутным судьёй трейла (строка о методике).
+    free_for_all — режим «сигналы бесплатны всем»: что в боте главное и что денег не просим."""
     judge_line = templates.trail_judge_line(judge_since)
     judge_block = f" {judge_line}" if judge_line else ""
+    free_block = ("Сигналы бесплатны для всех. Главное в боте — проверка чужих сигналов и "
+                  "каналов по свечам биржи: /check, /audit, /rating.\n\n"
+                  if free_for_all else "")
+    money = ("не просим перевести деньги" if free_for_all
+             else "не просим оплату вне этого бота")
     return (
         "ℹ️ Как устроен RSI Range Signals\n"
         f"{_LINE}\n"
         "RSI Range Signals — автоматический публикатор технических SMC-сетапов. "
         "Это НЕ инвестиционный совет, НЕ индивидуальная рекомендация и НЕ услуга "
         "управления капиталом — регистрации как CTA/RIA у сервиса нет.\n\n"
+        f"{free_block}"
         "По бэктесту за 5 лет и проверке исполнения по минутным свечам устойчивого "
         "преимущества после издержек не обнаружено (подробнее: /backtest). Сигналы — "
         "инструмент для проверки собственной гипотезы, не обещание результата. "
@@ -655,7 +684,7 @@ def format_about(judge_since: str | None = None) -> str:
         "Формат сигналов совместим с ручной настройкой парсера Cornix — "
         "Entry/Stop-Loss/Take-Profit размечены явно.\n\n"
         "18+. Не предназначено для юрисдикций, где такие услуги запрещены. "
-        "Мы никогда не пишем первыми в личку и не просим оплату вне этого бота — "
+        f"Мы никогда не пишем первыми в личку и {money} — "
         "если кто-то пишет от имени RSI Range, это не мы."
         f"{_affiliate_block()}"
     )
@@ -696,10 +725,25 @@ def format_bybit_guide(affiliate_url: str = "") -> str:
         f"{ref}")
 
 
-def format_terms() -> str:
+def format_terms(free_for_all: bool = False) -> str:
     """/terms — условия использования: консолидация того, что уже разбросано по /about,
     /subscribe, ANTISCAM_LINE, в один документ. Добросовестный черновик, НЕ юридическая
-    консультация — перед публичным использованием стоит показать юристу."""
+    консультация — перед публичным использованием стоит показать юристу.
+    free_for_all — режим «сигналы бесплатны всем»: пункты об оплате говорят, что она
+    отключена; возврат по прежним оплатам остаётся."""
+    if free_for_all:
+        pay = ("<b>3. Подписка и оплата.</b> Сейчас подписка не продаётся: сигналы бесплатны "
+               "для всех, оплата в боте отключена. По оплатам, сделанным раньше, действует "
+               "<b>money-back 7 дней</b>: вернём Stars по запросу (/refund у админа).\n\n")
+        scam = ("<b>8. Антискам.</b> Мы никогда не пишем первыми в личку с инвестиционными "
+                "предложениями и не просим перевести деньги: оплата в боте отключена.\n\n")
+    else:
+        pay = ("<b>3. Подписка и оплата.</b> Оплата через Telegram Stars или USDT, "
+               "идемпотентна (не спишется дважды). Подписка продлевает текущий срок, не "
+               "перезаписывает его. <b>Money-back 7 дней</b>: не подошло — вернём Stars по "
+               "запросу (/refund у админа).\n\n")
+        scam = ("<b>8. Антискам.</b> Мы никогда не пишем первыми в личку с инвестиционными "
+                "предложениями и не просим оплату вне кнопок этого бота.\n\n")
     return (
         "📜 <b>Условия использования</b>\n"
         f"{_LINE}\n"
@@ -709,10 +753,7 @@ def format_terms() -> str:
         "<b>2. Риски.</b> Торговля деривативами с плечом сопряжена с риском полной "
         "потери депозита. Бэктест устойчивого края не показал (/backtest). Прошлые "
         "результаты не определяют будущие. Решение о сделке и её размер — всегда ваши.\n\n"
-        "<b>3. Подписка и оплата.</b> Оплата через Telegram Stars или USDT, "
-        "идемпотентна (не спишется дважды). Подписка продлевает текущий срок, не "
-        "перезаписывает его. <b>Money-back 7 дней</b>: не подошло — вернём Stars по "
-        "запросу (/refund у админа).\n\n"
+        f"{pay}"
         "<b>4. Данные.</b> Храним минимум: Telegram id, username, статус подписки, "
         "историю платежей. Не передаём третьим лицам. Публичный журнал сделок "
         "(/trackrecord) не содержит личных данных.\n\n"
@@ -724,8 +765,7 @@ def format_terms() -> str:
         "<b>7. Возраст и юрисдикция.</b> 18+. Не предназначено для юрисдикций, где "
         "такие услуги запрещены — ответственность за соответствие местному "
         "законодательству лежит на пользователе.\n\n"
-        "<b>8. Антискам.</b> Мы никогда не пишем первыми в личку с инвестиционными "
-        "предложениями и не просим оплату вне кнопок этого бота.\n\n"
+        f"{scam}"
         "<b>9. Изменения.</b> Условия могут обновляться; действующая версия — всегда "
         "здесь, по команде /terms.\n"
         f"{_LINE}\n"
@@ -1272,6 +1312,16 @@ def affiliate_row(url: str) -> list:
 CHANNEL_URL = "https://t.me/rsi_range"   # публичный адрес канала (в .env он задан числовым id)
 
 
+def drip_stage_is_moot(stage: int, free_for_all: bool, user) -> bool:
+    """Стадию дрипа «пробный доступ заканчивается завтра» слать не о чем: режим «сигналы
+    бесплатны всем», а у юзера доступа «на время» нет — он пришёл после 10.11
+    (payments.start_onboarding ставит только отметку начала). Обучающие стадии 1–2 идут
+    всем; у кого триал или подарок ещё идёт, последняя стадия остаётся («заканчивается
+    завтра — и ничего не изменится»). user — строка users или None."""
+    return (free_for_all and stage not in templates.TRIAL_DRIP
+            and (user is None or not user["paid_until"]))
+
+
 def channel_join_markup():
     """Кнопка «подписаться на канал» в личке: после приветствия и под проверкой сигнала.
     Разбор 28.10: из 6 пришедших с рекламы в канал не дошёл никто — строку со ссылкой в
@@ -1309,6 +1359,15 @@ def check_demo_markup():
 
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
         text="🔎 Показать пример проверки", callback_data="check_demo")]])
+
+
+def check_start_markup():
+    """Под «как проверить сигнал» у новичка в режиме «бесплатно всем»: пример проверки и
+    кнопка канала одним сообщением — третье сообщение подряд на /start не читают."""
+    from aiogram.types import InlineKeyboardMarkup  # ленивый импорт
+
+    return InlineKeyboardMarkup(inline_keyboard=check_demo_markup().inline_keyboard
+                                + channel_join_markup().inline_keyboard)
 
 
 def audit_markup():
@@ -1567,9 +1626,14 @@ ADMIN_COMMANDS = USER_COMMANDS + [
 ]
 
 
-def main_menu_layout(is_admin: bool = False) -> list:
+def main_menu_layout(is_admin: bool = False, free_for_all: bool = False) -> list:
     """Раскладка постоянного меню (текст кнопок) — чистая функция для тестов.
     Каждой кнопке соответствует F.text-хэндлер в main().
+
+    free_for_all — режим «сигналы бесплатны всем» (runtime.signals_free_for_all, 10.11.2026):
+    главное в боте — проверка сигналов и каналов, она в первом ряду. «Подписка»,
+    «Пригласить» и «Промокод» убраны: продавать нечего. Их F.text-хэндлеры остаются —
+    старая клавиатура живёт у клиента, пока бот не пришлёт новую. Раскладка админа та же.
 
     Раскладки НЕ общие: у админа нет смысла держать на экране кнопки для
     подписчика (О боте/Бэктест/Глоссарий/Промокод — статический контент для
@@ -1586,6 +1650,15 @@ def main_menu_layout(is_admin: bool = False) -> list:
             ["👥 Юзеры", "📈 Growth"],
             ["🎯 По сетапам", "❓ Помощь"],
         ]
+    if free_for_all:
+        return [
+            ["🔎 Проверить сигнал", "📡 Проверить канал"],
+            ["🏆 Рейтинг каналов", "📊 Статистика"],
+            ["💼 Мой счёт", "📈 Дашборд"],
+            ["🧮 Калькулятор", "📄 Трек-рекорд"],
+            ["🧪 Бэктест", "📖 Глоссарий"],
+            ["ℹ️ О боте", "❓ Помощь"],
+        ]
     # «💼 Мой счёт» — в первом ряду, рядом с дашбордом (ретеншн 28.10: люди думают в $,
     # а не в R — деньги по сигналам должны быть на виду, а не за командой)
     return [
@@ -1598,7 +1671,8 @@ def main_menu_layout(is_admin: bool = False) -> list:
     ]
 
 
-MENU_TEXTS = frozenset(t for adm in (False, True) for row in main_menu_layout(adm) for t in row)
+MENU_TEXTS = frozenset(t for adm, free in ((False, False), (True, False), (False, True))
+                       for row in main_menu_layout(adm, free) for t in row)
 
 
 def menu_resets_dialog(menu_texts: frozenset):
@@ -1667,12 +1741,26 @@ async def register_bot_commands(bot, admin_ids) -> None:
             pass
 
 
-def format_help(is_admin: bool) -> str:
+# /help в режиме «сигналы бесплатны всем»: проверка — первой, команды подписки скрыты
+_HELP_FREE_FIRST = ("check", "audit", "rating")
+_HELP_FREE_HIDDEN = frozenset({"subscribe", "promo"})
+_HELP_FREE_DESCR = {"referral": "поделиться ботом: ваша ссылка"}
+
+
+def format_help(is_admin: bool, free_for_all: bool = False) -> str:
     """/help — единственный источник списка команд (замена отключённому Telegram-меню
     '/'); строится из USER_COMMANDS/ADMIN_COMMANDS, чтобы не расходиться с фактическим
-    списком хэндлеров (старый ручной текст пропускал /promo)."""
-    body = "\n".join(f"/{c} — {d}" for c, d in USER_COMMANDS if c not in ("start", "help"))
-    text = f"Команды:\n{body}\n{ANTISCAM_LINE}\n⚠️ Не финансовый совет. Риск на сделку 0,5–1%."
+    списком хэндлеров (старый ручной текст пропускал /promo).
+    free_for_all — режим «сигналы бесплатны всем»: см. _HELP_FREE_*."""
+    cmds = [(c, d) for c, d in USER_COMMANDS if c not in ("start", "help")]
+    antiscam = ANTISCAM_LINE
+    if free_for_all:
+        cmds = [(c, _HELP_FREE_DESCR.get(c, d)) for c, d in cmds if c not in _HELP_FREE_HIDDEN]
+        cmds.sort(key=lambda cd: (_HELP_FREE_FIRST.index(cd[0])
+                                  if cd[0] in _HELP_FREE_FIRST else len(_HELP_FREE_FIRST)))
+        antiscam = ANTISCAM_LINE_FREE
+    body = "\n".join(f"/{c} — {d}" for c, d in cmds)
+    text = f"Команды:\n{body}\n{antiscam}\n⚠️ Не финансовый совет. Риск на сделку 0,5–1%."
     if is_admin:
         admin_only = ADMIN_COMMANDS[len(USER_COMMANDS):]
         admin_body = "\n".join(f"/{c} — {d}" for c, d in admin_only)
@@ -2142,7 +2230,8 @@ def main() -> None:
         # на клиенте вечно и протухает при смене URL (мёртвый сервер 30.08, ротация
         # quick-туннеля). Живой дашборд уходит СВЕЖЕЙ инлайн-кнопкой из хэндлера.
         return ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True, keyboard=[
-            [KeyboardButton(text=t) for t in row] for row in main_menu_layout(is_admin)])
+            [KeyboardButton(text=t) for t in row]
+            for row in main_menu_layout(is_admin, runtime.signals_free_for_all())])
 
     def _subscribe_kb() -> InlineKeyboardMarkup:
         """Кнопки тарифов — из реестра tariffs: те же тарифы сверяет pre_checkout."""
@@ -2216,7 +2305,8 @@ def main() -> None:
         поднимается на каждый рендер, и без троттлинга один спамящий /mycard
         платник занимал бы весь thread-pool бота (ревью 14.08)."""
         uid = m.from_user.id
-        if not (await asyncio.to_thread(payments.is_paid, uid) or uid in cfg.admin_ids):
+        if not (await asyncio.to_thread(payments.has_full_access, uid)
+                or uid in cfg.admin_ids):
             await m.answer("Карточка итога — для подписчиков: /subscribe")
             return
         import time as _t
@@ -2269,17 +2359,42 @@ def main() -> None:
             await asyncio.to_thread(payments.set_acquisition_source, m.from_user.id, "xray")
             x = await asyncio.to_thread(journal.signal_xray, int(arg[5:]))
             if x is not None:
-                await m.answer(templates.render_xray(x), parse_mode="HTML",
+                await m.answer(templates.render_xray(x, runtime.signals_free_for_all()),
+                               parse_mode="HTML",
                                reply_markup=_main_menu_kb(m.from_user.id in cfg.admin_ids))
             else:
                 await m.answer("Сделка ещё открыта или не найдена — рентген доступен "
                                "после закрытия. Пока: /stats")
+            if runtime.signals_free_for_all():
+                # триала нет: сигналы бесплатны всем. Новичку — одна строка, что это так
+                if await asyncio.to_thread(payments.start_onboarding, m.from_user.id):
+                    await m.answer("🆓 Все сигналы — бесплатно: приходят сюда, в личку. "
+                                   "Меню внизу; /help — команды.")
+                return
             # главная точка входа из канала: НОВЫЙ юзер не должен уйти без триала
             # (аудит 02.09) — grant_trial идемпотентен, бывалых не трогает
             xr_days = runtime.trial_days()
             if await asyncio.to_thread(payments.grant_trial, m.from_user.id, xr_days):
                 await m.answer(f"🎁 Открыт полный доступ на {xr_days:g} дн. — все "
                                "сигналы без ограничений. Меню внизу; /help — команды.")
+            return
+        check_hook = arg.startswith("src_") and is_check_hook_source(arg[4:])
+        if runtime.signals_free_for_all():
+            # режим «сигналы бесплатны всем»: триала нет — нет и сообщения о его конце;
+            # отметка начала нужна онбординг-дрипу. Новичку — сразу как проверить сигнал
+            is_new = await asyncio.to_thread(payments.start_onboarding, m.from_user.id)
+            await m.answer(START_FREE_TEXT + _affiliate_block(),
+                           reply_markup=_main_menu_kb(_is_admin(m)), parse_mode="HTML")
+            if is_new or check_hook:
+                await m.answer(CHECK_HOWTO, parse_mode="HTML",
+                               reply_markup=check_start_markup())
+            else:
+                await m.answer("📣 Все сигналы и итог каждой сделки — плюс или минус — "
+                               "публикуем в канале.", reply_markup=channel_join_markup())
+            if arg == "game":
+                await asyncio.to_thread(payments.set_acquisition_source, m.from_user.id,
+                                        "game")
+                await _game_join_flow(m.from_user.id, m.answer)
             return
         trial_days = runtime.trial_days()
         applied = await asyncio.to_thread(payments.grant_trial, m.from_user.id, trial_days)
@@ -2305,7 +2420,7 @@ def main() -> None:
         await m.answer("📣 Итог каждой сделки — плюс или минус — публикуем в канале. "
                        "Подпишитесь, чтобы видеть статистику, даже когда доступ закончится.",
                        reply_markup=channel_join_markup())
-        if arg.startswith("src_") and is_check_hook_source(arg[4:]):
+        if check_hook:
             await m.answer(CHECK_HOWTO, parse_mode="HTML", reply_markup=check_demo_markup())
         if arg == "game":
             # t.me/rsirange_bot?start=game — вход в игру из канала/рекламы, где /game не
@@ -2325,7 +2440,7 @@ def main() -> None:
     @dp.message(F.text == "ℹ️ О боте")
     async def _about(m):
         since = await asyncio.to_thread(journal.trail_judge_1m_since)
-        await m.answer(format_about(since))
+        await m.answer(format_about(since, runtime.signals_free_for_all()))
 
     @dp.message(Command("judge1m"))
     async def _judge1m_cmd(m):
@@ -2349,7 +2464,7 @@ def main() -> None:
 
     @dp.message(Command("terms"))
     async def _terms(m):
-        await m.answer(format_terms(), parse_mode="HTML")
+        await m.answer(format_terms(runtime.signals_free_for_all()), parse_mode="HTML")
 
     @dp.message(Command("backtest"))
     @dp.message(F.text == "🧪 Бэктест")
@@ -2366,6 +2481,13 @@ def main() -> None:
     @dp.message(F.text == "💳 Подписка")
     async def _subscribe(m):
         await asyncio.to_thread(payments.register_user, m.from_user.id, m.from_user.username)
+        if runtime.signals_free_for_all():
+            # подписку не продаём: экран без тарифов. Клавиатуру шлём заново — у клиента
+            # могла остаться старая, с кнопкой «Подписка»
+            await m.answer(
+                await asyncio.to_thread(payments.free_for_all_status_text, m.from_user.id),
+                reply_markup=_main_menu_kb(_is_admin(m)), parse_mode="HTML")
+            return
         text = await _subscribe_text(m.from_user.id, m.from_user.username)
         await m.answer(text, reply_markup=_subscribe_kb(), parse_mode="HTML")
 
@@ -2384,6 +2506,12 @@ def main() -> None:
         """«Все тарифы» под сообщением о конце триала (К-24) — полный экран /subscribe."""
         await cq.answer()
         await asyncio.to_thread(payments.register_user, cq.from_user.id, cq.from_user.username)
+        if runtime.signals_free_for_all():
+            await bot.send_message(
+                cq.from_user.id,
+                await asyncio.to_thread(payments.free_for_all_status_text, cq.from_user.id),
+                parse_mode="HTML")
+            return
         text = await _subscribe_text(cq.from_user.id, cq.from_user.username)
         await bot.send_message(cq.from_user.id, text, reply_markup=_subscribe_kb(),
                                parse_mode="HTML")
@@ -2404,6 +2532,9 @@ def main() -> None:
 
     @dp.message(Command("promo"))
     async def _promo(m):
+        if runtime.signals_free_for_all():
+            await m.answer(PROMO_CLOSED_TEXT, reply_markup=_main_menu_kb(_is_admin(m)))
+            return
         parts = (m.text or "").split(maxsplit=1)
         if len(parts) < 2:
             await m.answer("Формат: /promo <код>")
@@ -2416,9 +2547,10 @@ def main() -> None:
         await asyncio.to_thread(payments.register_user, m.from_user.id, m.from_user.username)
         link = f"https://t.me/rsirange_bot?start=ref_{m.from_user.id}"
         ref = await asyncio.to_thread(payments.referral_stats, m.from_user.id)
+        free = runtime.signals_free_for_all()
         await m.answer(
-            templates.render_referral_invite(link, ref, runtime.referral_reward_days()),
-            parse_mode="HTML")
+            templates.render_referral_invite(link, ref, runtime.referral_reward_days(), free),
+            parse_mode="HTML", reply_markup=_main_menu_kb(_is_admin(m)) if free else None)
 
     _QUIET_PRESET = (22, 6)                                 # тихие часы по умолчанию, UTC
 
@@ -2761,6 +2893,9 @@ def main() -> None:
 
     @dp.message(F.text == "🎟 Промокод")
     async def _promo_btn_start(m, state: FSMContext):
+        if runtime.signals_free_for_all():
+            await m.answer(PROMO_CLOSED_TEXT, reply_markup=_main_menu_kb(_is_admin(m)))
+            return
         await state.set_state(PromoState.code)
         await m.answer("Введите промокод:")
 
@@ -2925,7 +3060,7 @@ def main() -> None:
         uid = cq.from_user.id
         is_admin = uid in cfg.admin_ids
         if not is_admin \
-                and not await asyncio.to_thread(payments.is_paid, uid) \
+                and not await asyncio.to_thread(payments.has_full_access, uid) \
                 and not await asyncio.to_thread(payments.delivered_full, uid, sid):
             await cq.answer("Доступно получателям полного сигнала — /subscribe.",
                             show_alert=True)
@@ -2984,6 +3119,9 @@ def main() -> None:
 
     @dp.callback_query(F.data == "usdt_claim")
     async def _usdt_claim(cq):
+        if checkout.sales_closed():
+            await cq.answer(checkout.SALES_CLOSED_TEXT, show_alert=True)
+            return
         u = cq.from_user
         await asyncio.to_thread(payments.register_user, u.id, u.username)
         # заявка пишется ДО уведомлений: иначе мгновенный /grant по пингу закрывает
@@ -3086,7 +3224,8 @@ def main() -> None:
     async def _help(m):
         is_adm = _is_admin(m)
         # меню прикрепляется и здесь: старые юзеры без /start тоже получают клавиатуру
-        await m.answer(format_help(is_adm), reply_markup=_main_menu_kb(is_adm))
+        await m.answer(format_help(is_adm, runtime.signals_free_for_all()),
+                       reply_markup=_main_menu_kb(is_adm))
 
     @dp.my_chat_member()
     async def _added_to_chat(event):
@@ -4238,8 +4377,10 @@ def main() -> None:
             except Exception as e:                     # noqa: BLE001
                 log.warning("announce channel: %s", e)
         # как рассылка сигнала: повтор после 429, пауза между отправками, мёртвых — в
-        # blocked. Раньше 429 молча съедал сообщение получателю (аудит надёжности 30.10)
-        for uid in await asyncio.to_thread(payments.active_subscriber_ids):
+        # blocked. Раньше 429 молча съедал сообщение получателю (аудит надёжности 30.10).
+        # Аудитория — кто получает все сигналы: в режиме «бесплатно всем» это все живые
+        # юзеры (иначе после конца триалов объявление уходило бы только в канал)
+        for uid in await asyncio.to_thread(payments.full_access_ids):
             try:
                 await _send_retry(uid, text)
                 n += 1
@@ -4536,6 +4677,21 @@ def main() -> None:
     async def _check_help(m):
         from app.delivery import signal_check
         await m.answer(signal_check.HELP, parse_mode="HTML")
+
+    # кнопки меню режима «бесплатно всем»: только личка (как /audit и /rating)
+    @dp.message(F.text == "🔎 Проверить сигнал", F.chat.type == "private")
+    async def _check_btn(m):
+        await m.answer(CHECK_HOWTO, parse_mode="HTML", reply_markup=check_demo_markup())
+
+    @dp.message(F.text == "📡 Проверить канал", F.chat.type == "private")
+    async def _audit_btn(m):
+        await m.answer(channel_audit.HELP, parse_mode="HTML")
+
+    @dp.message(F.text == "🏆 Рейтинг каналов", F.chat.type == "private")
+    async def _rating_btn(m):
+        rows = await asyncio.to_thread(channel_rating.latest_rows)
+        await m.answer(channel_rating.render_rating(rows), parse_mode="HTML",
+                       disable_web_page_preview=True)
 
     @dp.callback_query(F.data == "check_demo")
     async def _check_demo(cq):
@@ -5036,7 +5192,8 @@ def main() -> None:
         channel_open = bool(channel) and runtime.channel_enabled() \
             and runtime.channel_mode() == "full"
         teaser = templates.render_teaser(                # соц-пруф на пейволле
-            sig, sid, stats=journal.stats(), open_channel="@rsi_range" if channel_open else None)
+            sig, sid, stats=journal.stats(), open_channel="@rsi_range" if channel_open else None,
+            free_for_all=runtime.signals_free_for_all())
         # разовая покупка сигнала (paid media): кнопка на тизере, если включена цена
         unlock_price = runtime.paid_signal_stars()
         unlock_kb = None
@@ -5421,14 +5578,19 @@ def main() -> None:
         # точка максимального интента: кнопки оплаты прямо в сообщении, не голый /subscribe
         # (аудит 02.09). Конец триала — свой текст с личным итогом и 2 тарифами (аудит
         # текстов 30.10, К-24), остальным — что осталось бесплатно + все тарифы (К-26)
+        # В режиме «сигналы бесплатны всем» тарифов нет; вместо них с этим сообщением
+        # приходит новое меню (проверка первой, без «Подписки») — иначе у клиента осталась
+        # бы старая клавиатура, противоречащая тексту «подписка больше не нужна»
         summ = await asyncio.to_thread(payments.trial_summary, uid)
+        free_menu = (_main_menu_kb(uid in cfg.admin_ids)
+                     if runtime.signals_free_for_all() else None)
         if summ is not None:
             await _send_retry(uid, templates.render_trial_ended(
                 summ, runtime.free_per_week()), parse_mode="HTML",
-                reply_markup=None if runtime.signals_free_for_all() else _trial_end_kb())
+                reply_markup=free_menu if free_menu is not None else _trial_end_kb())
         else:
             await _send_retry(uid, templates.render_access_ended(runtime.free_per_week()),
-                              reply_markup=None if runtime.signals_free_for_all()
+                              reply_markup=free_menu if free_menu is not None
                               else _subscribe_kb())
 
     expiry_notices = ExpiryNotices()
@@ -5449,6 +5611,8 @@ def main() -> None:
         # напоминания о продлении (за 3 дня, единожды). mark_reminded ставится и при
         # сбое: заблокировавший бота платник ретраился каждые 60с все ~2.5 суток окна
         # (аудит 02.09; паттерн дрипа)
+        if runtime.signals_free_for_all():
+            return                                      # подписку не продаём — продлевать нечего
         for row in await asyncio.to_thread(payments.due_for_reminder, 3):
             try:
                 await _send_retry(
@@ -5510,9 +5674,15 @@ def main() -> None:
                                         float(runtime.trial_days()))
         if stale:
             log.info("дрип: закрыто задним числом %d протухших триалов", stale)
+        free = runtime.signals_free_for_all()
         for uid, stage in await asyncio.to_thread(payments.due_for_trial_drip,
                                                   float(runtime.trial_days())):
             try:
+                if free and stage not in templates.TRIAL_DRIP and drip_stage_is_moot(
+                        stage, free, await asyncio.to_thread(payments.get_user, uid)):
+                    # писать «пробный доступ заканчивается» не о чем — стадию закрываем молча
+                    await asyncio.to_thread(payments.mark_trial_drip, uid, stage)
+                    continue
                 drip = (templates.TRIAL_DRIP[stage] if stage in templates.TRIAL_DRIP
                         else templates.render_trial_last_day(
                             runtime.free_per_week(), await asyncio.to_thread(journal.stats)))
@@ -5531,6 +5701,8 @@ def main() -> None:
         # сейчас. Промокод выдаём ДО отправки; при сбое отправки всё равно mark_reminded,
         # чтобы юзер с закрытой личкой не ретраился каждый такт (как в дрипе).
         _WB_DAYS, _WB_VALID = 7, 5
+        if runtime.signals_free_for_all():
+            return                                      # возвращать некуда: всё и так бесплатно
         for row in await asyncio.to_thread(payments.due_for_winback, 2):
             uid = row["tg_id"]
             try:
@@ -5849,7 +6021,7 @@ def main() -> None:
 
         sent = f_sent = 0
         try:
-            for uid in await asyncio.to_thread(payments.active_subscriber_ids):
+            for uid in await asyncio.to_thread(payments.full_access_ids):
                 try:
                     if await _muted(uid):
                         continue
@@ -5873,7 +6045,7 @@ def main() -> None:
                     if _dead_recipient(e):
                         await asyncio.to_thread(payments.mark_blocked, uid)
             # тизерных закрытий не было — блок молча отсутствует, дайджест уходит всё равно
-            for uid in await asyncio.to_thread(payments.free_active_ids):
+            for uid in await asyncio.to_thread(payments.limited_ids):
                 try:
                     if await _muted(uid):
                         continue
@@ -6051,7 +6223,8 @@ def main() -> None:
                     a["tg_id"],
                     f"⏰ <b>{alerts_mod.base_of(a['symbol'])} коснулся "
                     f"{templates._price(a['price'])}</b>\nАлерт сработал и снят. "
-                    "Новый: /alert · сигналы по этой монете: /subscribe",
+                    + ("Новый: /alert" if runtime.signals_free_for_all()
+                       else "Новый: /alert · сигналы по этой монете: /subscribe"),
                     parse_mode="HTML")
             except Exception as e:                     # noqa: BLE001
                 low_ = str(e).lower()

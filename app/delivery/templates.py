@@ -217,14 +217,24 @@ def _proof_line(stats: dict | None) -> str:
 
 
 def render_teaser(sig: Signal, signal_id: int, stats: dict | None = None,
-                  open_channel: str | None = None) -> str:
+                  open_channel: str | None = None, free_for_all: bool = False) -> str:
     """Превью для free-юзера сверх недельного лимита / канала в режиме teaser.
+
+    free_for_all — режим «сигналы бесплатны всем» (runtime.signals_free_for_all): подписку
+    не продаём, поэтому превью ведёт в бота за бесплатным полным сигналом, без замка.
 
     stats (journal.stats()) — соц-пруф прямо на пейволле: не голое «по подписке», а
     проверяемые цифры в точке, где юзер упёрся в лимит.
     open_channel — канал, где этот же сигнал уже опубликован целиком (channel_mode=full):
     тогда «уровни по подписке» было бы неправдой, и тизер говорит, за что на самом деле
     платят — личка без лимита и объём под свой депозит."""
+    if free_for_all:
+        return (
+            f"📊 <b>СИГНАЛ #{signal_id}</b> — превью\n"
+            f"{_sig_head(sig)}\n"
+            f"{_proof_line(stats)}"
+            "Вход, стоп, цели и разбор — бесплатно в боте @rsirange_bot."
+        )
     if open_channel:
         offer = (f"Полный сигнал — в канале {esc(open_channel)}. В личку без лимита, "
                  "с объёмом под твой депозит (/depo) — по подписке.\n"
@@ -286,9 +296,21 @@ def render_referral_reward(days: int) -> str:
     )
 
 
-def render_referral_invite(link: str, ref: dict, reward_days: int) -> str:
+def render_referral_invite(link: str, ref: dict, reward_days: int,
+                           free_for_all: bool = False) -> str:
     """Экран /referral: личная ссылка + статистика приглашений. reward начисляется только за
-    РЕАЛЬНУЮ оплату приглашённого (не триал) — так и пишем, без ложных обещаний."""
+    РЕАЛЬНУЮ оплату приглашённого (не триал) — так и пишем, без ложных обещаний.
+    free_for_all — подписку не продаём: награды днями подписки нет, остаётся ссылка."""
+    if free_for_all:
+        return (
+            "🤝 <b>Поделитесь ботом</b>\n"
+            f"{LINE}\n"
+            f"Ваша ссылка:\n<code>{esc(link)}</code>\n\n"
+            f"Пришли по ней: <b>{ref.get('invited', 0)}</b>\n"
+            f"{LINE}\n"
+            "Сигналы и проверка каналов бесплатны для всех, поэтому наград за приглашения "
+            "сейчас нет. Просто отправьте ссылку тому, кому пригодится проверка сигналов."
+        )
     return (
         "🤝 <b>Приглашайте — получайте дни подписки</b>\n"
         f"{LINE}\n"
@@ -599,8 +621,9 @@ def personal_size_line(sig, depo_usd: float, risk_pct: float, max_leverage: int 
             f"\n   Настроено /depo: ${depo_usd:g}, {risk_pct:g}% на сделку")
 
 
-def render_xray(x: dict) -> str:
+def render_xray(x: dict, free_for_all: bool = False) -> str:
     """«Рентген сделки» (deep-link из канала): почему движок вошёл и как вёл позицию.
+    free_for_all — подписку не продаём: последняя строка не зовёт в /subscribe.
 
     Никто на рынке не показывает «почему» — все показывают «что». Рентген: уверенность
     движка (то же число, что в посте сигнала), путь трейлинга, тайминги — только факты
@@ -637,7 +660,9 @@ def render_xray(x: dict) -> str:
         peak = (f", максимум зафиксированного <b>+{x['trail_peak_r']:.2f}R</b>"
                 if x.get("trail_peak_r") is not None else "")
         lines.append(f"Трейлинг: {x['trail_moves']} подтяжек стопа{peak}")
-    lines += [LINE,
-              "Так выглядит каждая наша сделка изнутри. Полные сигналы: /subscribe",
+    tail = ("Так выглядит каждая наша сделка изнутри. Все сигналы — бесплатно, в этом боте."
+            if free_for_all else
+            "Так выглядит каждая наша сделка изнутри. Полные сигналы: /subscribe")
+    lines += [LINE, tail,
               "⚠️ Не финсовет. Прошлые результаты не определяют будущие."]
     return "\n".join(lines)
