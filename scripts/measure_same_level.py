@@ -66,13 +66,9 @@ def run(job: tuple) -> tuple:
 def twins(p: pd.DataFrame, tol_r: float) -> pd.Series:
     """Сделка открыта, пока активна другая сделка той же монеты и стороны того же уровня
     (окно активности — как у дедупа портфеля: от сигнала до выхода).
-
-    ДЕФЕКТ (найден после прогона 10.11, код не правился — он дал run.log): группировка без
-    набора данных, а 8 монет есть и в «9 монет», и в ротации — одна сделка из двух наборов
-    считается двойником самой себя; числа двойников на ротации завышены. На вердикт не
-    влияет. Исправление — добавить "data" в groupby (раздел 11 документа замера)."""
+    Наборы данных («5y» и «rot») считаются раздельно."""
     out = pd.Series(False, index=p.index)
-    for _k, g in p.sort_values("sig_ms", kind="stable").groupby(["symbol", "side"]):
+    for _k, g in p.sort_values("sig_ms", kind="stable").groupby(["data", "symbol", "side"]):
         rows = list(g.itertuples())
         for i, b in enumerate(rows):
             out[b.Index] = any(a.sig_ms <= b.sig_ms < a.exit_ms
