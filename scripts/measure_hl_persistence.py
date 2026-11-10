@@ -37,14 +37,18 @@ def ms(day: str) -> int:
     return int(pd.Timestamp(day, tz="UTC").value // 1_000_000)
 
 
-def load_series() -> dict:
-    """{адрес: (время мс, накопленный PnL, капитал перп-счёта)} из portfolio.jsonl."""
+def load_series(lo: int = 0, hi: int = 40) -> dict:
+    """{адрес: (время мс, накопленный PnL, капитал перп-счёта)} из portfolio.jsonl. Берутся
+    счета, чей остаток по адресу (как в hl_fetch.in_share) лежит в [lo, hi): 0–40 —
+    зарегистрированная выборка, 40–100 — остальные счета для повторения."""
     out = {}
     with open(root() / "portfolio.jsonl", encoding="utf-8") as f:
         for line in f:
             try:
                 r = json.loads(line)
             except ValueError:
+                continue
+            if not lo <= int(r["a"][-6:], 16) % 100 < hi:
                 continue
             a = r["all"]
             if len(a["pnl"]) < 2 or len(a["pnl"]) != len(a["av"]):
@@ -182,8 +186,11 @@ def main() -> None:
     ap.add_argument("--jobs-out", default=None)
     ap.add_argument("--roles-out", default=None)
     ap.add_argument("--counts-only", action="store_true")
+    ap.add_argument("--lo", type=int, default=0)
+    ap.add_argument("--hi", type=int, default=40)
     a = ap.parse_args()
-    series = load_series()
+    series = load_series(a.lo, a.hi)
+    print(f"выборка по адресу: остаток в [{a.lo}, {a.hi})")
     df = table(series)
     print(f"счетов с рядом: {len(series)}; строк вселенной по датам: "
           + ", ".join(f"{p} {n}" for p, n in df["part"].value_counts().items()))
