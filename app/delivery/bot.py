@@ -2136,6 +2136,82 @@ class MaintenanceGuard:
                                              exc_info=True)
 
 
+async def handle_stream_frame(symbol_ws: str, high: float, low: float, close: float,
+                              start_ms: int = 0, *, last_price: dict[str, float],
+                              on_trail: Callable[[int], object],
+                              on_alerts: Callable[[list], object],
+                              on_fill: Callable[[object, str], Awaitable[object]]) -> None:
+    """Кадр реалтайм-стрима Bybit: executor, прайс-алерты, реалтайм-вход. Вынесено из
+    main() ради тестов (#881).
+
+    Стрим слушает вотчлист и монеты открытых публичных сигналов сверх него
+    (stream.extra_symbols), поэтому кадр ещё не значит «монета из вотчлиста»:
+      * executor — каждый кадр: stream_tick сверяет свой кеш позиций, вотчлист ему не нужен;
+      * прайс-алерты и last_price — только монеты вотчлиста: юзеру обещано «слежу, пока
+        монета в вотчлисте», по остальным алерт молчит, как и раньше;
+      * реалтайм-вход — монеты вотчлиста и монеты с открытым публичным сигналом: ради него
+        сигналы, ждущие входа, и попадают в топики. Правило касания и окно входа те же.
+    Telegram и фоновые задачи остаются у вызывающего: on_trail(sid) — активировать нативный
+    трейл, on_alerts(fired) — разослать сработавшие алерты, on_fill(row, now_iso) — пост
+    «вход исполнен» (вход в журнале к этому моменту уже зафиксирован)."""
+    from app import runtime
+    from app.data.stream import entry_touched, ws_symbol
+    from app.delivery import alerts as alerts_mod
+
+    log = logging.getLogger("bot")
+    # executor (30.10): активация нативного трейла по цене ЖУРНАЛА в реальном времени.
+    # stream_tick — только память (кеш позиций пересобирает fast-цикл), сеть BingX —
+    # в потоке и не чаще раза в 30 с на сигнал; при выключенном executor кеш пуст
+    try:
+        from app.v2 import bingx_executor
+        for sid in bingx_executor.stream_tick(symbol_ws, high, low, close, start_ms):
+            on_trail(sid)
+    except Exception as e:                             # noqa: BLE001 — стрим не падает
+        log.warning("executor stream_tick %s: %s", symbol_ws, e)
+    symbol = next((s for s in runtime.symbols() if ws_symbol(s) == symbol_ws), None)
+    if symbol is not None:
+        # прайс-алерты (/alert): триггер по КРОССИНГУ уровня последней ценой между
+        # тиками, НЕ по экстремумам бара — high/low включают движение ДО постановки
+        # алерта, и алерт «на уровень, где бар уже был» стрелял бы мгновенно и ложно
+        # (ревью 12.08). Цена первого тика после старта — только сид, без выстрела.
+        # Отправка — отдельной таской, горячий цикл стрима не ждёт Telegram.
+        try:
+            prev = last_price.get(symbol_ws)
+            last_price[symbol_ws] = close
+            if prev is not None and prev != close:
+                fired = await asyncio.to_thread(
+                    alerts_mod.check_and_trigger, symbol,
+                    max(prev, close), min(prev, close))
+                if fired:
+                    on_alerts(fired)
+        except Exception as e:                         # noqa: BLE001
+            log.warning("alerts %s: %s", symbol, e)
+    else:
+        # монета сверх вотчлиста: в топиках она ради открытого сигнала. Unified-символ берём
+        # из журнала — по топику Bybit он однозначно не восстанавливается. Сигнала уже нет
+        # (закрылся, а топик доживает до переподключения) — кадр дальше не идёт
+        opened = await asyncio.to_thread(journal.open_signal_symbols)
+        symbol = next((s for s in opened if ws_symbol(s) == symbol_ws), None)
+        if symbol is None:
+            return
+    # реалтайм-филл: касание entry внутри бара -> мгновенный «вход исполнен».
+    # Гонку с bar-скорингом решает атомарный try_mark_filled; официальный исход
+    # сделки по-прежнему считает ТОЛЬКО bar-скоринг (контракт трек-рекорда).
+    rows = await asyncio.to_thread(journal.unfilled_open_signals, symbol)
+    scoring_tf = min((SMCEngine.TF_MINUTES.get(tf, 60) for tf in runtime.timeframes()),
+                     default=60)
+    now_dt = datetime.now(timezone.utc)
+    for row in rows:
+        if not entry_touched(row["entry"], high, low):
+            continue
+        if not journal.fill_window_open(row, now_dt, scoring_tf):
+            continue                                    # окно ожидания вышло — не сделка
+        now_iso = clock.utcnow_iso()
+        if not await asyncio.to_thread(journal.try_mark_filled, row["id"], now_iso):
+            continue                                    # бар-скоринг успел первым
+        await on_fill(row, now_iso)
+
+
 def _fmt_days(days: float) -> str:
     """Человекочитаемая длительность подписки: дробные дни (тестовые тарифы) -> часы."""
     if days == int(days):
@@ -6295,75 +6371,43 @@ def main() -> None:
     _trail_inflight: set = set()
     _trail_tasks: set = set()
 
+    def _spawn_trail(sid: int) -> None:
+        if sid not in _trail_inflight:
+            _trail_inflight.add(sid)
+            # ссылка на таску обязательна: без неё GC может снять её на полпути
+            task_ = asyncio.create_task(_activate_trail(sid))
+            _trail_tasks.add(task_)
+            task_.add_done_callback(_trail_tasks.discard)
+
+    def _spawn_alerts(fired: list) -> None:
+        spawn(_push_alerts(fired), name="price-alerts")    # spawn держит ссылку от GC
+
+    async def _post_realtime_fill(row, now_iso: str) -> None:
+        """Пост «вход исполнен» по реалтайм-филлу: вход в журнале уже зафиксирован."""
+        channel = runtime.signals_channel()
+        if not channel or not runtime.channel_enabled():
+            return
+        c = {"id": row["id"], "symbol": row["symbol"], "side": row["side"],
+             "timeframe": row["timeframe"], "status": "filled",
+             "entry": row["entry"], "filled_at": now_iso}
+        try:
+            want_chart = lifecycle_chart_wanted(
+                runtime.lifecycle_chart_enabled(), runtime.channel_mode())
+            msg = await _send_lifecycle_post(
+                channel, row["id"],
+                templates.render_fill(c, runtime.channel_mode() == "full"), want_chart)
+            log.info("сигнал #%s: пост filled OK (msg_id=%s, realtime)",
+                     row["id"], msg.message_id)
+        except Exception as e:                         # noqa: BLE001
+            log.warning("realtime fill #%s: %s", row["id"], e)
+
     async def _on_intrabar(symbol_ws: str, high: float, low: float, close: float,
                            start_ms: int = 0):
-        # реалтайм-филл: касание entry внутри бара -> мгновенный «вход исполнен».
-        # Гонку с bar-скорингом решает атомарный try_mark_filled; официальный исход
-        # сделки по-прежнему считает ТОЛЬКО bar-скоринг (контракт трек-рекорда).
-        from app.data.stream import entry_touched, ws_symbol
-        from app.delivery import alerts as alerts_mod
-        # executor (30.10): активация нативного трейла по цене ЖУРНАЛА в реальном времени.
-        # stream_tick — только память (кеш позиций пересобирает fast-цикл), сеть BingX —
-        # в потоке и не чаще раза в 30 с на сигнал; при выключенном executor кеш пуст
-        try:
-            from app.v2 import bingx_executor
-            for sid in bingx_executor.stream_tick(symbol_ws, high, low, close, start_ms):
-                if sid not in _trail_inflight:
-                    _trail_inflight.add(sid)
-                    # ссылка на таску обязательна: без неё GC может снять её на полпути
-                    task_ = asyncio.create_task(_activate_trail(sid))
-                    _trail_tasks.add(task_)
-                    task_.add_done_callback(_trail_tasks.discard)
-        except Exception as e:                         # noqa: BLE001 — стрим не падает
-            log.warning("executor stream_tick %s: %s", symbol_ws, e)
-        for symbol in runtime.symbols():
-            if ws_symbol(symbol) != symbol_ws:
-                continue
-            # прайс-алерты (/alert): триггер по КРОССИНГУ уровня последней ценой между
-            # тиками, НЕ по экстремумам бара — high/low включают движение ДО постановки
-            # алерта, и алерт «на уровень, где бар уже был» стрелял бы мгновенно и ложно
-            # (ревью 12.08). Цена первого тика после старта — только сид, без выстрела.
-            # Отправка — отдельной таской, горячий цикл стрима не ждёт Telegram.
-            try:
-                prev = _last_price.get(symbol_ws)
-                _last_price[symbol_ws] = close
-                if prev is not None and prev != close:
-                    fired = await asyncio.to_thread(
-                        alerts_mod.check_and_trigger, symbol,
-                        max(prev, close), min(prev, close))
-                    if fired:                           # spawn держит ссылку от сборщика мусора
-                        spawn(_push_alerts(fired), name="price-alerts")
-            except Exception as e:                     # noqa: BLE001
-                log.warning("alerts %s: %s", symbol, e)
-            rows = await asyncio.to_thread(journal.unfilled_open_signals, symbol)
-            scoring_tf = min((SMCEngine.TF_MINUTES.get(tf, 60) for tf in runtime.timeframes()),
-                             default=60)
-            now_dt = datetime.now(timezone.utc)
-            for row in rows:
-                if not entry_touched(row["entry"], high, low):
-                    continue
-                if not journal.fill_window_open(row, now_dt, scoring_tf):
-                    continue                            # окно ожидания вышло — не сделка
-                now_iso = clock.utcnow_iso()
-                if not await asyncio.to_thread(journal.try_mark_filled, row["id"], now_iso):
-                    continue                            # бар-скоринг успел первым
-                channel = runtime.signals_channel()
-                if not channel or not runtime.channel_enabled():
-                    continue
-                c = {"id": row["id"], "symbol": row["symbol"], "side": row["side"],
-                     "timeframe": row["timeframe"], "status": "filled",
-                     "entry": row["entry"], "filled_at": now_iso}
-                try:
-                    want_chart = lifecycle_chart_wanted(
-                        runtime.lifecycle_chart_enabled(), runtime.channel_mode())
-                    msg = await _send_lifecycle_post(
-                        channel, row["id"],
-                        templates.render_fill(c, runtime.channel_mode() == "full"), want_chart)
-                    log.info("сигнал #%s: пост filled OK (msg_id=%s, realtime)",
-                             row["id"], msg.message_id)
-                except Exception as e:                 # noqa: BLE001
-                    log.warning("realtime fill #%s: %s", row["id"], e)
-            break
+        # разбор кадра — handle_stream_frame (уровень модуля, под тестами). Здесь остаётся
+        # то, чему нужны бот и цикл событий: таски трейла и алертов, пост «вход исполнен»
+        await handle_stream_frame(symbol_ws, high, low, close, start_ms,
+                                  last_price=_last_price, on_trail=_spawn_trail,
+                                  on_alerts=_spawn_alerts, on_fill=_post_realtime_fill)
 
     async def _stream():
         from app.data.market_data import _TF_SECONDS
@@ -6373,8 +6417,11 @@ def main() -> None:
             tfs = [tf for tf in runtime.timeframes() if tf in _TF_SECONDS] or ["1h"]
             return min(tfs, key=lambda t: _TF_SECONDS[t])
 
+        # топики = вотчлист + монеты открытых публичных сигналов сверх него (#881): состав
+        # run_stream пересчитывает из БД при каждом подключении
         await run_stream(runtime.symbols, _youngest_tf, _on_intrabar,
-                         runtime.stream_enabled, log)
+                         runtime.stream_enabled, log,
+                         get_open_symbols=journal.open_signal_symbols)
 
     async def _poller():
         from app.data.market_data import run_poller

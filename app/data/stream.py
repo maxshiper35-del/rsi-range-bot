@@ -7,6 +7,11 @@ stream.py — реалтайм-поток Bybit v5 (public linear WebSocket): kl
 единственным судьёй результата (контракт трек-рекорда), poller — бэкстопом
 для филлов (guard filled_at IS NULL исключает дубли в обе стороны).
 
+Состав подписки (#881): вотчлист целиком + монеты открытых публичных сигналов сверх него
+(extra_symbols, не больше EXTRA_SYMBOLS_MAX). Монета, вышедшая из вотчлиста при открытом
+сигнале, остаётся в топиках: по кадрам стрима журнал засчитывает вход, а executor ставит
+биржевой трейл.
+
 Зависимостей нет: aiohttp уже приходит с aiogram.
 """
 from __future__ import annotations
@@ -21,8 +26,13 @@ WS_URL = "wss://stream.bybit.com/v5/public/linear"
 _BYBIT_INTERVAL = {"1m": "1", "5m": "5", "15m": "15", "30m": "30",
                    "1h": "60", "4h": "240", "1d": "D"}
 
-_RECONNECT_MAX_AGE = 900.0      # сек: пересобрать соединение (подхватить смену watchlist)
+# сек: пересобрать соединение (подхватить смену состава — вотчлист и открытые сигналы)
+_RECONNECT_MAX_AGE = 900.0
 _PING_EVERY = 20.0              # Bybit требует ping не реже 20с
+# Потолок монет СВЕРХ вотчлиста в подписке (#881). По логу с 30.10 монет с открытыми
+# сигналами вне вотчлиста обычно 1–3 (docs/research/2026-11-10-trail-activation-881.md);
+# потолок — страховка от разрастания подписки, а не рабочий режим
+EXTRA_SYMBOLS_MAX = 10
 
 
 def ws_symbol(symbol: str) -> str:
@@ -73,16 +83,57 @@ def entry_touched(entry: float, high: float, low: float) -> bool:
     return low <= entry <= high
 
 
-async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log) -> None:
+def extra_symbols(watchlist: list, open_symbols: list,
+                  cap: int = EXTRA_SYMBOLS_MAX) -> tuple[list, list]:
+    """Монеты открытых сигналов, которые стрим слушает СВЕРХ вотчлиста (#881).
+
+    watchlist — вотчлист (unified): в подписку он идёт всегда целиком. open_symbols — монеты
+    публичных открытых сигналов в порядке приоритета (journal.open_signal_symbols: сначала
+    с позицией, внутри — от свежего сигнала к старому). -> (добавка, не вошедшие). Добавка —
+    монеты вне вотчлиста в том же порядке, не больше cap. Не вошедшие — остаток сверх потолка:
+    стрим их не слушает, как было до правки (вход засчитает часовой такт, активацию трейла
+    поймает опрос цены раз в минуту). Сравнение — по топику Bybit: монета вотчлиста в добавку
+    не попадает, и ни одна монета не идёт в подписку дважды. Без сети и БД."""
+    seen = {ws_symbol(s) for s in watchlist}
+    extra: list = []
+    skipped: list = []
+    for symbol in open_symbols:
+        key = ws_symbol(symbol)
+        if key in seen:
+            continue
+        seen.add(key)
+        (extra if len(extra) < cap else skipped).append(symbol)
+    return extra, skipped
+
+
+def composition_line(n_topics: int, extra: list, skipped: list) -> str:
+    """Строка лога о составе подписки: сколько топиков и какие монеты сверх вотчлиста.
+    run_stream пишет её только при смене состава — по ней при разборе видно, слушал ли
+    стрим монету в нужный час (у #881 состав восстанавливали по косвенным признакам)."""
+    line = f"стрим: состав подписки — {n_topics} топиков, сверх вотчлиста "
+    line += f"{len(extra)}: {', '.join(extra)}" if extra else "нет"
+    if skipped:                     # непуст только при полной добавке: len(extra) — потолок
+        line += f"; без подписки (потолок {len(extra)}): {', '.join(skipped)}"
+    return line
+
+
+async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log,
+                     get_open_symbols=None) -> None:
     """Вечный цикл стрима: connect -> subscribe kline.{tf}.{sym} -> события -> reconnect.
 
-    get_symbols() -> list[str] (unified), get_tf() -> str (наш лейбл, напр. '1h'),
+    get_symbols() -> list[str] (unified) — вотчлист, get_tf() -> str (наш лейбл, напр. '1h'),
     on_intrabar(symbol_ws, high, low, close, start_ms) -> awaitable, enabled() -> bool
     (флаг runtime, выключение подхватывается не позже _RECONNECT_MAX_AGE), log — логгер.
+    get_open_symbols() -> list[str] (unified) — монеты открытых публичных сигналов в порядке
+    приоритета (сначала с позицией): те, что вне вотчлиста, идут в подписку сверх него
+    (extra_symbols); None — только вотчлист. Состав пересчитывается при КАЖДОМ подключении,
+    поэтому монета с открытым сигналом не теряет подписку, когда выходит из вотчлиста.
+    Обработчик получает кадры и таких монет — «кадр = монета вотчлиста» больше не верно.
     Ошибки цикла гасятся с бэкоффом — стрим никогда не роняет процесс."""
     import aiohttp
 
     backoff = 1.0
+    composition = None              # состав прошлой подписки: строка о нём — только при смене
     while True:
         try:
             # чек флага ВНУТРИ try: enabled() — синхронное чтение SQLite, редкий
@@ -92,13 +143,32 @@ async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log) -> None:
                 await asyncio.sleep(30)
                 continue
             symbols = get_symbols()
+            extra, skipped = extra_symbols(
+                symbols, get_open_symbols() if get_open_symbols is not None else [])
             interval = bybit_interval(get_tf())
             topics = [f"kline.{interval}.{ws_symbol(s)}" for s in symbols]
+            extra_topics = [f"kline.{interval}.{ws_symbol(s)}" for s in extra]
             planned = False                             # False -> сервер закрыл (close/error)
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(WS_URL, heartbeat=None) as ws:
                     await ws.send_json({"op": "subscribe", "args": topics})
-                    log.info("стрим подключён: %d топиков (%s)", len(topics), interval)
+                    # добавка — отдельными запросами, по монете: если Bybit отклонит топик
+                    # (монету сняли с торгов уже после выхода из вотчлиста), без кадров
+                    # останется только она — не вотчлист и не остальная добавка; сам отказ
+                    # виден в логе («стрим: отказ операции»)
+                    for topic in extra_topics:
+                        await ws.send_json({"op": "subscribe", "args": [topic]})
+                    n_topics = len(topics) + len(extra_topics)
+                    log.info("стрим подключён: %d топиков (%s)", n_topics, interval)
+                    subscribed = (frozenset(topics + extra_topics), frozenset(extra),
+                                  frozenset(skipped))
+                    if subscribed != composition:       # не при каждом плановом reconnect
+                        composition = subscribed
+                        line = composition_line(n_topics, extra, skipped)
+                        if skipped:                     # потолок оставил монеты без стрима
+                            log.warning("%s", line)
+                        else:
+                            log.info("%s", line)
                     started = asyncio.get_event_loop().time()
                     last_ping = started
                     while True:

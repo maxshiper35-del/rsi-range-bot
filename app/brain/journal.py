@@ -50,6 +50,24 @@ def unfilled_open_signals(symbol: str) -> list:
                     "AND result_r IS NULL AND filled_at IS NULL", (symbol,))
 
 
+def open_signal_symbols() -> list:
+    """Монеты ПУБЛИЧНЫХ открытых сигналов (status='open' без исхода: и ждущих входа, и уже
+    в позиции). Порядок — приоритет подписки: сначала монеты, где вход уже засчитан (им
+    нужна активация биржевого трейла), затем ждущие входа; внутри группы — от самого свежего
+    сигнала к старому. Свежесть — по id: это порядок записи в журнал, он однозначен и не
+    зависит от формата меток времени.
+
+    Для подписки реалтайм-стрима (#881): монета, вышедшая из вотчлиста при открытом сигнале,
+    остаётся в топиках — иначе вход по ней засчитывал только часовой такт, а активацию
+    биржевого трейла ловил опрос цены раз в минуту. Тени (rejected) и кандидаты сюда не
+    входят: реалтайм-входа и позиции executor у них нет, их исход доскоривает поллер
+    (symbols_with_open_positions)."""
+    rows = db.query("SELECT symbol, MAX(filled_at IS NOT NULL) AS in_pos, MAX(id) AS last_id "
+                    "FROM signals WHERE status='open' AND result_r IS NULL "
+                    "GROUP BY symbol ORDER BY in_pos DESC, last_id DESC")
+    return [r["symbol"] for r in rows]
+
+
 def symbols_with_open_positions() -> list:
     """Символы с неразрешёнными сигналами (open без исхода либо rejected-тень).
 
