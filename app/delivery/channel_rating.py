@@ -230,14 +230,44 @@ def verdict(row: dict) -> Verdict:
     return Verdict("в плюсе", "pos") if row["r_total"] > 0 else Verdict("в минусе", "neg")
 
 
+def _subs_num(n: int) -> str:
+    if n >= 1_000_000:
+        return f"~{n / 1_000_000:.1f} млн"
+    if n >= 1_000:
+        return f"~{round(n / 1_000)} тыс."
+    return f"~{n}"
+
+
 def _subs(n: int | None) -> str:
     if not n:
         return "подписчиков: нет данных"
-    if n >= 1_000_000:
-        return f"~{n / 1_000_000:.1f} млн подписчиков"
-    if n >= 1_000:
-        return f"~{round(n / 1_000)} тыс. подписчиков"
-    return f"~{n} подписчиков"
+    return f"{_subs_num(n)} подписчиков"
+
+
+def split_rows(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Строки рейтинга -> (есть что проверять, проверять нечего).
+
+    Замер 10.11.2026: из 51 существующего канала с «сигналами» в названии или в подборках
+    сигнал с входом и стопом в открытой ленте публикуют три. Остальные, включая самые
+    крупные, показывают итоги и разборы, а сами сигналы держат в платной части. Такой канал
+    тоже в обходе: «проверять нечего» — честный результат проверки, но таблицу он не
+    занимает — идёт одной строкой со счётом (empty_line)."""
+    return [r for r in rows if r["checked"]], [r for r in rows if not r["checked"]]
+
+
+def empty_line(empty: list[dict]) -> str:
+    """Одна строка про каналы без единого проверяемого сигнала. Имён нет: счёт и размер."""
+    n = len(empty)
+    subs = sorted(r["subscribers"] for r in empty if r["subscribers"])
+    size = ""
+    if len(subs) >= 2 and subs[0] != subs[-1]:
+        size = f" (от {_subs_num(subs[0])} до {_subs_num(subs[-1])} подписчиков)"
+    elif subs:
+        size = f" ({_subs_num(subs[-1])} подписчиков)"
+    word = channel_audit._plural(n, "канал", "канала", "каналов")
+    return (f"Ещё {n} {word}{size}: в последних постах открытой ленты нет ни одного сигнала "
+            "с входом и стопом — проверять нечего. Итоги и скриншоты прибыли проверкой не "
+            "считаются.")
 
 
 def _pct(a: int, b: int) -> str:
@@ -268,7 +298,8 @@ def render_rating(rows: list[dict], max_rows: int = RATING_MAX_ROWS) -> str:
              "Бот сам читает публичные каналы и прогоняет их сигналы по свечам Bybit. "
              "Вход, стоп и цель — как в постах; итог — если закрывать всю позицию на первой "
              "цели. Названия не публикуем — только цифры.", ""]
-    for row in rows[:max_rows]:
+    check, empty = split_rows(rows)
+    for row in check[:max_rows]:
         v = verdict(row)
         f = row["filled"]
         lines.append(
@@ -276,8 +307,12 @@ def render_rating(rows: list[dict], max_rows: int = RATING_MAX_ROWS) -> str:
             f"сигналов {row['checked']} · до первой цели {_pct(row['tp1'], f)} · "
             f"итог на TP1 <b>{_r(row['r_total'])}</b> за {row['r_trades']} сд. · "
             f"{v.label}{_trend(row)}")
-    if len(rows) > max_rows:
-        lines.append(f"…и ещё {len(rows) - max_rows}.")
+    if len(check) > max_rows:
+        lines.append(f"…и ещё {len(check) - max_rows}.")
+    if empty:
+        if check:
+            lines.append("")
+        lines.append(empty_line(empty))
     lines += ["", "Проверить свой канал — /audit @имя. Не финансовый совет."]
     return "\n".join(lines)
 
@@ -321,6 +356,7 @@ def rating_card_html(rows: list[dict], week_label: str, bot: str = "rsirange_bot
     """PNG через graphics.render_html_to_png(selector=".card"). Имён каналов нет."""
     body_rows = ['<div class="row h"><div>Канал</div><div>Подписчиков</div><div>До TP1</div>'
                  '<div>Итог на TP1</div><div>Статус</div></div>']
+    rows, empty = split_rows(rows)
     for row in rows[:max_rows]:
         v = verdict(row)
         f = row["filled"]
@@ -335,6 +371,8 @@ def rating_card_html(rows: list[dict], week_label: str, bot: str = "rsirange_bot
     fine = ("Вход, стоп и цели — как в постах каналов; исход — по свечам биржи после публикации. "
             "Итог — вся позиция на первой цели. Названия каналов не публикуем. "
             "Проверить любой канал — /audit в боте.")
+    if empty:
+        fine = esc(empty_line(empty)) + " " + fine
     body = (
         '<div class="card">'
         '<div class="head"><div class="brand">RSI RANGE</div>'

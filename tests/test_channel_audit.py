@@ -401,7 +401,11 @@ def test_audit_counts_every_branch():
 def test_audit_empty_channel():
     agg = ca.audit([], {}, T0)
     assert agg["posts"] == 0 and agg["first"] is None and not ca.card_worthy(agg)
-    assert "не нашёл сигналов" in ca.render_audit("quiet", None, agg)
+    txt = ca.render_audit("quiet", None, agg)
+    assert "не нашёл сигналов" in txt
+    # самый частый исход: это вывод о канале, а не сбой бота, и у человека есть следующий шаг
+    assert "открыто не публикует" in txt and "/rating" in txt
+    assert "закрытой части канала" in txt and "/check" in txt
 
 
 def test_ambiguous_bar_counts_as_stop():

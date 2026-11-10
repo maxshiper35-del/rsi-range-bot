@@ -280,3 +280,51 @@ def test_public_rating_command_and_admin_gate(fresh_db, monkeypatch):
     from app.delivery import bot as botmod
     src = open(botmod.__file__, encoding="utf-8").read()
     assert '("рейтинг каналов", _mt_channel_rating)' in src
+
+
+def _empty_agg() -> dict:
+    """Канал, в ленте которого нет ни одного сигнала с входом и стопом."""
+    return _agg(filled=0, tp1=0, stop=0, r_total=0.0, r_trades=0, checked=0, no_stop=0, posts=60)
+
+
+def test_channels_with_nothing_to_check_go_in_one_line(fresh_db):
+    """Замер 10.11.2026: проверяемые сигналы открыто публикуют единицы каналов. Канал без
+    единого сигнала с входом и стопом не занимает строку таблицы: идёт общим счётом, без
+    буквы и без «сигналов 0 · итог 0R»."""
+    cr.seed_channels()
+    chans = {c["username"]: c for c in cr.all_channels()}
+    cr.record_run(chans["piratesignal"]["id"], _agg(filled=13, tp1=1, stop=11, r_total=-9.2,
+                                                     r_trades=12), "Pirate", 8_490)
+    cr.record_run(chans["CoinCoachSignals"]["id"], _empty_agg(), "Coin", 13_000)
+    cr.record_run(chans["WallstreetQueenOfficial"]["id"], _empty_agg(), "WSQ", 314_000)
+    for name, subs in (("big_one", 233_000), ("mid_one", 60_100)):
+        ch = cr.add_channel(name, "test")
+        cr.record_run(ch["id"], _empty_agg(), name, subs)
+    rows = cr.latest_rows()
+    check, empty = cr.split_rows(rows)
+    assert [r["username"] for r in check] == ["piratesignal"] and len(empty) == 4
+    txt = cr.render_rating(rows)
+    assert txt.count("<b>Канал ") == 1
+    assert "итог на TP1 <b>−9.2R</b>" in txt.replace("-9.2R", "−9.2R")
+    assert ("Ещё 4 канала (от ~13 тыс. до ~314 тыс. подписчиков): в последних постах открытой "
+            "ленты нет ни одного сигнала с входом и стопом — проверять нечего.") in txt
+    assert "сигналов 0" not in txt and "за 0 сд." not in txt
+    for name in ("big_one", "mid_one", "WSQ", "Coin", "Pirate"):
+        assert name not in txt                                      # имён по-прежнему нет
+    html = cr.rating_card_html(rows, "неделя 46")
+    assert html.count('class="ltr"') == 1 and "Ещё 4 канала" in html
+    for name in ("big_one", "mid_one", "WSQ"):
+        assert name not in html
+
+
+def test_rating_with_only_empty_channels_and_wording(fresh_db):
+    """Проверять нечего ни у кого — таблицы нет, остаётся счёт; число каналов склоняется."""
+    cr.seed_channels()
+    ch = cr.all_channels()[0]
+    cr.record_run(ch["id"], _empty_agg(), "T", 5_000)
+    txt = cr.render_rating(cr.latest_rows())
+    assert "<b>Канал " not in txt and "Ещё 1 канал (~5 тыс. подписчиков):" in txt
+    assert "/audit @имя" in txt and "Первая проверка ещё идёт" not in txt
+    assert cr.empty_line([dict(subscribers=None)] * 5).startswith("Ещё 5 каналов: в последних")
+    assert "(от ~900 до ~1.2 млн подписчиков)" in cr.empty_line(
+        [dict(subscribers=900), dict(subscribers=1_200_000), dict(subscribers=None)])
