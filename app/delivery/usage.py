@@ -26,13 +26,19 @@ MAX_ACTION = 64
 TOP = 12
 
 _CMD_RE = re.compile(r"^/([a-z0-9_]{1,32})(?:@[a-z0-9_]{1,64})?$")
+# метка источника в ссылке t.me/<бот>?start=src_<метка> — наш собственный идентификатор
+# (src_check_yt, src_share…), не текст человека; реферальные ref_<id> сюда не попадают
+_SRC_RE = re.compile(r"^src_([a-z0-9_]{1,32})$")
 _CB_RE = re.compile(r"^[A-Za-z0-9_\-]{1,32}")
 
 
 def message_action(text: str | None, is_forward: bool,
                    menu_texts: Collection[str]) -> str | None:
     """Название действия для сообщения в личке либо None (нечего считать: фото, оплата…).
-    У команды берётся только имя: «/audit @канал» -> «/audit»."""
+    У команды берётся только имя: «/audit @канал» -> «/audit». Исключение — метка источника
+    у /start: «/start src_check_yt» -> «/start (check_yt)». По ней видно, с какой площадки
+    человек пришёл по ссылке, — в том числе тот, кто в боте уже был (users.acquisition_source
+    хранит только первое касание)."""
     if is_forward:
         return FORWARD
     t = (text or "").strip()
@@ -41,8 +47,12 @@ def message_action(text: str | None, is_forward: bool,
     if t in menu_texts:
         return t
     if t.startswith("/"):
-        m = _CMD_RE.match(t.split()[0].lower())
-        return f"/{m.group(1)}" if m else OTHER_COMMAND
+        parts = t.lower().split()
+        m = _CMD_RE.match(parts[0])
+        if m is None:
+            return OTHER_COMMAND
+        src = _SRC_RE.match(parts[1]) if m.group(1) == "start" and len(parts) > 1 else None
+        return f"/start ({src.group(1)})" if src else f"/{m.group(1)}"
     return TEXT
 
 

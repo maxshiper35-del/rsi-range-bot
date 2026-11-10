@@ -17,6 +17,12 @@ def test_message_action_names_only():
     свободный текст — общими названиями: содержимое сообщений в счётчик не попадает."""
     assert usage.message_action("/audit @some_channel", False, MENU) == "/audit"
     assert usage.message_action("/Start ref123", False, MENU) == "/start"
+    # метка источника из ссылки — наш идентификатор, её пишем; реферал и мусор — нет
+    assert usage.message_action("/start src_check_yt", False, MENU) == "/start (check_yt)"
+    assert usage.message_action("/start SRC_Share", False, MENU) == "/start (share)"
+    assert usage.message_action("/start ref_12345", False, MENU) == "/start"
+    assert usage.message_action("/start src_<b>x</b>", False, MENU) == "/start"
+    assert usage.message_action("/stats src_check_yt", False, MENU) == "/stats"
     assert usage.message_action("/check@rsirange_bot", False, MENU) == "/check"
     assert usage.message_action("🔎 Проверить сигнал", False, MENU) == "🔎 Проверить сигнал"
     assert usage.message_action("BTC лонг 65000 стоп 64000", False, MENU) == usage.TEXT
