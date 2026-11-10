@@ -159,7 +159,10 @@ class _FakeWS:
         import aiohttp
         if not self._frames:
             raise asyncio.CancelledError
-        return SimpleNamespace(type=aiohttp.WSMsgType.TEXT, data=self._frames.pop(0))
+        data = self._frames.pop(0)
+        if data is None:                                        # биржа закрыла соединение
+            return SimpleNamespace(type=aiohttp.WSMsgType.CLOSE, data=None)
+        return SimpleNamespace(type=aiohttp.WSMsgType.TEXT, data=data)
 
 
 def _fake_bybit(monkeypatch, frames=()) -> list[list]:
@@ -234,9 +237,8 @@ def test_symbol_with_open_signal_keeps_subscription_after_leaving_watchlist(
     ]
     connects, logs = _reconnects(monkeypatch, caplog, steps, runtime.symbols,
                                  journal.open_signal_symbols)
-    kept = [_topics("BTCUSDT"), _topics("ICNTUSDT")]            # добавка — своим запросом
-    assert connects == [[_topics("BTCUSDT", "ICNTUSDT")], kept, kept, kept,
-                        [_topics("BTCUSDT")], [_topics("BTCUSDT")]]
+    kept = [_topics("BTCUSDT"), _topics("ICNTUSDT")]            # каждый топик — своим запросом
+    assert connects == [kept, kept, kept, kept, [_topics("BTCUSDT")], [_topics("BTCUSDT")]]
     # прежняя строка подключения цела и считает все топики, вместе с добавкой
     assert [m for _, m in logs if m.startswith("стрим подключён")] == (
         ["стрим подключён: 2 топиков (60)"] * 4 + ["стрим подключён: 1 топиков (60)"] * 2)
@@ -250,13 +252,13 @@ def test_symbol_with_open_signal_keeps_subscription_after_leaving_watchlist(
 
 def test_stream_subscription_cap_and_watchlist_only_mode(monkeypatch, caplog):
     """Сверх вотчлиста — не больше 10 монет, остаток назван в логе предупреждением.
-    Без источника открытых сигналов подписка прежняя: один запрос, только вотчлист."""
+    Без источника открытых сигналов в подписке только вотчлист."""
     opened = [f"C{i:02d}/USDT:USDT" for i in range(12)]
     connects, logs = _reconnects(monkeypatch, caplog, [lambda: None, lambda: None],
                                  lambda: [BTC, ETH], lambda: opened)
     first = connects[0]
-    assert first[0] == _topics("BTCUSDT", "ETHUSDT")            # вотчлист целиком, как раньше
-    assert first[1:] == [_topics(f"C{i:02d}USDT") for i in range(10)]
+    assert first[:2] == [_topics("BTCUSDT"), _topics("ETHUSDT")]    # вотчлист целиком и первым
+    assert first[2:] == [_topics(f"C{i:02d}USDT") for i in range(10)]
     assert connects[1] == first                                 # порядок стабилен
     assert logs.count(("INFO", "стрим подключён: 12 топиков (60)")) == 2
     assert [(lvl, m) for lvl, m in logs if "состав подписки" in m] == [
@@ -266,9 +268,78 @@ def test_stream_subscription_cap_and_watchlist_only_mode(monkeypatch, caplog):
 
     caplog.clear()
     connects, logs = _reconnects(monkeypatch, caplog, [lambda: None], lambda: [BTC, ETH], None)
-    assert connects == [[_topics("BTCUSDT", "ETHUSDT")]]
+    assert connects == [[_topics("BTCUSDT"), _topics("ETHUSDT")]]
     assert logs == [("INFO", "стрим подключён: 2 топиков (60)"),
                     ("INFO", "стрим: состав подписки — 2 топиков, сверх вотчлиста нет")]
+
+
+# --- 10.11.2026: недействительный топик не должен оставлять без стрима весь вотчлист -------
+def _reject(symbol_ws: str) -> str:
+    """Ответ Bybit на недействительный топик (снят вживую 10.11)."""
+    return json.dumps({"success": False, "op": "subscribe", "conn_id": "x",
+                       "ret_msg": f"error:handler not found,topic:kline.60.{symbol_ws}"})
+
+
+def _run_frames(monkeypatch, caplog, frames, symbols, opened=None):
+    """run_stream на заготовленных кадрах (None — биржа закрыла соединение), без сети и
+    ожиданий. -> (запросы каждого подключения, строки лога стрима)."""
+    async def no_sleep(_seconds):
+        return None
+
+    connects = _fake_bybit(monkeypatch, frames)
+    monkeypatch.setattr(stream.asyncio, "sleep", no_sleep)
+
+    async def on_intrabar(*_a):
+        return None
+
+    log = logging.getLogger("stream-test")
+    with caplog.at_level(logging.INFO, logger="stream-test"):
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(stream.run_stream(lambda: symbols, lambda: "1h", on_intrabar,
+                                          lambda: True, log,
+                                          (lambda: opened) if opened is not None else None))
+    return connects, [(r.levelname, r.getMessage()) for r in caplog.records
+                      if r.name == "stream-test"]
+
+
+def test_rejected_topic_parses_bybit_reply():
+    assert stream.rejected_topic(_reject("BADUSDT")) == "kline.60.BADUSDT"
+    assert stream.rejected_topic('{"success": false, "ret_msg": "pong failed"}') == ""
+    assert stream.rejected_topic('{"success":true,"op":"subscribe"}') is None
+    assert stream.rejected_topic('{"topic":"kline.60.BTCUSDT","data":[]}') is None
+
+
+def test_each_topic_is_subscribed_by_its_own_request(monkeypatch, caplog):
+    """Запрос с одним недействительным топиком Bybit отклоняет целиком, поэтому и вотчлист,
+    и добавка подписываются по одному топику на запрос: без кадров останется только сама
+    недействительная монета."""
+    connects, _logs = _run_frames(monkeypatch, caplog, [], [BTC, "BAD/USDT:USDT", ETH],
+                                  opened=[ICNT])
+    assert connects == [[_topics("BTCUSDT"), _topics("BADUSDT"), _topics("ETHUSDT"),
+                         _topics("ICNTUSDT")]]
+
+
+def test_rejected_watchlist_topic_is_error_once_per_process(monkeypatch, caplog):
+    """Отказ по монете вотчлиста — ERROR (уходит админам): по ней нет ни реалтайм-входа, ни
+    активации трейла. Раз на топик за процесс: повтор на следующем подключении — WARNING,
+    иначе алерт приходил бы каждые 15 минут."""
+    frames = [_reject("BADUSDT"), None, _reject("BADUSDT")]     # отказ, обрыв, снова отказ
+    connects, logs = _run_frames(monkeypatch, caplog, frames, [BTC, "BAD/USDT:USDT"])
+    assert len(connects) == 2
+    errors = [m for lvl, m in logs if lvl == "ERROR"]
+    assert len(errors) == 1
+    assert "BAD/USDT:USDT (kline.60.BADUSDT)" in errors[0] and "вотчлиста" in errors[0]
+    assert [m for lvl, m in logs if lvl == "WARNING" and "отказ операции" in m] == [
+        "стрим: отказ операции: " + _reject("BADUSDT")]
+
+
+def test_rejected_extra_topic_and_other_failures_stay_warnings(monkeypatch, caplog):
+    """Отказ по монете сверх вотчлиста и отказ без топика — WARNING, как раньше: вотчлист от
+    них не страдает, админам это не уходит."""
+    frames = [_reject("ICNTUSDT"), '{"success": false, "ret_msg": "unknown op"}']
+    _connects, logs = _run_frames(monkeypatch, caplog, frames, [BTC], opened=[ICNT])
+    assert not [m for lvl, m in logs if lvl == "ERROR"]
+    assert len([m for lvl, m in logs if lvl == "WARNING" and "отказ операции" in m]) == 2
 
 
 # --- #881: кадр монеты сверх вотчлиста — executor и реалтайм-вход да, прайс-алерты нет -------

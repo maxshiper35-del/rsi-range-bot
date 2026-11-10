@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 
 WS_URL = "wss://stream.bybit.com/v5/public/linear"
@@ -106,6 +107,20 @@ def extra_symbols(watchlist: list, open_symbols: list,
     return extra, skipped
 
 
+_REJECT_TOPIC = re.compile(r"topic:([A-Za-z0-9_.]+)")
+
+
+def rejected_topic(raw: str) -> str | None:
+    """Кадр — отказ операции Bybit? -> топик из ответа; '' — отказ без топика (не подписка);
+    None — не отказ. На недействительный топик биржа отвечает (снято вживую 10.11):
+    {"success":false,"ret_msg":"error:handler not found,topic:kline.60.<SYMBOL>",
+    "op":"subscribe"}."""
+    if '"success":false' not in raw.replace(" ", ""):
+        return None
+    m = _REJECT_TOPIC.search(raw)
+    return m.group(1) if m else ""
+
+
 def composition_line(n_topics: int, extra: list, skipped: list) -> str:
     """Строка лога о составе подписки: сколько топиков и какие монеты сверх вотчлиста.
     run_stream пишет её только при смене состава — по ней при разборе видно, слушал ли
@@ -134,6 +149,7 @@ async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log,
 
     backoff = 1.0
     composition = None              # состав прошлой подписки: строка о нём — только при смене
+    reported: set = set()           # топики вотчлиста, об отказе по которым уже был ERROR
     while True:
         try:
             # чек флага ВНУТРИ try: enabled() — синхронное чтение SQLite, редкий
@@ -148,15 +164,17 @@ async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log,
             interval = bybit_interval(get_tf())
             topics = [f"kline.{interval}.{ws_symbol(s)}" for s in symbols]
             extra_topics = [f"kline.{interval}.{ws_symbol(s)}" for s in extra]
+            watch_topics = dict(zip(topics, symbols))   # топик -> монета вотчлиста
             planned = False                             # False -> сервер закрыл (close/error)
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(WS_URL, heartbeat=None) as ws:
-                    await ws.send_json({"op": "subscribe", "args": topics})
-                    # добавка — отдельными запросами, по монете: если Bybit отклонит топик
-                    # (монету сняли с торгов уже после выхода из вотчлиста), без кадров
-                    # останется только она — не вотчлист и не остальная добавка; сам отказ
-                    # виден в логе («стрим: отказ операции»)
-                    for topic in extra_topics:
+                    # каждый топик — своим запросом: запрос с одним недействительным топиком
+                    # Bybit отклоняет ЦЕЛИКОМ (проверено вживую 10.11 — вотчлист из трёх монет
+                    # с одной несуществующей не получил ни кадра). Монета, снятая с торгов,
+                    # или опечатка в /addsymbol оставляли без стрима весь вотчлист: ни
+                    # реалтайм-входов, ни активации трейла. Теперь без кадров остаётся только
+                    # сама такая монета, а отказ по ней виден в логе (ниже)
+                    for topic in topics + extra_topics:
                         await ws.send_json({"op": "subscribe", "args": [topic]})
                     n_topics = len(topics) + len(extra_topics)
                     log.info("стрим подключён: %d топиков (%s)", n_topics, interval)
@@ -186,9 +204,22 @@ async def run_stream(get_symbols, get_tf, on_intrabar, enabled, log,
                         if frame.type != aiohttp.WSMsgType.TEXT:
                             break                       # close/error frame -> reconnect с backoff
                         # отказ подписки Bybit молча терялся в parse_kline -> стрим «подключён»,
-                        # а филлы не приходят (аудит-2 ops [5]) — теперь виден в логе
-                        if '"success":false' in frame.data.replace(" ", ""):
-                            log.warning("стрим: отказ операции: %.200s", frame.data)
+                        # а филлы не приходят (аудит-2 ops [5]) — теперь виден в логе. Отказ по
+                        # монете ВОТЧЛИСТА — ERROR (уходит админам), раз на топик за процесс:
+                        # по ней нет ни реалтайм-входа, ни активации трейла, и сама она это не
+                        # исправит. Повторы на переподключениях и отказ по добавке — WARNING
+                        bad = rejected_topic(frame.data)
+                        if bad is not None:
+                            if bad in watch_topics and bad not in reported:
+                                reported.add(bad)
+                                log.error(
+                                    "стрим: Bybit отклонил подписку на монету вотчлиста %s (%s)"
+                                    " — кадров по ней нет: реалтайм-вход и активация трейла по "
+                                    "стриму для неё не работают. Проверьте, торгуется ли монета,"
+                                    " и уберите её из вотчлиста, если нет",
+                                    watch_topics[bad], bad)
+                            else:
+                                log.warning("стрим: отказ операции: %.200s", frame.data)
                         for evt in parse_kline(frame.data):
                             await on_intrabar(evt.symbol_ws, evt.high, evt.low, evt.close,
                                               evt.start)
