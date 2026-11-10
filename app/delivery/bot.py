@@ -5378,10 +5378,11 @@ def main() -> None:
         if summ is not None:
             await _send_retry(uid, templates.render_trial_ended(
                 summ, runtime.free_per_week()), parse_mode="HTML",
-                reply_markup=_trial_end_kb())
+                reply_markup=None if runtime.signals_free_for_all() else _trial_end_kb())
         else:
             await _send_retry(uid, templates.render_access_ended(runtime.free_per_week()),
-                              reply_markup=_subscribe_kb())
+                              reply_markup=None if runtime.signals_free_for_all()
+                              else _subscribe_kb())
 
     expiry_notices = ExpiryNotices()
 

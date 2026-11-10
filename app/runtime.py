@@ -400,6 +400,15 @@ def free_per_week() -> int:
     return _num("free_signals_per_week", int, lambda: get_settings().free_signals_per_week)
 
 
+# недельная квота free, начиная с которой сигналы бесплатны всем: подписку на сигналы не
+# продаём (решение владельца 10.11.2026 — «проверка и обучение»; перевеса у стратегии нет)
+FREE_FOR_ALL = 1000
+
+
+def signals_free_for_all() -> bool:
+    return free_per_week() >= FREE_FOR_ALL
+
+
 def teaser_per_day() -> int:
     """Потолок тизеров («🔒 по подписке») в личку free-юзеру за скользящие сутки (0 — без них).
 

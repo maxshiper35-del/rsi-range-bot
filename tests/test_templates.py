@@ -299,3 +299,16 @@ def test_weekly_digest_usd_line_for_user_deposit():
     quiet = templates.render_weekly_digest("20.10–26.10", {**wk, "trades": 0}, st,
                                            depo=(1000.0, 1.0))
     assert "На ваш депозит" not in quiet                  # пустая неделя — без строки
+
+
+def test_free_for_all_texts_do_not_sell_subscription():
+    """10.11.2026: сигналы бесплатны всем — конец доступа не продаёт подписку."""
+    from app.delivery import templates
+    summ = {"signals": 12, "closed": 8, "total_r": -1.5}
+    for text in (templates.render_trial_ended(summ, 10000),
+                 templates.render_access_ended(10000),
+                 templates.render_trial_last_day(10000, {"trades": 0})):
+        assert "бесплатн" in text and "/check" in text
+        assert "/subscribe" not in text and "по подписке" not in text
+    assert "-1.5R" in templates.render_trial_ended(summ, 10000)          # личный итог остаётся
+    assert "по подписке" in templates.render_trial_ended(summ, 3)       # старый режим цел
