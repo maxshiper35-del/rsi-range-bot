@@ -981,7 +981,7 @@ function countUp(el, from, to, fmt, dur = 760) {
 }
 
 // симулятор депозита: сложный процент по закрытым сделкам журнала (модель, не счёт юзера)
-let SIM_RISK = 2, SIM_COSTS = true;
+let SIM_RISK = 1, SIM_COSTS = true;   // 1% — как ориентир риска в текстах бота (0,5–1%)
 const SIM_BASE = 1000;
 const COST_FEE = 0.055, COST_SLIP = 0.15, COST_FUND_8H = 0.01;   // %, как в /backtest
 function netR(rs, sps, hh) {
@@ -1023,7 +1023,8 @@ function simCard() {
     <div class="sim-hero"><span class="sim-start">${fmtUsd(SIM_BASE)} →</span>
       <b class="sim-bal ${cls(sim.bal - SIM_BASE)}">${fmtUsd(sim.bal)}</b>
       <span class="pill ${sim.pct >= 0 ? "pos" : "neg"}">${fmtPct(sim.pct)}</span>${SIM_COSTS ? "" : `<span class="pill ghost">до комиссий</span>`}</div>
-    ${simGross ? `<div class="mystat">без издержек ${fmtUsd(simGross.bal)} · издержки съели ${costR.toFixed(1)}R</div>` : ""}
+    ${simGross ? `<div class="mystat">без издержек ${fmtUsd(simGross.bal)} · издержки съели ${costR.toFixed(1)}R</div>
+    <div class="mystat">в среднем ${(costR / rsim.length).toFixed(2)}R с каждой сделки — ${(costR / rsim.length * SIM_RISK).toFixed(2)}% депозита при риске ${SIM_RISK}%. Комиссия и проскальзывание берутся со всей позиции, а не с суммы риска</div>` : ""}
     <div class="plot">${simSVG(sim.series)}</div>
     <div class="mystat" style="margin-top:10px">${rsim.length} сделок · макс. просадка <b class="dn">${MINUS}${sim.maxDD.toFixed(1)}%</b> · риск от текущего баланса</div>
     ${levs.length ? `<div class="mystat">плечо при риске ${SIM_RISK}%: в среднем <b>×${levAvg.toFixed(1)}</b> · максимум <b class="${levMax > 20 ? "dn" : ""}">×${levMax.toFixed(1)}</b>${levMax > 20 ? " — выше ×20, такие сделки пришлось бы брать меньшим риском" : ""}</div>` : ""}

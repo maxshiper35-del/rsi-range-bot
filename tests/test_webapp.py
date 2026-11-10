@@ -912,3 +912,14 @@ def test_webapp_open_is_counted_once(fresh_db, webapp_token):
             assert json.loads(c.get("/api/me", headers=auth).get_data(as_text=True))["ok"]
     rows = fresh_db.query("SELECT tg_id, action FROM usage_events")
     assert [(r["tg_id"], r["action"]) for r in rows] == [(500901, usage.WEBAPP_OPEN)]
+
+
+def test_simulator_explains_costs_and_defaults_to_one_percent(fresh_db, webapp_token):
+    """Симулятор депозита: риск по умолчанию 1% — как ориентир в текстах бота (0,5–1%), а под
+    суммой издержек — откуда они берутся: с каждой сделки, со всей позиции."""
+    from app.webapp import app as flask_app
+    with flask_app.test_client() as c:
+        body = c.get("/").get_data(as_text=True)
+    assert "let SIM_RISK = 1, SIM_COSTS = true;" in body
+    assert "берутся со всей позиции, а не с суммы риска" in body
+    assert "с каждой сделки" in body
