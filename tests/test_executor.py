@@ -1122,6 +1122,353 @@ def test_close_beyond_journal_trail_cancels_moved_hourly_stop(fresh_db):
     assert "SL7" in fake.cancelled and ("market", "sell", 10.0) in fake.created
 
 
+# --- 10.11.2026: время сделок биржи в учёте (миграция 033), сверка цены демо с рынком в минуту
+# закрытия (#776) и строка о поздних входах (docs/research/2026-11-10-demo-gap-e5.md) ---------
+def _seed_ts_order(sid):
+    """Сигнал GGG LONG 100/98 и его строка учёта (позиция открыта) без цен и времени сделок.
+    -> строка учёта."""
+    from app import db
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at) VALUES "
+        "(?,'GGG/USDT:USDT','LONG','1h',100,98,2.0,0.7,'{}','open',?)",
+        (sid, f"2026-11-10T00:{sid % 60:02d}:00+00:00"))
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, created_at) VALUES (?,'GGG/USDT:USDT','LONG',10,100,98,?,'filled',"
+        "'2026-11-10T01:00:00+00:00')", (sid, f"rsiE{sid}"))
+    return db.query_one("SELECT * FROM executor_orders WHERE signal_id=?", (sid,))
+
+
+def _order_times(sid):
+    from app import db
+    return db.query_one("SELECT fill_px, fill_ts, close_px, close_ts, closed_at "
+                        "FROM executor_orders WHERE signal_id=?", (sid,))
+
+
+class _TradesEx:
+    """Биржа с историей своих сделок GGG LONG: (сторона, цена, время ISO)."""
+
+    def __init__(self, *trades):
+        self.trades = [{"side": side, "price": px, "timestamp": _ms(at),
+                        "info": {"positionSide": "LONG"}} for side, px, at in trades]
+
+    def fetch_my_trades(self, symbol, since=None, limit=20):
+        return [tr for tr in self.trades if since is None or tr["timestamp"] >= since]
+
+
+def test_migration_033_trade_time_columns(fresh_db):
+    """Миграция 033: в учёте есть время сделок биржи; бэкфилла нет — у строки без них NULL."""
+    cols = {r["name"]: r["type"] for r in fresh_db.query("PRAGMA table_info(executor_orders)")}
+    assert (cols.get("fill_ts"), cols.get("close_ts")) == ("TEXT", "TEXT")
+    assert fresh_db.query_one("SELECT 1 FROM schema_migrations WHERE name=?",
+                              ("033_executor_trade_times.sql",)) is not None
+    _seed_ts_order(1201)
+    row = _order_times(1201)
+    assert (row["fill_ts"], row["close_ts"]) == (None, None)
+
+
+def test_ms_iso_exchange_time():
+    """Время биржи (мс) -> ISO UTC, как в колонках *_at; пусто, ноль и мусор — None, а не
+    исключение (запись времени сделки не роняет такт)."""
+    from app.v2 import bingx_executor as ex
+    sec = _ms("2026-10-31T19:58:12+00:00")
+    assert ex._ms_iso(sec) == "2026-10-31T19:58:12+00:00"
+    assert ex._iso_ms(ex._ms_iso(sec)) == sec
+    assert ex._ms_iso(sec + 345) == "2026-10-31T19:58:12.345000+00:00"   # миллисекунды целы
+    assert ex._ms_iso(str(sec)) == ex._ms_iso(float(sec)) == ex._ms_iso(sec)
+    for junk in (None, 0, -5, "", "мусор", float("nan"), float("inf"), 10 ** 30, {}):
+        assert ex._ms_iso(junk) is None
+
+
+def test_record_fill_writes_trade_time_once(fresh_db):
+    """Время входа из ордера биржи: последняя сделка (lastTradeTimestamp), нет её — время
+    самого ордера. Уже записанное не перетирается; ордер без времени оставляет NULL."""
+    from app.v2 import bingx_executor as ex
+    placed, traded = _ms("2026-11-10T02:00:05+00:00"), _ms("2026-11-10T02:31:07+00:00")
+    _seed_ts_order(1202)
+    ex._record_fill(1202, {"filled": 10, "average": 100.05, "timestamp": placed,
+                           "lastTradeTimestamp": traded})
+    assert _order_times(1202)["fill_ts"] == "2026-11-10T02:31:07+00:00"
+    ex._record_fill(1202, {"filled": 10, "average": 100.05,
+                           "lastTradeTimestamp": traded + 3_600_000})
+    assert _order_times(1202)["fill_ts"] == "2026-11-10T02:31:07+00:00"   # не перетёрто
+    _seed_ts_order(1203)
+    ex._record_fill(1203, {"filled": 10, "average": 100.05, "timestamp": placed,
+                           "lastTradeTimestamp": None})
+    assert _order_times(1203)["fill_ts"] == "2026-11-10T02:00:05+00:00"
+    _seed_ts_order(1204)
+    ex._record_fill(1204, {"filled": 10, "average": 100.05, "timestamp": "мусор"})
+    row = _order_times(1204)
+    assert (row["fill_px"], row["fill_ts"]) == (100.05, None)   # цена записана и без времени
+
+
+def test_entry_from_trades_writes_trade_time_once(fresh_db):
+    """Сработавший триггер: время входа — время ВЫБРАННОГО трейда (ближайшего к уровню
+    входа), а не первого попавшегося; повторный вызов записанное не перетирает."""
+    from app.v2 import bingx_executor as ex
+    t = _seed_ts_order(1205)
+    fake = _TradesEx(("buy", 104.0, "2026-11-10T01:30:00+00:00"),      # сосед по позиции
+                     ("buy", 100.1, "2026-11-10T02:31:07+00:00"))      # наш вход
+    ex._record_entry_from_trades(fake, t)
+    row = _order_times(1205)
+    assert (row["fill_px"], row["fill_ts"]) == (100.1, "2026-11-10T02:31:07+00:00")
+    ex._record_entry_from_trades(_TradesEx(("buy", 100.0, "2026-11-10T03:00:00+00:00")), t)
+    row = _order_times(1205)
+    assert (row["fill_px"], row["fill_ts"]) == (100.1, "2026-11-10T02:31:07+00:00")
+
+
+def test_record_close_writes_order_time_once(fresh_db, monkeypatch):
+    """Рыночное закрытие: время сделки — из ордера (последняя сделка, иначе время ордера,
+    в том числе дочитанного fetch_order); биржа времени не дала — текущее: позицию только
+    что закрыли сами. Уже записанное не перетирается."""
+    from app import clock
+    from app.v2 import bingx_executor as ex
+    monkeypatch.setattr(clock, "utcnow_iso", lambda: "2026-11-10T05:00:00+00:00")
+    sent, traded = _ms("2026-11-10T04:59:58+00:00"), _ms("2026-11-10T04:59:59+00:00")
+
+    class _Ex:
+        def fetch_order(self, oid, symbol):                    # ответ create был без цены
+            return {"id": oid, "average": 103.0, "timestamp": sent}
+
+    t = _seed_ts_order(1206)
+    ex._record_close(_Ex(), t, {"average": 103.0, "timestamp": sent,
+                                "lastTradeTimestamp": traded})
+    row = _order_times(1206)
+    assert (row["close_px"], row["close_ts"]) == (103.0, "2026-11-10T04:59:59+00:00")
+    assert row["closed_at"] == "2026-11-10T05:00:00+00:00"     # когда заметил executor
+    ex._record_close(_Ex(), t, {"average": 103.0, "lastTradeTimestamp": traded + 60_000})
+    assert _order_times(1206)["close_ts"] == "2026-11-10T04:59:59+00:00"   # не перетёрто
+    t = _seed_ts_order(1207)
+    ex._record_close(_Ex(), t, {"id": "M7"})                   # время — из fetch_order
+    assert _order_times(1207)["close_ts"] == "2026-11-10T04:59:58+00:00"
+    t = _seed_ts_order(1208)
+    ex._record_close(_Ex(), t, {"average": 103.0})             # времени нет — текущее
+    assert _order_times(1208)["close_ts"] == "2026-11-10T05:00:00+00:00"
+
+
+def test_stop_close_writes_trade_time_once(fresh_db, monkeypatch):
+    """Позицию закрыла сама биржа (стоп, трейл, ликвидация): close_ts — время выбранного
+    закрывающего трейда, closed_at — когда это заметил executor (#825: на 8 часов позже).
+    Повторный вызов записанное не перетирает."""
+    from app import clock
+    from app.v2 import bingx_executor as ex
+    monkeypatch.setattr(clock, "utcnow_iso", lambda: "2026-11-10T12:00:00+00:00")
+    t = _seed_ts_order(1209)
+    fake = _TradesEx(("buy", 100.1, "2026-11-10T02:31:07+00:00"),      # вход
+                     ("sell", 97.9, "2026-11-10T03:47:47+00:00"))      # стоп биржи
+    ex._record_stop_close(fake, t)
+    row = _order_times(1209)
+    assert (row["close_px"], row["close_ts"]) == (97.9, "2026-11-10T03:47:47+00:00")
+    assert row["closed_at"] == "2026-11-10T12:00:00+00:00"
+    later = _TradesEx(("buy", 100.1, "2026-11-10T02:31:07+00:00"),
+                      ("sell", 98.0, "2026-11-10T04:10:00+00:00"))
+    ex._record_stop_close(later, t)
+    row = _order_times(1209)
+    assert (row["close_px"], row["close_ts"]) == (97.9, "2026-11-10T03:47:47+00:00")
+
+
+def test_close_position_price_and_time_from_same_trade(fresh_db, monkeypatch):
+    """Ответ create без цены, fetch_order не дочитался: цену закрытия добирает
+    _record_stop_close из трейдов — и время берётся от ТОГО ЖЕ трейда, а не «сейчас»:
+    отчёт сверяет цену с рынком именно в минуту close_ts."""
+    from app import clock
+    from app.v2 import bingx_executor as ex
+    monkeypatch.setattr(clock, "utcnow_iso", lambda: "2026-11-10T05:00:00+00:00")
+
+    class _Ex(_TradesEx):
+        def fetch_positions(self, symbols):
+            return [{"symbol": symbols[0], "side": "long", "contracts": 10.0}]
+
+        def create_order(self, symbol, typ, side, qty, price, params=None):
+            return {"id": "M9"}
+
+        def fetch_order(self, oid, symbol):
+            raise RuntimeError("timeout")
+
+    t = _seed_ts_order(1210)
+    fake = _Ex(("buy", 100.1, "2026-11-10T02:31:07+00:00"),
+               ("sell", 98.2, "2026-11-10T04:59:57+00:00"))
+    assert ex._close_position(fake, t, max_qty=10.0) == 10.0
+    row = _order_times(1210)
+    assert (row["close_px"], row["close_ts"]) == (98.2, "2026-11-10T04:59:57+00:00")
+    assert row["closed_at"] == "2026-11-10T05:00:00+00:00"
+
+
+def _minute_feed(monkeypatch, bars):
+    """Минутки Bybit для отчёта: load_window отдаёт из bars минуты запрошенного окна
+    [start, end); bars=None — минуток нет. -> список запрошенных окон (symbol, start, end)."""
+    from app.data import minute_bars
+    calls = []
+
+    def load_window(symbol, start_ms, end_ms, **kw):
+        calls.append((symbol, start_ms, end_ms))
+        if bars is None:
+            return None
+        return bars[(bars[:, 0] >= start_ms) & (bars[:, 0] < end_ms)]
+    monkeypatch.setattr(minute_bars, "load_window", load_window)
+    return calls
+
+
+def _ena_minutes():
+    """Bybit 31.10 по мотивам #776 (ENA шорт, вход 0.193315, 1R = 0.002755): до 19:30 цена
+    у входа, в 19:30–19:43 проходит 0.1918, с 19:44 рынок уже у +1.6…+1.75R."""
+    import numpy as np
+    rows = []
+    for ts in range(_ms("2026-10-31T18:27:00+00:00"), _ms("2026-10-31T20:03:00+00:00"), 60_000):
+        if ts < _ms("2026-10-31T19:30:00+00:00"):
+            hi, lo = 0.19345, 0.19250
+        elif ts < _ms("2026-10-31T19:44:00+00:00"):
+            hi, lo = 0.19200, 0.19150
+        else:
+            hi, lo = 0.18905, 0.18850
+        rows.append([ts, hi, hi, lo, lo])
+    return np.array(rows)
+
+
+def _seed_ena_pair(sid, j_r, close_ts, close_px=0.1918):
+    """Закрытая пара ENA шорт: вход демо 0.1929, закрытие 0.1918 (+0.40R от своего входа) —
+    цена замершей ленты VST; executor заметил закрытие в 20:01:26."""
+    from app import db
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at, filled_at, closed_at, result_r, "
+        "exit_price) VALUES (?,'ENA/USDT:USDT','SHORT','1h',0.193315,0.19607,2.0,0.7,'{}',"
+        "'stopped',?,'2026-10-31T18:27:00+00:00','2026-10-31T20:00:00+00:00',?,0.18899)",
+        (sid, f"2026-10-31T17:00:{sid % 60:02d}+00:00", j_r))
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, created_at, updated_at, fill_px, fill_qty, close_px, closed_at, "
+        "close_ts) VALUES (?,'ENA/USDT:USDT','SHORT',7799,0.193315,0.19607,?,'closed',"
+        "'2026-10-31T17:01:00+00:00','2026-10-31T20:01:26+00:00',0.1929,7799,?,"
+        "'2026-10-31T20:01:26+00:00',?)", (sid, f"rsiE{sid}", close_px, close_ts))
+
+
+_ENA_WEEK = ("2026-10-31T00:00:00+00:00", "2026-11-01T00:00:00+00:00")
+
+
+def test_execution_report_checks_close_price_at_close_minute(fresh_db, monkeypatch):
+    """#776 ENA шорт 31.10: лента демо замерла, рынок ушёл дальше, позиция закрылась по
+    замершей цене 0.1918. Она ВНУТРИ диапазона всей сделки, а демо хуже журнала на 1.17R —
+    прежнее правило (1.5R, диапазон за жизнь позиции) молчит. С временем закрывающей сделки
+    цена сверяется с минутами Bybit вокруг него (порог 0.5R, допуск 0.5%):
+      1301 — в 19:58 рынок был у 0.1885–0.1890, цены 0.1918 не было -> «Сбой цены демо»;
+      1302 — та же пара, но закрыта в 19:36, когда рынок шёл через 0.1918 -> в парах;
+      1303 — закрыта в 19:58 по цене рынка 0.1889, журнал +2.5R: демо просто хуже -> в парах;
+      1304 — как 1301, но без close_ts (строка до миграции 033) -> прежнее правило: в парах;
+      1305 — без close_ts и хуже журнала на 1.8R: сверка с диапазоном всей сделки -> в парах."""
+    from app.v2 import bingx_executor as ex
+    _seed_ena_pair(1301, 1.57, "2026-10-31T19:58:12+00:00")
+    _seed_ena_pair(1302, 1.57, "2026-10-31T19:36:40+00:00")
+    _seed_ena_pair(1303, 2.5, "2026-10-31T19:58:40+00:00", close_px=0.1889)
+    _seed_ena_pair(1304, 1.57, None)
+    _seed_ena_pair(1305, 2.2, None)
+    calls = _minute_feed(monkeypatch, _ena_minutes())
+    txt = ex.execution_report(*_ENA_WEEK)
+    assert ("Сбой цены демо (VST): 1 · журнал +1.57R · демо +0.40R — закрытие по цене, "
+            "которой в тот момент не было на Bybit; в пары не входят: #1301") in txt.split("\n")
+    assert "Закрытые зеркальные (4)" in txt
+    assert not any(f"#{sid}" in txt for sid in (1302, 1303, 1304, 1305))
+    # окна: с close_ts — минута до сделки, её минута и минута после; без него и хуже 1.5R —
+    # от филла журнала до закрытия executor (+1 мин); без него и не хуже 1.5R — не сверяется
+    sym = "ENA/USDT:USDT"
+    close_minutes = (sym, _ms("2026-10-31T19:57:00+00:00"), _ms("2026-10-31T20:00:00+00:00"))
+    assert sorted(calls) == sorted([
+        close_minutes, close_minutes,
+        (sym, _ms("2026-10-31T19:35:00+00:00"), _ms("2026-10-31T19:38:00+00:00")),
+        (sym, _ms("2026-10-31T18:27:00+00:00"), _ms("2026-10-31T20:02:26+00:00"))])
+
+
+def test_execution_report_close_minute_unproven_keeps_pair(fresh_db, monkeypatch):
+    """Минуток вокруг закрывающей сделки нет (сеть, биржа) или среди них нет минуты самой
+    сделки (ещё не закрылась) — сбой цены не доказан: пара остаётся в сравнении. Демо хуже
+    журнала не больше чем на 0.5R — рынок не запрашивается вовсе."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_ena_pair(1306, 1.57, "2026-10-31T19:58:12+00:00")
+    bars = _ena_minutes()
+    _minute_feed(monkeypatch, None)
+    txt = ex.execution_report(*_ENA_WEEK)
+    assert "Сбой цены демо" not in txt and "Закрытые зеркальные (1)" in txt
+    # отчёт собран в 19:58: закрыта только минута 19:57 — по ней одной не судим
+    _minute_feed(monkeypatch, bars[bars[:, 0] < _ms("2026-10-31T19:58:00+00:00")])
+    txt = ex.execution_report(*_ENA_WEEK)
+    assert "Сбой цены демо" not in txt and "Закрытые зеркальные (1)" in txt
+    # с минутой сделки — доказано (минута «после» ещё не закрылась, и ждать её незачем)
+    _minute_feed(monkeypatch, bars[bars[:, 0] < _ms("2026-10-31T19:59:00+00:00")])
+    assert "Сбой цены демо (VST): 1" in ex.execution_report(*_ENA_WEEK)
+    # журнал +0.85R, демо +0.40R: хуже на 0.45R — ниже порога, минутки не нужны
+    db.execute("UPDATE signals SET result_r=0.85 WHERE id=1306")
+    calls = _minute_feed(monkeypatch, bars)
+    txt = ex.execution_report(*_ENA_WEEK)
+    assert calls == [] and "Сбой цены демо" not in txt and "Закрытые зеркальные (1)" in txt
+
+
+def _seed_late_entry(sid, judge, filled_at, fill_ts):
+    """Открытая позиция демо: журнал засчитал вход в filled_at, биржа исполнила в fill_ts.
+    judge — версия судьи в снапшоте сигнала ('1m'; None — часовой, как у прежних сигналов)."""
+    import json
+
+    from app import db
+    trail = {"activate_r": 1.5, "distance_r": 0.2, "tp_exit": False, "max_hold_hours": 168}
+    if judge:
+        trail["judge"] = judge
+    db.execute(
+        "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+        "confidence, snapshot_json, status, created_at, filled_at) VALUES "
+        "(?,'TTT/USDT:USDT','LONG','1h',100,98,2.0,0.7,?,'open',?,?)",
+        (sid, json.dumps({"trail": trail}), f"2026-11-10T08:{sid % 60:02d}:00+00:00",
+         filled_at))
+    db.execute(
+        "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+        "client_id, state, created_at, updated_at, fill_px, fill_qty, fill_ts) VALUES "
+        "(?,'TTT/USDT:USDT','LONG',10,100,98,?,'filled','2026-11-10T09:00:00+00:00',"
+        "'2026-11-10T13:00:00+00:00',100.1,10,?)", (sid, f"rsiE{sid}", fill_ts))
+
+
+_LATE_WEEK = ("2026-11-10T00:00:00+00:00", "2026-11-11T00:00:00+00:00")
+_TOUCH = "2026-11-10T10:00:00+00:00"
+_LATE_LINE = "Вход на демо позже журнала на 30+ мин"
+
+
+def test_execution_report_late_entries_line(fresh_db):
+    """Вход на демо позже журнала (4 сделки e5 из 31: на 33–176 минут). Сравнимы только
+    сигналы минутного судьи — у часового filled_at может быть началом бара; порог 30 минут
+    включительно; id — самые поздние первыми. Сравнимых входов нет — строки нет."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_late_entry(1311, "1m", _TOUCH, "2026-11-10T10:29:59+00:00")      # 29:59 — не поздний
+    _seed_late_entry(1312, "1m", _TOUCH, "2026-11-10T10:30:00+00:00")      # ровно 30 минут
+    _seed_late_entry(1313, "1m", _TOUCH, "2026-11-10T12:56:00+00:00")      # 176 минут (#803)
+    _seed_late_entry(1314, None, _TOUCH, "2026-11-10T13:00:00+00:00")      # часовой судья
+    _seed_late_entry(1315, "1m", _TOUCH, None)                             # времени сделки нет
+    _seed_late_entry(1316, "1m", None, "2026-11-10T12:00:00+00:00")        # журнал вход не засчитал
+    _seed_late_entry(1317, "1m", "не дата", "2026-11-10T12:00:00+00:00")   # битое время журнала
+    _seed_late_entry(1318, "1m", _TOUCH, "2026-11-10T12:00:00+00:00")      # снапшот без трейла
+    db.execute("UPDATE signals SET snapshot_json='{}' WHERE id=1318")
+    txt = ex.execution_report(*_LATE_WEEK)
+    assert f"{_LATE_LINE}: 2 из 3 — #1313, #1312" in txt.split("\n")
+    assert ex._late_entries(db.query(
+        "SELECT eo.*, s.filled_at AS j_filled_at, s.snapshot_json FROM executor_orders eo "
+        "JOIN signals s ON s.id = eo.signal_id")) == ([1313, 1312], 3)
+    # поздних нет — счётчик остаётся, id не печатаются
+    db.execute("UPDATE executor_orders SET fill_ts='2026-11-10T10:05:00+00:00' "
+               "WHERE signal_id IN (1312, 1313)")
+    assert f"{_LATE_LINE}: 0 из 3" in ex.execution_report(*_LATE_WEEK).split("\n")
+    # сравнимых входов нет (остались часовой судья и строки без времени) — строки нет
+    db.execute("UPDATE executor_orders SET fill_ts=NULL WHERE signal_id IN (1311, 1312, 1313)")
+    txt = ex.execution_report(*_LATE_WEEK)
+    assert txt is not None and _LATE_LINE not in txt
+
+
+def test_execution_report_late_entries_lists_six_latest(fresh_db):
+    from app.v2 import bingx_executor as ex
+    for i in range(7):                                         # задержки 31…37 минут
+        _seed_late_entry(1321 + i, "1m", _TOUCH, f"2026-11-10T10:{31 + i}:00+00:00")
+    txt = ex.execution_report(*_LATE_WEEK)
+    assert f"{_LATE_LINE}: 7 из 7 — #1327, #1326, #1325, #1324, #1323, #1322" in txt.split("\n")
+
+
 # --- 10.11.2026: алерты «журнал открыт — позиция плоская» и FAILED нативного трейла (#825) ---
 class _DivEx:
     """Биржа для сверки расхождений: позиция TTT LONG и статус трейлинг-ордера."""

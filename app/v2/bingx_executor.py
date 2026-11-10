@@ -105,6 +105,18 @@ def _iso_ms(iso: str) -> int:
     return int(d.timestamp() * 1000)
 
 
+def _ms_iso(ms) -> str | None:
+    """Время биржи (мс с эпохи, как в ордерах и трейдах ccxt) -> ISO UTC, как в колонках *_at.
+    Пусто, ноль или мусор — None: время сделки пишется в учёт best-effort (миграция 033)."""
+    try:
+        val = int(ms)
+        if val <= 0:
+            return None
+        return datetime.fromtimestamp(val / 1000.0, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Чистые функции (тестируются без сети)
 # ---------------------------------------------------------------------------
@@ -825,7 +837,8 @@ def _nearest(trades: list, side: str, level: float | None, after: int = 0):
 def _record_entry_from_trades(ex, t) -> None:
     """Цена входа сработавшего триггера (best-effort): сам триггер-ордер не несёт
     филла — берём трейд ВХОДНОЙ стороны после постановки, ближайший к уровню входа.
-    Без этого слип входа триггерных сделок выпадал бы из отчёта «исполнение vs журнал»."""
+    Без этого слип входа триггерных сделок выпадал бы из отчёта «исполнение vs журнал».
+    Время этого трейда — fill_ts: по нему отчёт считает входы демо позже журнала."""
     try:
         entry_side = "buy" if t["side"] == "LONG" else "sell"
         tr = _nearest(_trades_since(ex, t), entry_side, float(t["entry_px"] or 0) or None)
@@ -833,16 +846,24 @@ def _record_entry_from_trades(ex, t) -> None:
             px = tr.get("price")
             db.execute(
                 "UPDATE executor_orders SET fill_px=COALESCE(fill_px, ?), "
-                "fill_qty=COALESCE(fill_qty, ?), fill_fee=COALESCE(fill_fee, ?) "
-                "WHERE signal_id=?",
-                (float(px) if px else None, float(t["qty"]), _fee_cost(tr), t["signal_id"]))
+                "fill_qty=COALESCE(fill_qty, ?), fill_fee=COALESCE(fill_fee, ?), "
+                "fill_ts=COALESCE(fill_ts, ?) WHERE signal_id=?",
+                (float(px) if px else None, float(t["qty"]), _fee_cost(tr),
+                 _ms_iso(tr.get("timestamp")), t["signal_id"]))
     except Exception:                                   # noqa: BLE001 — отчётные поля не критичны
         pass
 
 
+def _order_ts(o) -> str | None:
+    """Время сделки по ордеру, ISO UTC: последняя сделка (у BingX — updateTime), нет её —
+    время самого ордера (у рыночного это и есть момент исполнения)."""
+    o = o or {}
+    return _ms_iso(o.get("lastTradeTimestamp")) or _ms_iso(o.get("timestamp"))
+
+
 def _record_fill(sid: int, o) -> None:
-    """Фактическая цена/объём/комиссия входа из ордера биржи (best-effort, идемпотентно:
-    не перетирает уже записанный филл). Без этого пары «вход снят с филлом» и
+    """Фактическая цена/объём/комиссия и время входа из ордера биржи (best-effort,
+    идемпотентно: не перетирает уже записанный филл). Без этого пары «вход снят с филлом» и
     «стоп между тактами» выпадали из отчёта исполнения — как раз худшие исходы."""
     if not o:
         return
@@ -852,15 +873,17 @@ def _record_fill(sid: int, o) -> None:
     px = o.get("average") or o.get("price")
     db.execute(
         "UPDATE executor_orders SET fill_px=COALESCE(fill_px, ?), "
-        "fill_qty=COALESCE(fill_qty, ?), fill_fee=COALESCE(fill_fee, ?) "
-        "WHERE signal_id=?",
-        (float(px) if px else None, filled, _fee_cost(o), sid))
+        "fill_qty=COALESCE(fill_qty, ?), fill_fee=COALESCE(fill_fee, ?), "
+        "fill_ts=COALESCE(fill_ts, ?) WHERE signal_id=?",
+        (float(px) if px else None, filled, _fee_cost(o), _order_ts(o), sid))
 
 
 def _record_stop_close(ex, t) -> None:
     """Цена закрытия аварийным стопом (best-effort): последний трейд символа
     закрывающей стороны. Без неё отчёт «исполнение vs журнал» исключал именно
-    стоп-ауты — систематическое смещение замера в лучшую сторону."""
+    стоп-ауты — систематическое смещение замера в лучшую сторону.
+    Время этого трейда — close_ts: когда позицию закрыла БИРЖА (closed_at — когда это
+    заметил executor, для #825 на 8 часов позже); по нему отчёт сверяет цену с рынком."""
     try:
         close_side = "sell" if t["side"] == "LONG" else "buy"
         entry_side = "buy" if close_side == "sell" else "sell"
@@ -876,10 +899,10 @@ def _record_stop_close(ex, t) -> None:
             px = tr.get("price")
             db.execute(
                 "UPDATE executor_orders SET close_px=COALESCE(close_px, ?), "
-                "close_fee=COALESCE(close_fee, ?), "
-                "closed_at=COALESCE(closed_at, ?) WHERE signal_id=?",
+                "close_fee=COALESCE(close_fee, ?), closed_at=COALESCE(closed_at, ?), "
+                "close_ts=COALESCE(close_ts, ?) WHERE signal_id=?",
                 (float(px) if px else None, _fee_cost(tr), clock.utcnow_iso(),
-                 t["signal_id"]))
+                 _ms_iso(tr.get("timestamp")), t["signal_id"]))
     except Exception:                                   # noqa: BLE001 — отчётные поля не критичны
         pass
 
@@ -941,7 +964,10 @@ def _fee_cost(o) -> float | None:
 
 def _record_close(ex, t, created) -> None:
     """Фактическая цена/комиссия рыночного закрытия (best-effort: ответ create может
-    не нести average — дочитываем fetch_order по id; сбой записи не роняет закрытие)."""
+    не нести average — дочитываем fetch_order по id; сбой записи не роняет закрытие).
+    Время сделки (close_ts) — из того же ордера; биржа его не отдала — текущее: позицию
+    только что закрыли по рынку сами. Без цены время не пишется: цену доберёт
+    _record_stop_close из трейдов, и время должно быть от той же сделки, что и цена."""
     try:
         o = created or {}
         if not o.get("average") and o.get("id"):
@@ -950,10 +976,11 @@ def _record_close(ex, t, created) -> None:
             except Exception:                           # noqa: BLE001
                 pass
         px = o.get("average") or o.get("price")
-        db.execute("UPDATE executor_orders SET close_px=?, close_fee=?, closed_at=? "
-                   "WHERE signal_id=?",
-                   (float(px) if px else None, _fee_cost(o), clock.utcnow_iso(),
-                    t["signal_id"]))
+        now = clock.utcnow_iso()
+        db.execute("UPDATE executor_orders SET close_px=?, close_fee=?, closed_at=?, "
+                   "close_ts=COALESCE(close_ts, ?) WHERE signal_id=?",
+                   (float(px) if px else None, _fee_cost(o), now,
+                    (_order_ts(o) or now) if px else None, t["signal_id"]))
     except Exception:                                   # noqa: BLE001 — отчётные поля не критичны
         pass
 
@@ -1692,15 +1719,26 @@ SLIP_RULE_MEAN_R = -0.10
 # не было, — артефакт демо, в сравнение «журнал vs демо» не входит
 VST_CHECK_GAP_R = 1.5          # демо хуже журнала больше чем на 1.5R — сверить с рынком
 VST_PRICE_TOL = 0.002          # допуск к реальному диапазону, доля цены
+# замершая лента демо (#776 31.10: минутки ENA на VST ~16 минут стояли на одной цене, рынок шёл
+# дальше, позиция закрылась по замершей цене — демо +0.40R при журнале +1.57R). Эта цена лежит
+# ВНУТРИ диапазона всей сделки, правило выше её не видит. Когда известно время закрывающей
+# сделки биржи (close_ts, миграция 033), цена закрытия сверяется с рынком в ту же минуту:
+# минутки Bybit от минуты до сделки до минуты после неё
+VST_MINUTE_GAP_R = 0.5         # демо хуже журнала больше чем на 0.5R — сверить в минуту закрытия
+VST_MINUTE_TOL = 0.005         # допуск к диапазону этих минут, доля цены
+# вход на демо заметно позже журнала (4 сделки из 31 за 30.10–09.11: на 33–176 минут — триггер
+# BingX ждёт цену BingX, журнал считает касание по Bybit). Только счётчик в отчёте
+LATE_ENTRY_MIN = 30            # минут от касания в журнале до сделки входа на бирже
 
 
-def demo_price_artifact(close_px: float | None, bars) -> bool:
-    """Закрытие демо вне реального диапазона цены дальше VST_PRICE_TOL. bars — минутки Bybit
-    (ts, o, h, l, c) от филла до закрытия executor; нет минуток — не доказано, не артефакт."""
+def demo_price_artifact(close_px: float | None, bars, tol: float = VST_PRICE_TOL) -> bool:
+    """Закрытие демо вне реального диапазона цены дальше допуска tol. bars — минутки Bybit
+    (ts, o, h, l, c): от филла до закрытия executor либо вокруг закрывающей сделки биржи;
+    нет минуток — не доказано, не артефакт."""
     if bars is None or not len(bars) or not close_px:
         return False
     lo, hi = float(bars[:, 3].min()), float(bars[:, 2].max())
-    return not lo * (1 - VST_PRICE_TOL) <= float(close_px) <= hi * (1 + VST_PRICE_TOL)
+    return not lo * (1 - tol) <= float(close_px) <= hi * (1 + tol)
 
 
 def _real_bars(r):
@@ -1715,6 +1753,63 @@ def _real_bars(r):
         return load_window(r["symbol"], start // MIN_MS * MIN_MS, end)
     except Exception:                                   # noqa: BLE001 — сверка не роняет отчёт
         return None
+
+
+def _close_minute_bars(r):
+    """Минутки Bybit вокруг закрывающей сделки биржи (close_ts): минута до неё, её минута и
+    минута после — запас на расхождение часов бирж и секундную точность времени сделки.
+    Минуты самой сделки среди них нет (ещё не закрылась, биржа не отдала) — None: рынок в
+    момент сделки неизвестен. Сеть — три минуты на пару-кандидата (обычно один запрос, часть
+    уже в кэше минутного судьи), через общий клиент бота; сбой — None."""
+    try:
+        from app.data.minute_bars import MIN_MS, load_window
+        minute = _iso_ms(r["close_ts"]) // MIN_MS * MIN_MS
+        bars = load_window(r["symbol"], minute - MIN_MS, minute + 2 * MIN_MS)
+        if bars is None or not (bars[:, 0] == minute).any():
+            return None
+        return bars
+    except Exception:                                   # noqa: BLE001 — сверка не роняет отчёт
+        return None
+
+
+def _demo_price_fault(r, gap_r: float) -> bool:
+    """Закрытие пары — сбой цены демо? gap_r = демо R − журнал R.
+
+    Время закрывающей сделки биржи известно (close_ts) — цена закрытия сверяется с рынком в
+    ту же минуту, для пар хуже журнала больше VST_MINUTE_GAP_R: ловит и замершую ленту (#776).
+    Не известно (строки до миграции 033) — прежнее правило: пары хуже больше VST_CHECK_GAP_R,
+    диапазон за всю жизнь позиции (#825). Минуток нет — не доказано, пара остаётся в парах."""
+    if r["close_ts"]:
+        return (gap_r < -VST_MINUTE_GAP_R
+                and demo_price_artifact(r["close_px"], _close_minute_bars(r), VST_MINUTE_TOL))
+    return bool(gap_r < -VST_CHECK_GAP_R and r["j_filled_at"] and r["closed_at"]
+                and demo_price_artifact(r["close_px"], _real_bars(r)))
+
+
+def _late_entries(rows) -> tuple[list[int], int]:
+    """Входы демо позже журнала. -> (id опоздавших на LATE_ENTRY_MIN+ минут, самые поздние
+    первыми; число сравнимых входов).
+
+    Сравнимы строки с временем сделки входа на бирже (fill_ts), чей сигнал судит минутный
+    судья: у него signals.filled_at — минута касания входа (или секунда стрима). У часового
+    судьи это может быть начало часового бара — задержка от него ничего не значит, такие
+    строки пропускаем. Только счётчик для отчёта: логика ордеров от него не зависит."""
+    from app.brain import journal
+
+    lags = []
+    for r in rows:
+        if not r["fill_ts"] or not r["j_filled_at"]:
+            continue
+        trail = journal._trail_of(r)
+        if trail is None or trail["judge"] != "1m":
+            continue
+        try:
+            lag_min = (_iso_ms(r["fill_ts"]) - _iso_ms(r["j_filled_at"])) / 60_000.0
+        except (TypeError, ValueError):
+            continue                                    # битое время — не сравнимо
+        lags.append((lag_min, r["signal_id"]))
+    late = sorted((x for x in lags if x[0] >= LATE_ENTRY_MIN), reverse=True)
+    return [sid for _, sid in late], len(lags)
 
 
 def entry_slip_r(r) -> float | None:
@@ -1735,16 +1830,22 @@ def slip_rule_verdict(slips: list[float]) -> tuple[int, float, bool]:
 
 def execution_report(start_iso: str, end_iso: str) -> str | None:
     """Еженедельная сводка «исполнение vs журнал» (БД; сеть — только минутки Bybit для сверки
-    пар, где демо хуже журнала больше VST_CHECK_GAP_R) | None = пусто.
+    цены закрытия пар, где демо заметно хуже журнала) | None = пусто.
 
     Живая проверка допущений бэктеста (maker-вход, слип 0.02%, комиссии) на демо:
     к гейту эпохи-3 (28.08) даёт второй ответ — «исполнение сходится?». Сравнения:
     вход fill_px vs entry_px журнала, выход close_px vs exit_price журнала (в R от
     дистанции стопа), демо-R vs журнальный result_r по закрытым зеркальным сделкам.
-    Закрытия по цене, которой не было на реальном рынке (сбой VST), — отдельной строкой."""
+    Закрытия по цене, которой в тот момент не было на реальном рынке (сбой VST), — отдельной
+    строкой и не в парах (_demo_price_fault): известно время закрывающей сделки биржи
+    (close_ts) — сверка с минутками Bybit вокруг него для пар хуже журнала больше
+    VST_MINUTE_GAP_R; не известно (строки до миграции 033) — с диапазоном за всю жизнь
+    позиции для пар хуже больше VST_CHECK_GAP_R.
+    Ещё строка — сколько входов демо сработало на LATE_ENTRY_MIN+ минут позже, чем журнал
+    засчитал касание (fill_ts против signals.filled_at, только сигналы минутного судьи)."""
     rows = list(db.query(
         "SELECT eo.*, s.result_r, s.exit_price, s.status AS j_status, "
-        "s.filled_at AS j_filled_at "
+        "s.filled_at AS j_filled_at, s.snapshot_json "
         "FROM executor_orders eo JOIN signals s ON s.id = eo.signal_id "
         "WHERE eo.updated_at >= ? AND eo.updated_at < ?", (start_iso, end_iso)))
     if not rows:
@@ -1775,8 +1876,7 @@ def execution_report(start_iso: str, end_iso: str) -> str | None:
         if r["fill_px"] and r["close_px"] and risk:
             x_r = sign * (r["close_px"] - r["fill_px"]) / risk
             j_r = r["result_r"]
-            if (j_r is not None and x_r - j_r < -VST_CHECK_GAP_R and r["j_filled_at"]
-                    and r["closed_at"] and demo_price_artifact(r["close_px"], _real_bars(r))):
+            if j_r is not None and _demo_price_fault(r, x_r - j_r):
                 artifacts.append((r["signal_id"], j_r, x_r))
                 continue
             if j_r is not None:
@@ -1800,8 +1900,8 @@ def execution_report(start_iso: str, end_iso: str) -> str | None:
     if artifacts:
         lines.append(f"Сбой цены демо (VST): {len(artifacts)} · журнал "
                      f"{sum(a[1] for a in artifacts):+.2f}R · демо "
-                     f"{sum(a[2] for a in artifacts):+.2f}R — закрытие по цене, которой не было "
-                     "на Bybit; в пары не входят: "
+                     f"{sum(a[2] for a in artifacts):+.2f}R — закрытие по цене, которой в тот "
+                     "момент не было на Bybit; в пары не входят: "
                      + ", ".join(f"#{a[0]}" for a in artifacts[:6]))
     if prefill:
         pj = sum(r["result_r"] for r in prefill if r["result_r"] is not None)
@@ -1825,6 +1925,13 @@ def execution_report(start_iso: str, end_iso: str) -> str | None:
         avg_in = sum(slips_in) / len(slips_in)
         lines.append(f"Слип входа: в среднем {avg_in:+.3f}R, худший {min(slips_in):+.3f}R "
                      f"(n={len(slips_in)}; + = лучше журнала)")
+    # вход на демо позже журнала: триггер BingX сработал спустя десятки минут после касания
+    # на Bybit — к этому времени сделка журнала уже ушла вперёд (#803: 176 минут)
+    late, timed = _late_entries(rows)
+    if timed:
+        lines.append(f"Вход на демо позже журнала на {LATE_ENTRY_MIN}+ мин: {len(late)} из "
+                     f"{timed}" + (" — " + ", ".join(f"#{sid}" for sid in late[:6])
+                                   if late else ""))
     fees = [f for r in rows for f in (r["fill_fee"], r["close_fee"]) if f]
     if fees:
         lines.append(f"Комиссии (видимые): {sum(fees):.2f} VST")
