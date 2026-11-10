@@ -288,6 +288,26 @@ def same_level(a_entry: float, a_stop: float, b_entry: float, b_stop: float,
     return eq(a_stop, b_stop) and eq(a_entry, b_entry, entry_tol_r * abs(a_entry - a_stop))
 
 
+def open_same_level_signal(signal: Signal, signal_id: int) -> int | None:
+    """id другого ОТКРЫТОГО сигнала с той же монетой, стороной, входом и стопом, созданного
+    раньше signal_id, либо None. Только для текста первого поста («одна ставка, не
+    удваивайте риск»): два сетапа иногда дают один и тот же уровень (#744/#750, #807/#810 —
+    оба раза оба −1R). Дедуп это НЕ меняет: склейка уровня в дедупе отвергнута замером 10.11.
+
+    Открытый — status='open' без исхода (ждёт касания или в позиции); ТФ и сетап любые.
+    Закрытые, истёкшие, кандидаты и тени (rejected) строку не вызывают. Раньше — по id:
+    строку получает только более поздний сигнал пары. Уровень сверяем в Python (same_level
+    с нулевым допуском), а не равенством в SQL — ради плавающей запятой."""
+    rows = db.query(
+        "SELECT id, entry, stop FROM signals WHERE symbol=? AND side=? AND id<? "
+        "AND status='open' AND result_r IS NULL ORDER BY id DESC",
+        (signal.symbol, signal.side.value, signal_id))
+    for r in rows:
+        if same_level(signal.entry, signal.stop, r["entry"], r["stop"], 0.0):
+            return r["id"]
+    return None
+
+
 def find_duplicate_setup(signal: Signal) -> int | None:
     """id уже записанного НЕ-истёкшего сигнала того же сетапа, если есть.
 

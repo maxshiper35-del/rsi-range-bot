@@ -148,8 +148,19 @@ def trail_line(sig: Signal, entry_prefix: str = "🔁 Трейлинг-стоп 
     return line
 
 
-def render_signal_channel(sig: Signal, signal_id: int) -> str:
-    """Пост нового сигнала в канал (публичная лента)."""
+def same_level_line(same_as: int | None) -> str:
+    """Строка первого поста сигнала, у которого монета, сторона, вход и стоп те же, что у
+    другого открытого сигнала #same_as (journal.open_same_level_signal): для подписчика это
+    одна ставка, а не две. Названий сетапов в тексте нет намеренно. Пусто, если пары нет."""
+    if not same_as:
+        return ""
+    return (f"♻️ Тот же вход и стоп, что у сигнала #{int(same_as)} — это одна ставка, "
+            "не удваивайте риск\n")
+
+
+def render_signal_channel(sig: Signal, signal_id: int, same_as: int | None = None) -> str:
+    """Пост нового сигнала в канал (публичная лента). same_as — id открытого сигнала того
+    же уровня (строка «одна ставка»), None — обычный пост."""
     tps = " / ".join(f"<code>{_price(t)}</code> ({_tp_r(sig.entry, sig.stop, t):.1f}R)"
                      for t in sig.take_profits)
     stop_dist = _stop_dist_pct(sig.entry, sig.stop)
@@ -161,6 +172,7 @@ def render_signal_channel(sig: Signal, signal_id: int) -> str:
         f"📍 Вход:  <code>{_price(sig.entry)}</code>  (по касанию)\n"
         f"🛑 Стоп:  <code>{_price(sig.stop)}</code>  (ход {stop_dist:.1f}%)\n"
         f"{trail_line(sig)}"
+        f"{same_level_line(same_as)}"
         f"🎯 Цели:  {tps}\n"
         f"⚖️ R/R 1:{sig.risk_reward:.1f}    🔎 {int(sig.confidence * 100)}%\n"
         f"<blockquote expandable>Почему:\n{reasons}</blockquote>\n{LINE}\n"
@@ -169,8 +181,9 @@ def render_signal_channel(sig: Signal, signal_id: int) -> str:
     )
 
 
-def render_signal_dm(sig: Signal, signal_id: int) -> str:
-    """Полный сигнал в личку подписчику (платные/админы/free до лимита)."""
+def render_signal_dm(sig: Signal, signal_id: int, same_as: int | None = None) -> str:
+    """Полный сигнал в личку подписчику (платные/админы/free до лимита). same_as — как в
+    render_signal_channel."""
     conf10 = round(sig.confidence * 10)
     conf_bar = "▰" * conf10 + "▱" * (10 - conf10)
     tps = "\n".join(
@@ -185,6 +198,7 @@ def render_signal_dm(sig: Signal, signal_id: int) -> str:
         f"📍 Вход:  <code>{_price(sig.entry)}</code>  (по касанию)\n"
         f"🛑 Стоп:  <code>{_price(sig.stop)}</code>  (ход до стопа {stop_dist:.1f}%)\n"
         f"{trail_line(sig)}"
+        f"{same_level_line(same_as)}"
         f"🎯 Тейки:\n{tps}\n"
         f"⚖️ R/R до TP{len(sig.take_profits)}: 1:{sig.risk_reward:.1f}\n"
         f"🔎 Уверенность: {conf_bar} {int(sig.confidence * 100)}%\n"

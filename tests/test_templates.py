@@ -55,6 +55,35 @@ def test_render_signal_dm():
     assert "Не финансовый совет" in txt
 
 
+def test_render_signal_same_level_line():
+    """Тот же вход и стоп, что у открытого сигнала #N, — строка «одна ставка» в канале и в
+    личке; у обычного сигнала её нет. Названия сетапов в текст не попадают."""
+    line = "Тот же вход и стоп, что у сигнала #807 — это одна ставка, не удваивайте риск\n"
+    for setup in ("LTF-BB", "LTF-OB", "6226"):
+        sig = _sig(indicators_snapshot={"setup": setup})
+        for render in (templates.render_signal_channel, templates.render_signal_dm):
+            txt = render(sig, 810, 807)
+            assert line in txt and "#810</b>" in txt
+            assert txt.index("Стоп:") < txt.index(line) < txt.index("🎯")
+            assert setup not in txt
+            assert "одна ставка" not in render(sig, 810)
+            assert "одна ставка" not in render(sig, 810, None)
+            # кроме этой строки пост не меняется
+            assert render(sig, 810).replace("🎯", "♻️ " + line + "🎯", 1) == txt
+
+
+def test_same_level_line_keeps_forwarded_post_parseable():
+    # /check разбирает наш же пост: слова «вход» и «стоп» и номер #N в новой строке не
+    # должны читаться как уровни
+    import re
+
+    from app.delivery import signal_check
+    for render in (templates.render_signal_channel, templates.render_signal_dm):
+        plain = [re.sub(r"<[^>]+>", "", render(_sig(), 810, n)) for n in (None, 61000)]
+        assert signal_check.parse_signal(plain[0]) == signal_check.parse_signal(plain[1])
+        assert signal_check.parse_signal(plain[1]).stop == 62980.0
+
+
 def test_render_teaser_hides_levels():
     txt = templates.render_teaser(_sig(), 9)
     assert "#9" in txt and "по подписке" in txt

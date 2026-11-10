@@ -5020,8 +5020,15 @@ def main() -> None:
                 log.warning("сигнал #%s: доставка уже начата другим путём — пропускаю", sid)
                 return
             ch_state = None
+        # тот же вход и стоп, что у другого открытого сигнала, — одна ставка: строка в первом
+        # посте (канал и личка). Только текст; сбой поиска пост не блокирует
         try:
-            full = templates.render_signal_dm(sig, sid)
+            same_as = await asyncio.to_thread(journal.open_same_level_signal, sig, sid)
+        except Exception as e:                         # noqa: BLE001
+            log.warning("сигнал #%s: поиск открытого сигнала того же уровня: %s", sid, e)
+            same_as = None
+        try:
+            full = templates.render_signal_dm(sig, sid, same_as)
         except Exception:                              # noqa: BLE001 — формат не роняет цикл
             log.exception("формат алерта #%s", sid)
             full = f"🔔 Сигнал #{sid} (ошибка форматирования — детали в журнале)"
@@ -5051,7 +5058,7 @@ def main() -> None:
         elif step == "post":
             ch_is_teaser = runtime.channel_mode() != "full"
             if not ch_is_teaser:
-                ch_text = templates.render_signal_channel(sig, sid)
+                ch_text = templates.render_signal_channel(sig, sid, same_as)
                 if runtime.cornix_block_enabled():      # машиночитаемый блок для Cornix-юзеров
                     ch_text += templates.esc(format_cornix_block(sig))
             else:

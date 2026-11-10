@@ -1118,3 +1118,47 @@ def test_config_version_stamped_and_follows_strategy_settings(fresh_db):
                                  (sid,))["config_version"] for sid in (a, b, c, d)}
     assert v[a] and len(v[a]) == 8
     assert v[a] == v[b] == v[c] != v[d]
+
+
+def test_open_same_level_signal(fresh_db):
+    """Строка «одна ставка» в первом посте: другой ОТКРЫТЫЙ сигнал той же монеты и стороны
+    с тем же входом и стопом, созданный раньше (#744/#750, #807/#810). Сетап и ТФ любые."""
+    from dataclasses import replace
+
+    from app.brain import journal
+    first = _sig(setup="LTF-BB")
+    later = replace(_sig(setup="LTF-OB", created_at="2026-01-01T01:00:00+00:00"),
+                    timeframe="1h")
+    a = journal.record_signal(first)
+    # одиночный сигнал — без строки
+    assert journal.open_same_level_signal(first, a) is None
+    b = journal.record_signal(later)
+    assert journal.open_same_level_signal(later, b) == a
+    # сам #N строку не получает: пара создана позже него
+    assert journal.open_same_level_signal(first, a) is None
+    # другая монета, сторона, вход или стоп — не та же ставка
+    for other in (replace(later, symbol="ETH/USDT:USDT"),
+                  replace(later, side=Side.LONG, stop=90.0),
+                  replace(later, entry=100.5), replace(later, stop=110.5)):
+        assert journal.open_same_level_signal(other, b) is None
+
+
+def test_open_same_level_signal_ignores_not_open(fresh_db):
+    """Закрытый, истёкший, теневой сигнал и кандидат строку не вызывают: ставки на этом
+    уровне уже (или ещё) нет."""
+    from app.brain import journal
+    later = _sig(created_at="2026-01-02T00:00:00+00:00", setup="LTF-OB")
+    closed = journal.record_signal(_sig(created_at="2026-01-01T00:00:00+00:00"))
+    fresh_db.execute("UPDATE signals SET status='stopped', result_r=-1.0 WHERE id=?", (closed,))
+    expired = journal.record_signal(_sig(created_at="2026-01-01T01:00:00+00:00"))
+    fresh_db.execute("UPDATE signals SET status='expired' WHERE id=?", (expired,))
+    journal.record_shadow(_sig(created_at="2026-01-01T02:00:00+00:00"))
+    journal.record_candidate(_sig(created_at="2026-01-01T03:00:00+00:00"))
+    sid = journal.record_signal(later)
+    assert journal.open_same_level_signal(later, sid) is None
+    # контроль: открытый сигнал того же уровня, созданный ПОЗЖЕ, строку не вызывает,
+    # а для ещё более позднего — вызывает (запрос вообще находит открытые)
+    opened = journal.record_signal(_sig(created_at="2026-01-01T04:00:00+00:00", setup="1:1"))
+    assert opened > sid
+    assert journal.open_same_level_signal(later, sid) is None
+    assert journal.open_same_level_signal(later, opened + 1) == opened
