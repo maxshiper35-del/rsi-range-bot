@@ -1539,18 +1539,18 @@ def sweep_orphans(close: bool = False) -> list[str]:
 # когда журнал закрыл сделку, а по дороге поставил нативный трейл на несуществующую позицию
 # (биржа ответила FAILED — тоже молча). Здесь ТОЛЬКО алерты: ничего не ставится, не снимается,
 # состояния ордеров не меняются.
-# Порог «плоско при открытом журнале» зависит от судьи сигнала: плановый выход на бирже
-# (аварийный стоп, нативный трейл) журнал записывает с задержкой — минутный судья за
-# минуты, часовой только на закрытии бара. Короче порога — гонка, а не расхождение.
-FLAT_ALERT_AFTER_S = 300.0          # судья 1m
-FLAT_ALERT_AFTER_1H_S = 4200.0      # часовой судья: бар + запас на такт поллера
+# Журнал судит исходы на такте поллера — раз в закрытие младшего ТФ (сейчас час); минутный
+# судья зовётся оттуда же: он точнее в цене и времени выхода, но пишет не чаще. Плановый
+# выход биржи (аварийный стоп, нативный трейл) журнал запишет на ближайшем такте. Тревога —
+# если после обнаружения плоской позиции такт прошёл, а журнал всё ещё открыт.
+FLAT_GRACE_S = 300.0                # с начала такта поллера: он успел оценить исходы
 TRAIL_STATUS_EVERY_S = 300.0        # статус живого трейла читаем не чаще (лимиты BingX)
 # «Уже предупреждали» — в settings (csv id сигналов), переживает рестарт. Не в
 # executor_orders.note: её метки разбирает код ('sl:<id>', 'retry#N'). Список сам чистится
 # до сигналов, которые ещё filled при открытом журнале, — не растёт.
 _FLAT_ALERTED_KEY = "executor_flat_alerted"
 _TRAIL_FAILED_KEY = "executor_trail_failed_alerted"
-_FLAT_SEEN: dict[int, float] = {}       # sid -> monotonic первого такта с плоской позицией
+_FLAT_SEEN: dict[int, float] = {}       # sid -> unix-время (UTC) первой плоской позиции
 _TRAIL_STATUS: dict[int, tuple] = {}    # sid -> (id трейла, статус биржи, monotonic чтения)
 _DIVERGENCE_WARNED: dict = {"at": None}
 _TRAIL_DONE = ("FILLED", "CLOSED")              # трейл исполнился — плановый выход
@@ -1592,16 +1592,25 @@ def _flat_sids(ex, rows: list) -> set:
     return out
 
 
-def _divergence_alerts(ex, report: list[str]) -> None:
+def _poller_tick_ts() -> float | None:
+    """Unix-время начала последнего такта поллера (он же такт журнала); нет/битое — None."""
+    try:
+        return _iso_ms(runtime.last_poller_tick_at() or "") / 1000.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _divergence_alerts(ex, report: list[str], now: float | None = None) -> None:
     """Два алерта по сигналам «вход исполнен, журнал открыт», каждый — раз на сигнал:
-      * позиция на бирже плоская дольше порога, и это не исполнившийся нативный трейл;
+      * позиция на бирже плоская, это не исполнившийся нативный трейл, и после её
+        обнаружения журнал уже отработал свой такт (начался ≥ FLAT_GRACE_S назад);
       * нативный трейл получил от биржи FAILED/отклонён.
+    now — unix-секунды UTC (тесты передают явно): сравнивается с временем такта поллера.
     Запросы: один fetch_positions за такт (пока есть сигналы без алерта) и fetch_order
     трейла — раз в TRAIL_STATUS_EVERY_S на сигнал, при плоской позиции каждый такт до
     конечного статуса; конечный статус помнится и больше не читается."""
     import time as _t
 
-    from app.brain import journal
     rows = db.query(_TRAIL_ROWS_SQL)
     live = {t["signal_id"] for t in rows}
     for cache in (_FLAT_SEEN, _TRAIL_STATUS):
@@ -1609,7 +1618,9 @@ def _divergence_alerts(ex, report: list[str]) -> None:
             del cache[sid]
     flat_was, failed_was = _alerted(_FLAT_ALERTED_KEY), _alerted(_TRAIL_FAILED_KEY)
     flat_done, failed_done = flat_was & live, failed_was & live
-    now = _t.monotonic()
+    if now is None:
+        now = clock.utcnow().timestamp()
+    mono = _t.monotonic()                               # троттлинг — по монотонным часам
     lines: list[str] = []
 
     need = [t for t in rows if t["signal_id"] not in flat_done]
@@ -1619,8 +1630,8 @@ def _divergence_alerts(ex, report: list[str]) -> None:
             flat = _flat_sids(ex, need)
         except Exception as e:                          # noqa: BLE001 — сеть: следующим тактом
             flat = None                                 # неизвестно: таймеры не трогаем
-            if _alert_due(_DIVERGENCE_WARNED, now):
-                _DIVERGENCE_WARNED["at"] = now
+            if _alert_due(_DIVERGENCE_WARNED, mono):
+                _DIVERGENCE_WARNED["at"] = mono
                 lines.append(f"⚠️ сверка «журнал/позиция»: позиции не читаются — "
                              f"{type(e).__name__}: {str(e)[:80]}")
 
@@ -1632,19 +1643,20 @@ def _divergence_alerts(ex, report: list[str]) -> None:
         if seen is not None and seen[0] == oid:
             if seen[1] in _TRAIL_FINAL:
                 continue
-            if not (flat and sid in flat) and now - seen[2] < TRAIL_STATUS_EVERY_S:
+            if not (flat and sid in flat) and mono - seen[2] < TRAIL_STATUS_EVERY_S:
                 continue
         try:
             status = _order_status(ex.fetch_order(oid, t["symbol"]))
         except Exception:                               # noqa: BLE001 — сеть/не найден: позже
             status = ""
-        _TRAIL_STATUS[sid] = (oid, status, now)
+        _TRAIL_STATUS[sid] = (oid, status, mono)
         if status in _TRAIL_REJECTED:
             failed_done.add(sid)
             lines.append(f"⚠️ #{sid} {t['symbol']}: нативный трейл отклонён биржей "
                          f"({status}) — трейла на бирже нет")
 
     if flat is not None:
+        tick = _poller_tick_ts()
         for t in need:
             sid = t["signal_id"]
             if sid not in flat:
@@ -1653,14 +1665,13 @@ def _divergence_alerts(ex, report: list[str]) -> None:
             first = _FLAT_SEEN.setdefault(sid, now)
             if _TRAIL_STATUS.get(sid, ("", "", 0.0))[1] in _TRAIL_DONE:
                 continue                                # плановый выход: трейл исполнился
-            rule = journal._trail_of(t)
-            minute = rule is not None and rule["judge"] == "1m"
-            if now - first < (FLAT_ALERT_AFTER_S if minute else FLAT_ALERT_AFTER_1H_S):
-                continue                                # журнал ещё может записать выход
+            if tick is None or tick <= first or now - tick < FLAT_GRACE_S:
+                continue                                # журнал ещё не отработал свой такт
             flat_done.add(sid)
             lines.append(f"⚠️ #{sid} {t['symbol'].split('/')[0]} {t['side']}: журнал открыт, "
-                         "а позиция на бирже плоская — закрыта биржей вне плана "
-                         "(ликвидация/сбой демо?)")
+                         "а позиция на бирже плоская — биржа закрыла её сама, журнал на "
+                         "своём такте выход не записал (ликвидация, сбой демо или стоп, "
+                         "которого нет в журнале)")
 
     # отметка ДО выдачи строк: потерянный алерт лучше повтора каждый такт
     _store_alerted(_FLAT_ALERTED_KEY, flat_was, flat_done)

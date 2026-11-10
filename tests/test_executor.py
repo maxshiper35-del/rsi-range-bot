@@ -1150,62 +1150,78 @@ def _judge_1m(sid):
                "'\"judge\": \"1m\", \"tp_exit\"') WHERE id=?", (sid,))
 
 
-def _age_flat(ex_mod, sid, seconds):
-    ex_mod._FLAT_SEEN[sid] -= seconds
+_T0 = 1_794_000_000.0                                          # unix-секунды: «сейчас» тестов
+_FLAT_TEXT = ("журнал открыт, а позиция на бирже плоская — биржа закрыла её сама, журнал на "
+              "своём такте выход не записал (ликвидация, сбой демо или стоп, которого нет "
+              "в журнале)")
 
 
-def test_flat_position_with_open_journal_alerts_once(fresh_db):
-    """#825: журнал держит сделку, позиции на бирже нет. До порога — тишина (гонка с
-    записью выхода журналом), после — одна строка; повтора нет ни следующим тактом, ни
-    после рестарта (отметка в settings). Учёт executor не меняется."""
+def _poller_tick(ts):
+    """Поллер (он же такт журнала) проснулся в момент ts."""
+    from datetime import datetime, timezone
+
+    from app import runtime
+    runtime.set_last_poller_tick_at(datetime.fromtimestamp(ts, tz=timezone.utc).isoformat())
+
+
+@pytest.mark.parametrize("minute_judge", [False, True])
+def test_flat_position_alerts_once_after_journal_tick(fresh_db, minute_judge):
+    """#825: журнал держит сделку, позиции на бирже нет. Журнал пишет исходы на такте
+    поллера (раз в час, минутный судья — тоже): тишина, пока после обнаружения не прошёл
+    такт и не истёк запас на оценку исходов; затем одна строка. Повтора нет ни следующим
+    тактом, ни после рестарта (отметка в settings). Учёт executor не меняется."""
     from app import db, runtime
     from app.v2 import bingx_executor as ex
     _seed_native(1101)
-    _judge_1m(1101)
+    if minute_judge:
+        _judge_1m(1101)
+    _poller_tick(_T0 - 1800)                                   # такт ДО обнаружения
     fake, report = _DivEx(pos=0.0), []
-    ex._divergence_alerts(fake, report)                        # первый такт — таймер пошёл
-    _age_flat(ex, 1101, ex.FLAT_ALERT_AFTER_S - 30)
-    ex._divergence_alerts(fake, report)                        # ещё до порога
+    ex._divergence_alerts(fake, report, now=_T0)               # обнаружили: таймер пошёл
+    ex._divergence_alerts(fake, report, now=_T0 + 86400)       # такта не было — хоть сутки
     assert report == []
-    _age_flat(ex, 1101, 60)
-    ex._divergence_alerts(fake, report)
-    assert report == ["⚠️ #1101 TTT LONG: журнал открыт, а позиция на бирже плоская — "
-                      "закрыта биржей вне плана (ликвидация/сбой демо?)"]
+    _poller_tick(_T0 + 1800)                                   # такт после обнаружения
+    ex._divergence_alerts(fake, report, now=_T0 + 1800 + ex.FLAT_GRACE_S - 1)
+    assert report == []                                        # такт ещё оценивает исходы
+    ex._divergence_alerts(fake, report, now=_T0 + 1800 + ex.FLAT_GRACE_S)
+    assert report == ["⚠️ #1101 TTT LONG: " + _FLAT_TEXT]
     assert runtime._raw("executor_flat_alerted") == "1101"
     calls = fake.pos_calls
-    ex._divergence_alerts(fake, report)                        # следующий такт
+    ex._divergence_alerts(fake, report, now=_T0 + 3600)        # следующий такт
     ex._FLAT_SEEN.clear()                                      # «рестарт»: память пуста
-    ex._divergence_alerts(fake, report)
+    _poller_tick(_T0 + 5400)
+    ex._divergence_alerts(fake, report, now=_T0 + 7200)
     assert len(report) == 1 and fake.pos_calls == calls        # и позиции больше не читаем
     row = db.query_one("SELECT state, note FROM executor_orders WHERE signal_id=1101")
     assert (row["state"], row["note"]) == ("filled", None)
 
 
-def test_flat_position_hourly_judge_waits_for_bar_close(fresh_db):
-    """Часовой судья записывает выход только на закрытии бара: аварийный стоп биржи внутри
-    часа — не расхождение. Порог для таких сигналов — бар с запасом."""
+@pytest.mark.parametrize("tick", [None, "не дата"])
+def test_flat_position_waits_when_poller_tick_unknown(fresh_db, tick):
+    """Время такта поллера пусто или не разбирается — ждём такт, не алертим."""
+    from app import runtime
     from app.v2 import bingx_executor as ex
-    _seed_native(1102)                                         # снапшот без judge -> 1h
+    _seed_native(1102)
+    if tick is not None:
+        runtime.set_last_poller_tick_at(tick)
     fake, report = _DivEx(pos=0.0), []
-    ex._divergence_alerts(fake, report)
-    _age_flat(ex, 1102, ex.FLAT_ALERT_AFTER_S + 60)
-    ex._divergence_alerts(fake, report)
-    assert report == []
-    _age_flat(ex, 1102, ex.FLAT_ALERT_AFTER_1H_S)
-    ex._divergence_alerts(fake, report)
-    assert len(report) == 1 and "#1102 TTT LONG" in report[0]
+    ex._divergence_alerts(fake, report, now=_T0)
+    ex._divergence_alerts(fake, report, now=_T0 + 86400)
+    assert report == [] and 1102 in ex._FLAT_SEEN
 
 
 def test_flat_timer_resets_when_position_seen(fresh_db):
     from app.v2 import bingx_executor as ex
     _seed_native(1103)
-    _judge_1m(1103)
     fake, report = _DivEx(pos=0.0), []
-    ex._divergence_alerts(fake, report)
-    _age_flat(ex, 1103, ex.FLAT_ALERT_AFTER_S + 60)
+    ex._divergence_alerts(fake, report, now=_T0)
+    _poller_tick(_T0 + 600)
     fake.pos = 10.0                                            # пустой ответ был разовым
-    ex._divergence_alerts(fake, report)
+    ex._divergence_alerts(fake, report, now=_T0 + 1200)
     assert report == [] and 1103 not in ex._FLAT_SEEN
+    fake.pos = 0.0                                             # снова плоско: отсчёт заново,
+    ex._divergence_alerts(fake, report, now=_T0 + 1260)        # прежний такт уже не в счёт
+    assert report == []
 
 
 def test_flat_position_with_closed_journal_is_silent(fresh_db):
@@ -1214,8 +1230,9 @@ def test_flat_position_with_closed_journal_is_silent(fresh_db):
     from app.v2 import bingx_executor as ex
     _seed_native(1104)
     db.execute("UPDATE signals SET status='tp1', result_r=1.2 WHERE id=1104")
+    _poller_tick(_T0 + 600)
     fake, report = _DivEx(pos=0.0), []
-    ex._divergence_alerts(fake, report)
+    ex._divergence_alerts(fake, report, now=_T0 + 1200)
     assert report == [] and fake.pos_calls == 0 and ex._FLAT_SEEN == {}
 
 
@@ -1224,35 +1241,33 @@ def test_flat_position_alerts_each_signal_of_shared_position(fresh_db):
     шага — плоско, алерт по каждому; живая позиция (пусть и меньше учёта) — тишина."""
     from app import db
     from app.v2 import bingx_executor as ex
-    for sid in (1105, 1106):
-        _seed_native(sid)
-        _judge_1m(sid)
-        db.execute("UPDATE signals SET timeframe='4h' WHERE id=1105")   # ключ уникальности
+    _seed_native(1105)
+    db.execute("UPDATE signals SET timeframe='4h' WHERE id=1105")   # ключ уникальности
+    _seed_native(1106)
     fake, report = _DivEx(pos=12.0), []                        # частичное расхождение: 12 из 20
-    ex._divergence_alerts(fake, report)
+    ex._divergence_alerts(fake, report, now=_T0)
     assert report == [] and ex._FLAT_SEEN == {}
     fake.pos = 0.0005                                          # пыль меньше шага
     fake.markets = {"TTT/USDT:USDT": {"limits": {"amount": {"min": 0.001}}}}
-    ex._divergence_alerts(fake, report)
-    for sid in (1105, 1106):
-        _age_flat(ex, sid, ex.FLAT_ALERT_AFTER_S + 1)
-    ex._divergence_alerts(fake, report)
+    ex._divergence_alerts(fake, report, now=_T0 + 60)
+    _poller_tick(_T0 + 600)
+    ex._divergence_alerts(fake, report, now=_T0 + 600 + ex.FLAT_GRACE_S)
     assert [x.split()[1] for x in report] == ["#1105", "#1106"] and fake.pos_calls == 3
-    ex._divergence_alerts(fake, report)
+    ex._divergence_alerts(fake, report, now=_T0 + 3600)
     assert len(report) == 2
 
 
 def test_flat_after_filled_native_trail_is_planned_exit(fresh_db):
-    """Позицию закрыл исполнившийся нативный трейл — плановый выход, журнал запишет его
-    позже. Тишина; конечный статус трейла второй раз не читается."""
+    """Позицию закрыл исполнившийся нативный трейл — плановый выход: даже если журнал на
+    своём такте его не записал, тишина; конечный статус трейла второй раз не читается."""
     from app import db
     from app.v2 import bingx_executor as ex
     _seed_native(1107)
     db.execute("UPDATE executor_orders SET trail_order_id='TR7' WHERE signal_id=1107")
     fake, report = _DivEx(pos=0.0, trail_status="FILLED"), []
-    ex._divergence_alerts(fake, report)
-    _age_flat(ex, 1107, ex.FLAT_ALERT_AFTER_1H_S + 1)
-    ex._divergence_alerts(fake, report)
+    ex._divergence_alerts(fake, report, now=_T0)
+    _poller_tick(_T0 + 600)
+    ex._divergence_alerts(fake, report, now=_T0 + 3600)
     assert report == [] and fake.order_calls == 1
 
 
