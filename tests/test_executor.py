@@ -1070,6 +1070,41 @@ def test_execution_report_prefill_is_own_category(fresh_db):
     assert "-1.00R" in txt and "ошибок: 0" in txt
 
 
+def test_execution_report_vst_price_artifact(fresh_db, monkeypatch):
+    """Сбой цены демо (#825 05.11): шорт SOL ликвидирован на VST по 101.264, а на Bybit цена
+    за жизнь позиции не выходила из 89.14–97.0. Такая пара — отдельной строкой и не в парах;
+    пара, где демо тоже намного хуже журнала, но цена закрытия на рынке была, — в парах."""
+    import numpy as np
+
+    from app import db
+    from app.data import minute_bars
+    from app.v2 import bingx_executor as ex
+    bars = np.array([[0.0, 96.0, 97.0, 89.14, 92.0]])
+    monkeypatch.setattr(minute_bars, "load_window", lambda *a, **k: bars)
+    rows = ((1101, 2.4898, 101.264, "2026-11-04T18:00:00+00:00"),
+            (1102, 1.5, 96.9, "2026-11-04T19:00:00+00:00"))
+    for sid, j_r, close, created in rows:
+        db.execute(
+            "INSERT INTO signals(id, symbol, side, timeframe, entry, stop, risk_reward, "
+            "confidence, snapshot_json, status, created_at, filled_at, closed_at, result_r, "
+            "exit_price) VALUES (?,'SOL/USDT:USDT','SHORT','1h',96.615,98.13,2.0,0.7,'{}',"
+            "'stopped',?,'2026-11-05T03:15:33+00:00',"
+            "'2026-11-05T15:00:00+00:00',?,92.843)", (sid, created, j_r))
+        db.execute(
+            "INSERT INTO executor_orders(signal_id, symbol, side, qty, entry_px, stop_px, "
+            "client_id, state, created_at, updated_at, fill_px, fill_qty, close_px, closed_at) "
+            "VALUES (?,'SOL/USDT:USDT','SHORT',15.52,96.615,98.13,?,'closed',"
+            "'2026-11-04T19:00:11+00:00','2026-11-05T16:01:26+00:00',96.491,15.52,?,"
+            "'2026-11-05T16:01:26+00:00')", (sid, f"rsiE{sid}", close))
+    txt = ex.execution_report("2026-11-05T00:00:00+00:00", "2026-11-06T00:00:00+00:00")
+    assert "Сбой цены демо (VST): 1" in txt and "#1101" in txt and "-3.15R" in txt
+    assert "Закрытые зеркальные (1)" in txt
+    # минуток нет — не доказано: пара остаётся в сравнении
+    monkeypatch.setattr(minute_bars, "load_window", lambda *a, **k: None)
+    txt = ex.execution_report("2026-11-05T00:00:00+00:00", "2026-11-06T00:00:00+00:00")
+    assert "Сбой цены демо" not in txt and "Закрытые зеркальные (2)" in txt
+
+
 def test_close_beyond_journal_trail_cancels_moved_hourly_stop(fresh_db):
     """Выход по рынку «цена за трейлом журнала» уводит строку сразу в closed — ветка close
     такта переставленный почасовой стоп ('sl:' в note) уже не снимет; снимаем здесь, иначе

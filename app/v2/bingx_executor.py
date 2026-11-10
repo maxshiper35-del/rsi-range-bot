@@ -1533,6 +1533,35 @@ ENTRY_MODEL_SINCE = "2026-09-02T11:05:00+00:00"
 # (docs/measurements/2026-10-04-entry-slip-rule.md)
 SLIP_RULE_MIN_N = 50
 SLIP_RULE_MEAN_R = -0.10
+# сбой цены демо-биржи (#825 05.11: SOL на VST 85.8–130.6 за 9 минут при 95.8–96.0 на Bybit,
+# шорт ликвидирован по 101.264 — демо −3.15R при журнале +2.49R). Пары, где демо намного хуже
+# журнала, сверяются с реальным рынком: закрытие по цене, которой на Bybit за жизнь позиции
+# не было, — артефакт демо, в сравнение «журнал vs демо» не входит
+VST_CHECK_GAP_R = 1.5          # демо хуже журнала больше чем на 1.5R — сверить с рынком
+VST_PRICE_TOL = 0.002          # допуск к реальному диапазону, доля цены
+
+
+def demo_price_artifact(close_px: float | None, bars) -> bool:
+    """Закрытие демо вне реального диапазона цены дальше VST_PRICE_TOL. bars — минутки Bybit
+    (ts, o, h, l, c) от филла до закрытия executor; нет минуток — не доказано, не артефакт."""
+    if bars is None or not len(bars) or not close_px:
+        return False
+    lo, hi = float(bars[:, 3].min()), float(bars[:, 2].max())
+    return not lo * (1 - VST_PRICE_TOL) <= float(close_px) <= hi * (1 + VST_PRICE_TOL)
+
+
+def _real_bars(r):
+    """Минутки Bybit за жизнь позиции: от филла журнала до закрытия executor (+1 мин). Сеть —
+    только для пар-кандидатов (единицы в неделю), через общий клиент бота; сбой — None."""
+    try:
+        from datetime import datetime
+
+        from app.data.minute_bars import MIN_MS, load_window
+        start = int(datetime.fromisoformat(r["j_filled_at"]).timestamp() * 1000)
+        end = int(datetime.fromisoformat(r["closed_at"]).timestamp() * 1000) + MIN_MS
+        return load_window(r["symbol"], start // MIN_MS * MIN_MS, end)
+    except Exception:                                   # noqa: BLE001 — сверка не роняет отчёт
+        return None
 
 
 def entry_slip_r(r) -> float | None:
@@ -1552,14 +1581,17 @@ def slip_rule_verdict(slips: list[float]) -> tuple[int, float, bool]:
 
 
 def execution_report(start_iso: str, end_iso: str) -> str | None:
-    """Еженедельная сводка «исполнение vs журнал» (только БД, без сети) | None = пусто.
+    """Еженедельная сводка «исполнение vs журнал» (БД; сеть — только минутки Bybit для сверки
+    пар, где демо хуже журнала больше VST_CHECK_GAP_R) | None = пусто.
 
     Живая проверка допущений бэктеста (maker-вход, слип 0.02%, комиссии) на демо:
     к гейту эпохи-3 (28.08) даёт второй ответ — «исполнение сходится?». Сравнения:
     вход fill_px vs entry_px журнала, выход close_px vs exit_price журнала (в R от
-    дистанции стопа), демо-R vs журнальный result_r по закрытым зеркальным сделкам."""
+    дистанции стопа), демо-R vs журнальный result_r по закрытым зеркальным сделкам.
+    Закрытия по цене, которой не было на реальном рынке (сбой VST), — отдельной строкой."""
     rows = list(db.query(
-        "SELECT eo.*, s.result_r, s.exit_price, s.status AS j_status "
+        "SELECT eo.*, s.result_r, s.exit_price, s.status AS j_status, "
+        "s.filled_at AS j_filled_at "
         "FROM executor_orders eo JOIN signals s ON s.id = eo.signal_id "
         "WHERE eo.updated_at >= ? AND eo.updated_at < ?", (start_iso, end_iso)))
     if not rows:
@@ -1583,12 +1615,17 @@ def execution_report(start_iso: str, end_iso: str) -> str | None:
     n_pairs = 0
     slips_out = []
     by_ver: dict = {}
+    artifacts = []                                      # (id, журнал R, демо R) — сбой цены VST
     for r in closed:
         risk = abs(r["entry_px"] - r["stop_px"])
         sign = 1.0 if r["side"] == "LONG" else -1.0
         if r["fill_px"] and r["close_px"] and risk:
             x_r = sign * (r["close_px"] - r["fill_px"]) / risk
             j_r = r["result_r"]
+            if (j_r is not None and x_r - j_r < -VST_CHECK_GAP_R and r["j_filled_at"]
+                    and r["closed_at"] and demo_price_artifact(r["close_px"], _real_bars(r))):
+                artifacts.append((r["signal_id"], j_r, x_r))
+                continue
             if j_r is not None:
                 j_sum += j_r
                 x_sum += x_r
@@ -1607,6 +1644,12 @@ def execution_report(start_iso: str, end_iso: str) -> str | None:
             # механика выхода менялась внутри недели — разрыв по версиям, не вперемешку
             lines.append("по версиям исполнения: " + "; ".join(
                 f"{k} n={n}: разрыв {x - j:+.2f}R" for k, (n, j, x) in sorted(by_ver.items())))
+    if artifacts:
+        lines.append(f"Сбой цены демо (VST): {len(artifacts)} · журнал "
+                     f"{sum(a[1] for a in artifacts):+.2f}R · демо "
+                     f"{sum(a[2] for a in artifacts):+.2f}R — закрытие по цене, которой не было "
+                     "на Bybit; в пары не входят: "
+                     + ", ".join(f"#{a[0]}" for a in artifacts[:6]))
     if prefill:
         pj = sum(r["result_r"] for r in prefill if r["result_r"] is not None)
         lines.append(f"Не исполнимо (журнал засчитал вход раньше, чем ордер успел встать): "
