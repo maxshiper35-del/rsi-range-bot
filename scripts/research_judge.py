@@ -206,16 +206,17 @@ def uninstall() -> None:
     _pf._live_outcome = _ORIG_LIVE_OUTCOME
 
 
-def simulate(bars: dict, sigs: list):
+def simulate(bars: dict, sigs: list, **extra):
     """Портфель прода с 27.10: только 1h, живой судья на 1h, трейл 1.5/0.2 без тейка,
     удержание 168ч, cap 6/сторону, тормоз 3 стопа/6ч, дедуп, M2′ (0.055% + слип 0.15% +
-    фандинг 0.125 б.п./бар). Судья — тот, что сейчас стоит в app.sim.portfolio."""
+    фандинг 0.125 б.п./бар). Судья — тот, что сейчас стоит в app.sim.portfolio.
+    extra — опции варианта замера поверх прода (например dedup_level_r)."""
     h1 = {sym: df for (sym, tf), df in bars.items() if tf == "1h"}
     return _pf.simulate_portfolio(
         bars, sigs, max_open_per_side=6, cooldown_stops=3, cooldown_hours=6.0, dedup=True,
         fee_pct=0.055, slippage_pct=0.15, funding_bps_per_bar=0.125, trail_activate_r=1.5,
         trail_distance_r=0.2, entry_fill="touch", live_judge_bars=h1, tp_exit=False,
-        max_hold_hours=168.0)
+        max_hold_hours=168.0, **extra)
 
 
 def trades(rep) -> list:

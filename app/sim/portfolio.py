@@ -10,6 +10,7 @@ portfolio.py — портфельная симуляция ВСЕГО вотчл
 Здесь события всех символов сводятся в ЕДИНУЮ временную шкалу и пропускаются через те
 же гейты, что стоят в `bot.scan_auto`:
   - дедуп: пока активен сигнал того же (symbol, tf, side, setup) — новый не создаётся;
+    dedup_level_r — ещё и склейка уровня (тот же вход и стоп, любой сетап и ТФ);
   - `max_open_per_side`: лимит одновременных активных сигналов в одну сторону;
   - анти-кластерный тормоз: ≥N стопов одной стороны за окно X часов — сторона на паузе;
   - окно ожидания филла = journal.MAX_WAIT_HOURS (единое с живым судьёй и backtest.py).
@@ -24,7 +25,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from app.brain.journal import MAX_WAIT_HOURS
+from app.brain.journal import MAX_WAIT_HOURS, same_level
 from app.brain.smc_setups import SMCEngine
 from app.core.signal_engine import Side
 from app.sim.backtest import _cost_r, _simulate_open
@@ -161,7 +162,8 @@ def simulate_portfolio(bars: dict, signals: list, *,
                        gap_open: bool = False,
                        dedup_scope: str = "setup",
                        be_trigger_r: float = 0.0,
-                       be_lock_r: float = 0.0) -> PortfolioReport:
+                       be_lock_r: float = 0.0,
+                       dedup_level_r: float | None = None) -> PortfolioReport:
     """bars: {(symbol, tf): df} — те же кэш-бары, по которым считались сигналы.
     signals: список словарей из scripts.dump_signals (symbol, tf, bar_index, side, ...).
 
@@ -226,11 +228,17 @@ def simulate_portfolio(bars: dict, signals: list, *,
 
     def duplicate_active(sig: dict, now: pd.Timestamp) -> bool:
         """dedup_scope="setup" — как прод (journal.find_duplicate_setup: монета, ТФ, сторона,
-        сетап); "symbol_side" — одна активная позиция на монету+сторону (замер 25.10)."""
+        сетап); "symbol_side" — одна активная позиция на монету+сторону (замер 25.10).
+        dedup_level_r — склейка уровня (замер 10.11): активная позиция той же монеты и
+        стороны с тем же стопом и входом ближе dedup_level_r·риска — та же ставка, любой
+        сетап и ТФ; 0.0 — точное совпадение входа и стопа (как прод), None — выключено."""
         same_setup = dedup_scope != "symbol_side"
         return any(a["symbol"] == sig["symbol"] and a["side"] == sig["side"]
                    and (not same_setup or (a["tf"] == sig["tf"]
-                                           and a["setup"] == sig["setup"]))
+                                           and a["setup"] == sig["setup"])
+                        or (dedup_level_r is not None
+                            and same_level(a["entry"], a["stop"], sig["entry"], sig["stop"],
+                                           dedup_level_r)))
                    and a["signal_dt"] <= now < a["closed_dt"]
                    for a in active)
 

@@ -279,6 +279,15 @@ def record_signal(signal: Signal) -> int:
     return _insert(signal, "open", "opened")
 
 
+def same_level(a_entry: float, a_stop: float, b_entry: float, b_stop: float,
+               entry_tol_r: float = 0.0) -> bool:
+    """Одна и та же ставка: тот же стоп и вход ближе entry_tol_r·риска (0 — точное
+    совпадение с точностью до плавающей запятой). Склейка уровня в дедупе (замер 10.11)."""
+    def eq(x: float, y: float, tol: float = 0.0) -> bool:
+        return abs(x - y) <= max(tol, 1e-9 * max(abs(x), abs(y)))
+    return eq(a_stop, b_stop) and eq(a_entry, b_entry, entry_tol_r * abs(a_entry - a_stop))
+
+
 def find_duplicate_setup(signal: Signal) -> int | None:
     """id уже записанного НЕ-истёкшего сигнала того же сетапа, если есть.
 
