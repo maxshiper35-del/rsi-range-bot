@@ -1620,23 +1620,392 @@ def test_flat_after_filled_native_trail_is_planned_exit(fresh_db):
 
 def test_native_trail_failed_alerts_once(fresh_db):
     """#825, 14:39: трейл встал на несуществующую позицию, биржа ответила FAILED. Одна
-    строка; повтора нет ни следующим тактом, ни после рестарта, статус больше не читаем."""
+    строка; повтора нет ни следующим тактом, ни после рестарта, статус больше не читаем.
+    Ставить заново не на что: счёт отказов не идёт, id остаётся и держит штатный путь. Решение
+    окончательное: позиция по этой монете и стороне, появившаяся позже, — доля соседнего
+    сигнала (hedge), трейл на неё не ставится."""
     from app import db, runtime
     from app.v2 import bingx_executor as ex
     _seed_native(1108)
     db.execute("UPDATE executor_orders SET trail_order_id='TR8' WHERE signal_id=1108")
-    fake, report = _DivEx(pos=10.0, trail_status="FAILED"), []
-    ex._divergence_alerts(fake, report)
+    fake, report = _DivEx(pos=0.0, trail_status="FAILED"), []
+    ex._divergence_alerts(fake, report, now=_T0)               # плоская впервые — ждём такт
+    assert report == [] and runtime._raw("executor_trail_failed_alerted") is None
+    ex._divergence_alerts(fake, report, now=_T0 + 60)          # плоская второй такт подряд
     assert report == ["⚠️ #1108 TTT/USDT:USDT: нативный трейл отклонён биржей (FAILED) — "
                       "трейла на бирже нет"]
     assert runtime._raw("executor_trail_failed_alerted") == "1108"
-    ex._divergence_alerts(fake, report)
+    ex._divergence_alerts(fake, report, now=_T0 + 120)
     ex._TRAIL_STATUS.clear()                                   # «рестарт»
-    ex._divergence_alerts(fake, report)
+    fake.pos = 10.0                                            # вошёл соседний сигнал
+    ex._divergence_alerts(fake, report, now=_T0 + 3600)
     assert len(report) == 1 and fake.order_calls == 1
-    row = db.query_one("SELECT state, trail_order_id FROM executor_orders "
-                       "WHERE signal_id=1108")
-    assert (row["state"], row["trail_order_id"]) == ("filled", "TR8")
+    row = db.query_one("SELECT state FROM executor_orders WHERE signal_id=1108")
+    assert row["state"] == "filled" and _trail_row(1108) == ("TR8", None, None)
+    assert ex.refresh_armed() == 0
+
+
+def test_rejected_trail_single_empty_positions_reply_is_not_final(fresh_db):
+    """Трейл отклонён, а биржа один раз ответила «позиций нет». Решение «трейла на бирже нет»
+    по сигналу окончательное, поэтому по одному пустому ответу оно не принимается: на
+    следующем такте позиция видна — это обычный отказ при живой позиции, со счётом и паузой."""
+    from app import db, runtime
+    from app.v2 import bingx_executor as ex
+    _seed_native(1119)
+    db.execute("UPDATE executor_orders SET trail_order_id='TR9' WHERE signal_id=1119")
+    fake, report = _DivEx(pos=0.0, trail_status="FAILED"), []
+    ex._divergence_alerts(fake, report, now=_T0)
+    assert report == [] and _trail_row(1119) == ("TR9", None, None)
+    fake.pos = 10.0
+    ex._divergence_alerts(fake, report, now=_T0 + 60)
+    assert len(report) == 1 and "попытка 1 из 3" in report[0]
+    assert _trail_row(1119) == ("TR9", 1, _iso(_T0 + 60))
+    assert runtime._raw("executor_trail_failed_alerted") is None
+    assert fake.order_calls == 1                               # статус FAILED читали один раз
+
+
+# --- 10.11.2026: отклонённый биржей трейл ставится заново — до 3 отказов, пауза 5 минут ------
+class _RejectEx(_StreamEx):
+    """Биржа, которая принимает нативный трейл (выдаёт id), а потом отклоняет его: сырой
+    статус FAILED, как у #825. Позиция и прикреплённый ко входу аварийный стоп SL0 — на месте."""
+
+    markets = {"TTT/USDT:USDT": {}}
+
+    def __init__(self, last=103.1, raw="FAILED", **kw):
+        super().__init__(last, **kw)
+        self.raw, self.statuses = raw, {}                      # id трейла -> сырой статус
+        self.broken, self.order_calls = False, 0
+
+    def fetch_balance(self):
+        return {"info": {"data": [{"asset": "VST", "equity": "100000"}]},
+                "total": {"VST": 100000.0}}
+
+    def create_order(self, symbol, typ, side, qty, price, params=None):
+        params = params or {}
+        if "trailingAmount" in params:
+            oid = f"TR{len(self.statuses) + 1}"
+            self.statuses[oid] = self.raw
+            self.created.append(("trail", params["trailingAmount"], side, qty))
+            return {"id": oid}
+        return super().create_order(symbol, typ, side, qty, price, params)
+
+    def fetch_positions(self, symbols):
+        if self.broken:
+            raise RuntimeError("timeout")
+        if not self.pos:
+            return []
+        return [{"symbol": "TTT/USDT:USDT", "side": "long", "contracts": self.pos}]
+
+    def fetch_order(self, oid, symbol):
+        self.order_calls += 1
+        return {"id": oid, "status": "canceled",
+                "info": {"status": self.statuses.get(oid, "NEW")}}
+
+
+def _trail_row(sid):
+    from app import db
+    r = db.query_one("SELECT trail_order_id, trail_fails, trail_failed_at FROM executor_orders "
+                     "WHERE signal_id=?", (sid,))
+    return r["trail_order_id"], r["trail_fails"], r["trail_failed_at"]
+
+
+def _iso(ts):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _only_trails(fake):
+    """Вход и аварийный стоп не тронуты: биржа получала только трейлинг-ордера и ни одной
+    отмены, прикреплённый стоп SL0 по-прежнему стоит."""
+    return (fake.cancelled == [] and all(c[0] == "trail" for c in fake.created)
+            and [o["id"] for o in fake.opens] == ["SL0"])
+
+
+def _restart():
+    """«Рестарт» бота: всё, что executor держал в памяти, пропало — осталась БД."""
+    from app.v2 import bingx_executor as ex
+    ex.disarm_all()
+    for cache in (ex._STREAM_SEEN, ex._ACT_TRIED, ex._JLEVEL_SEEN, ex._TRAIL_WARNED,
+                  ex._FLAT_SEEN, ex._TRAIL_STATUS):
+        cache.clear()
+    ex._drain_report()
+
+
+def _reject_lines(report):
+    return [x for x in report if "отклонён" in x]
+
+
+_RETRY_TEXT = ("⚠️ #{} TTT/USDT:USDT: нативный трейл отклонён биржей ({}), попытка 1 из 3 — "
+               "поставлю заново не раньше чем через 5 минут")
+_GIVEUP_TEXT = ("⚠️ #{} TTT/USDT:USDT: нативный трейл отклонён 3 раза — больше не ставлю, "
+                "веду по трейлу журнала раз в час")
+
+
+@pytest.mark.parametrize("raw", ["FAILED", "REJECTED"])
+def test_rejected_trail_with_live_position_is_released_after_pause(fresh_db, monkeypatch, raw):
+    """Биржа отклонила трейл, позиция жива. Отказ учтён (счёт 1, время) и ушёл админам одной
+    строкой; мёртвый id стоит 5 минут — при нём ни стрим, ни такт трейл не ставят, — затем
+    снимается, и сигнал снова ждёт активации штатным путём. Биржу при этом не трогаем."""
+    from app.v2 import bingx_executor as ex
+    _seed_native(1111)
+    fake, report = _RejectEx(raw=raw), []
+    _arm_env(monkeypatch, ex, fake)
+    assert ex.activate_trail(1111)                             # стрим: биржа приняла трейл TR1
+    ex._divergence_alerts(fake, report, now=_T0)               # такт: его статус — отказ
+    assert _trail_row(1111) == ("TR1", 1, _iso(_T0))
+    assert report == [_RETRY_TEXT.format(1111, raw)]
+    ex._divergence_alerts(fake, report, now=_T0 + ex.TRAIL_RETRY_PAUSE_S - 1)
+    assert _trail_row(1111) == ("TR1", 1, _iso(_T0)) and ex.refresh_armed() == 0
+    assert ex.activate_trail(1111) == [] and ex._sync_native_trails(fake, []) == {1111}
+    assert len(fake.created) == 1                              # пауза: трейл никто не ставит
+    ex._divergence_alerts(fake, report, now=_T0 + ex.TRAIL_RETRY_PAUSE_S)
+    assert _trail_row(1111) == (None, 1, _iso(_T0)) and ex.refresh_armed() == 1
+    assert len(report) == 1 and fake.order_calls == 1 and _only_trails(fake)
+
+
+def test_rejected_trail_three_times_goes_to_hourly_fallback(fresh_db, monkeypatch):
+    """Три отказа подряд. После второго — без строки, после третьего — одна итоговая, id снят
+    сразу. Дальше нативный трейл не ставит никто (refresh_armed, стрим, такт), «с живым
+    трейлом» сигнал не числится — его берёт почасовой фолбэк и сам доводит до выхода: стоп
+    за трейлом журнала, а когда цена уже за уровнем — закрытие по рынку."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1112)
+    fake, report = _RejectEx(), []
+    _arm_env(monkeypatch, ex, fake)
+    ex.activate_trail(1112)                                    # №1 ставит стрим
+    ex._divergence_alerts(fake, report, now=_T0)
+    ex._divergence_alerts(fake, report, now=_T0 + 300)         # пауза вышла — id снят
+    assert ex.activate_trail(1112)                             # №2 — снова штатный путь
+    assert _trail_row(1112) == ("TR2", 1, None)                # отказ нового трейла не учтён
+    ex._divergence_alerts(fake, report, now=_T0 + 400)         # новый id читается сразу
+    assert _trail_row(1112) == ("TR2", 2, _iso(_T0 + 400)) and fake.order_calls == 2
+    ex._divergence_alerts(fake, report, now=_T0 + 699)
+    assert _trail_row(1112)[0] == "TR2" and len(report) == 1   # после второго — без строки
+    ex._divergence_alerts(fake, report, now=_T0 + 700)
+    assert _trail_row(1112) == (None, 2, _iso(_T0 + 400))
+    assert ex._sync_native_trails(fake, []) == {1112}          # №3 ставит такт (стрим молчит)
+    ex._divergence_alerts(fake, report, now=_T0 + 800)
+    assert _trail_row(1112) == (None, 3, _iso(_T0 + 800))      # третий: id снят сразу
+    assert report == [_RETRY_TEXT.format(1112, "FAILED"), _GIVEUP_TEXT.format(1112)]
+
+    _restart()                                                 # и после рестарта — из БД
+    db.execute("UPDATE signals SET trail_stop=103.6 WHERE id=1112")   # журнал подтянул трейл
+    fake.last, tickers = 104.5, fake.ticker_calls
+
+    def no_exchange():
+        raise AssertionError("стрим пошёл на биржу по сигналу без нативного трейла")
+    monkeypatch.setattr(ex, "_exchange_fast", no_exchange)
+    assert ex.refresh_armed() == 0 and ex.activate_trail(1112) == []
+    assert ex._sync_native_trails(fake, report) == set()       # не ставит и не числит живым
+    ex._divergence_alerts(fake, report, now=_T0 + 4000)
+    assert len(fake.statuses) == 3 and fake.ticker_calls == tickers and len(report) == 2
+    assert _only_trails(fake)                                  # вход и аварийный стоп целы
+
+    ex._sync_trail_stops(fake, report, skip=ex._sync_native_trails(fake, report))
+    assert fake.created[-1] == ("stop", 103.6, 10.0) and fake.cancelled == ["SL0"]
+    assert any("стоп подтянут 98 → 103.6" in x for x in report)
+    db.execute("UPDATE signals SET trail_stop=104.6 WHERE id=1112")   # цена уже за уровнем
+    fake.reject = True
+    ex._sync_trail_stops(fake, report, skip=ex._sync_native_trails(fake, report))
+    assert fake.created[-1] == ("market", "sell", 10.0) and fake.cancelled == ["SL0", "SL4"]
+    assert db.query_one("SELECT state FROM executor_orders WHERE signal_id=1112")[
+        "state"] == "closed"
+
+
+def test_rejected_trail_waits_while_positions_unknown(fresh_db, monkeypatch):
+    """Позиции не читаются — неизвестно, есть ли на что ставить: такт не меняет ни счёт, ни
+    id (и по уже учтённому отказу мёртвый id не снимает). Прочитались — решает; статус
+    отклонённого трейла второй раз не запрашивает."""
+    from app.v2 import bingx_executor as ex
+    _seed_native(1113)
+    fake, report = _RejectEx(), []
+    _arm_env(monkeypatch, ex, fake)
+    ex.activate_trail(1113)
+    fake.broken = True
+    ex._divergence_alerts(fake, report, now=_T0)
+    assert _trail_row(1113) == ("TR1", None, None)
+    assert len(report) == 1 and "позиции не читаются" in report[0]
+    fake.broken = False
+    ex._divergence_alerts(fake, report, now=_T0 + 60)
+    assert _trail_row(1113) == ("TR1", 1, _iso(_T0 + 60)) and fake.order_calls == 1
+    fake.broken = True                                         # пауза вышла, а позиций нет
+    ex._divergence_alerts(fake, report, now=_T0 + 360)
+    assert _trail_row(1113) == ("TR1", 1, _iso(_T0 + 60))
+    fake.broken = False
+    ex._divergence_alerts(fake, report, now=_T0 + 420)
+    assert _trail_row(1113) == (None, 1, _iso(_T0 + 60))
+    assert _reject_lines(report) == [_RETRY_TEXT.format(1113, "FAILED")] and len(report) == 2
+    assert _only_trails(fake)
+
+
+def test_rejected_trail_is_not_released_while_position_flat(fresh_db, monkeypatch):
+    """Отказ учтён при живой позиции, а к концу паузы позиция плоская: ставить не на что —
+    id остаётся, счёт не растёт, новых строк нет. Позиция снова видна (пустой ответ был
+    разовым) — id снимается, как после обычной паузы."""
+    from app.v2 import bingx_executor as ex
+    _seed_native(1114)
+    fake, report = _RejectEx(), []
+    _arm_env(monkeypatch, ex, fake)
+    ex.activate_trail(1114)
+    ex._divergence_alerts(fake, report, now=_T0)
+    fake.pos = 0.0
+    ex._divergence_alerts(fake, report, now=_T0 + 300)
+    ex._divergence_alerts(fake, report, now=_T0 + 360)
+    assert _trail_row(1114) == ("TR1", 1, _iso(_T0)) and len(report) == 1
+    assert ex.refresh_armed() == 0
+    fake.pos = 10.0
+    ex._divergence_alerts(fake, report, now=_T0 + 420)
+    assert _trail_row(1114) == (None, 1, _iso(_T0)) and len(report) == 1
+    assert _only_trails(fake)
+
+
+def test_rejected_trail_after_flat_alert_is_not_retried(fresh_db):
+    """Позицию уже признали пропавшей (алерт «журнал открыт, а позиция плоская»): что бы ни
+    стояло на бирже по этой монете и стороне потом, это не наша доля. Отклонённый трейл —
+    прежний алерт, без счёта и без снятия id; позиции ради него не читаем."""
+    from app import db, runtime
+    from app.v2 import bingx_executor as ex
+    _seed_native(1115)
+    db.execute("UPDATE executor_orders SET trail_order_id='TR5' WHERE signal_id=1115")
+    runtime.set_value("executor_flat_alerted", "1115")
+    fake, report = _DivEx(pos=10.0, trail_status="FAILED"), []
+    ex._divergence_alerts(fake, report, now=_T0)
+    ex._divergence_alerts(fake, report, now=_T0 + 600)
+    assert report == ["⚠️ #1115 TTT/USDT:USDT: нативный трейл отклонён биржей (FAILED) — "
+                      "трейла на бирже нет"]
+    assert _trail_row(1115) == ("TR5", None, None) and fake.pos_calls == 0
+
+
+def test_rejected_trail_count_and_pause_survive_restart(fresh_db, monkeypatch):
+    """Рестарт посреди паузы: память пуста, счёт и время отказа — в БД. Отказ того же трейла
+    второй раз не считается, его статус не перечитывается, строка не повторяется, штатный
+    путь при мёртвом id трейл не ставит; пауза идёт от записанного времени."""
+    from app.v2 import bingx_executor as ex
+    _seed_native(1116)
+    fake, report = _RejectEx(), []
+    _arm_env(monkeypatch, ex, fake)
+    ex.activate_trail(1116)
+    ex._divergence_alerts(fake, report, now=_T0)
+    _restart()
+    ex._divergence_alerts(fake, report, now=_T0 + 120)
+    assert _trail_row(1116) == ("TR1", 1, _iso(_T0)) and len(report) == 1
+    assert fake.order_calls == 1 and ex.refresh_armed() == 0
+    assert ex.activate_trail(1116) == [] and ex._sync_native_trails(fake, []) == {1116}
+    _restart()
+    ex._divergence_alerts(fake, report, now=_T0 + 299)
+    assert _trail_row(1116)[0] == "TR1"
+    ex._divergence_alerts(fake, report, now=_T0 + 300)
+    assert _trail_row(1116) == (None, 1, _iso(_T0)) and ex.refresh_armed() == 1
+    assert len(report) == 1 and fake.order_calls == 1 and _only_trails(fake)
+
+
+def test_rejected_trail_with_broken_time_is_released(fresh_db):
+    """Время отказа в БД не разбирается (ручная правка): паузу считаем выдержанной —
+    мёртвый id не должен остаться навсегда."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1117)
+    db.execute("UPDATE executor_orders SET trail_order_id='TR7', trail_fails=1, "
+               "trail_failed_at='не дата' WHERE signal_id=1117")
+    fake = _DivEx(pos=10.0, trail_status="FAILED")
+    ex._divergence_alerts(fake, [], now=_T0)
+    assert _trail_row(1117) == (None, 1, "не дата") and fake.order_calls == 0
+
+
+def test_stream_cannot_place_trail_after_last_reject(fresh_db):
+    """Гонка со стримом: поток прочитал строку, пока отказов было два и id пуст, а до захвата
+    дошёл после третьего отказа. Предел стоит в самом условии захвата — четвёртый трейл на
+    биржу не уходит."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1118)
+    db.execute("UPDATE executor_orders SET trail_fails=2 WHERE signal_id=1118")
+    stale = db.query_one(ex._TRAIL_ROWS_SQL + " AND eo.signal_id=1118")
+    db.execute("UPDATE executor_orders SET trail_fails=3 WHERE signal_id=1118")
+    fake = _RejectEx()
+    ex._activate_native(fake, stale, [], "стрим Bybit")
+    assert fake.created == [] and _trail_row(1118)[0] is None
+    # а строка, прочитанная уже после третьего отказа, до биржи не доходит вовсе
+    fresh, tickers = db.query_one(ex._TRAIL_ROWS_SQL + " AND eo.signal_id=1118"), fake.ticker_calls
+    assert ex._activate_native(fake, fresh, [], "такт") is False
+    assert fake.created == [] and fake.ticker_calls == tickers
+
+
+def test_stream_right_after_each_tick_write_cannot_place_fourth_trail(fresh_db, monkeypatch):
+    """Гонка со стримом в худшем чередовании: стрим пробует поставить трейл сразу после КАЖДОЙ
+    записи такта в учёт. После снятия мёртвого id он ставит следующий трейл — так и задумано;
+    между «id снят» и «отказов три» окна нет, поэтому трейлов ровно три."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1121)
+    fake, report = _RejectEx(), []
+    _arm_env(monkeypatch, ex, fake)
+    write, in_tick, in_stream = db.execute, [], []
+
+    def execute(sql, params=()):
+        out = write(sql, params)
+        if in_tick and not in_stream and "executor_orders" in sql:
+            in_stream.append(1)
+            try:
+                ex.activate_trail(1121)                        # стрим вклинился после записи
+            finally:
+                in_stream.clear()
+        return out
+    monkeypatch.setattr(db, "execute", execute)
+    ex.activate_trail(1121)
+    for dt in (0, 300, 400, 700, 800, 1100, 4000):             # отказ, пауза, снятие — трижды
+        in_tick.append(1)
+        ex._divergence_alerts(fake, report, now=_T0 + dt)
+        in_tick.clear()
+    assert sorted(fake.statuses) == ["TR1", "TR2", "TR3"] and _trail_row(1121)[:2] == (None, 3)
+    assert report == [_RETRY_TEXT.format(1121, "FAILED"), _GIVEUP_TEXT.format(1121)]
+    assert _only_trails(fake)
+
+
+def test_reject_bookkeeping_leaves_newer_trail_alone(fresh_db):
+    """Счёт отказа и снятие мёртвого id идут с условием на этот самый id. Если его место уже
+    заняла новая постановка, она остаётся как есть: её id не затирается, чужой отказ ей не
+    приписывается. Отказ одного трейла дважды не считается."""
+    from app import db
+    from app.v2 import bingx_executor as ex
+    _seed_native(1119)
+    db.execute("UPDATE executor_orders SET trail_order_id='TR1', trail_fails=1, "
+               "trail_failed_at=? WHERE signal_id=1119", (_iso(_T0),))
+    waiting = db.query_one(ex._TRAIL_ROWS_SQL + " AND eo.signal_id=1119")
+    db.execute("UPDATE executor_orders SET trail_order_id='TR2', trail_failed_at=NULL "
+               "WHERE signal_id=1119")                         # штатный путь уже поставил новый
+    ex._release_rejected_trail(waiting, "TR1", _T0 + 600)
+    assert _trail_row(1119) == ("TR2", 1, None)
+    fresh = db.query_one(ex._TRAIL_ROWS_SQL + " AND eo.signal_id=1119")
+    db.execute("UPDATE executor_orders SET trail_order_id='TR3' WHERE signal_id=1119")
+    assert ex._count_trail_reject(fresh, "TR2", "FAILED", _T0 + 700) is None
+    assert _trail_row(1119) == ("TR3", 1, None)
+    fresh = db.query_one(ex._TRAIL_ROWS_SQL + " AND eo.signal_id=1119")
+    assert ex._count_trail_reject(fresh, "TR3", "FAILED", _T0 + 800) is None    # второй отказ
+    assert ex._count_trail_reject(fresh, "TR3", "FAILED", _T0 + 900) is None    # тот же снимок
+    assert _trail_row(1119) == ("TR3", 2, _iso(_T0 + 800))
+
+
+def test_reconcile_third_reject_then_fallback_on_next_tick(fresh_db, monkeypatch):
+    """Полный такт сверки. Отказов уже два, журнал ведёт трейл: такт ставит нативный, биржа
+    отклоняет его в третий раз — итоговая строка в том же такте. Следующий такт нативный
+    трейл не ставит, а почасовой фолбэк переставляет стоп за трейлом журнала."""
+    from app import db, runtime
+    from app.v2 import bingx_executor as ex
+    _seed_native(1120, trail_stop=103.6)
+    db.execute("UPDATE executor_orders SET trail_fails=2 WHERE signal_id=1120")
+    runtime.set_executor_since("2026-10-01T00:00:00+00:00")
+    fake = _RejectEx(last=104.5)
+    _patch_net(monkeypatch, ex, fake)
+    out = ex.reconcile()
+    assert fake.created == [("trail", 0.4, "sell", 10.0)] and _only_trails(fake)
+    assert _reject_lines(out) == [_GIVEUP_TEXT.format(1120)]
+    assert _trail_row(1120)[:2] == (None, 3)
+    out = ex.reconcile()
+    assert fake.created == [("trail", 0.4, "sell", 10.0), ("stop", 103.6, 10.0)]
+    assert fake.cancelled == ["SL0"] and any("стоп подтянут 98 → 103.6" in x for x in out)
+    assert _reject_lines(out) == [] and _reject_lines(ex.reconcile()) == []
 
 
 def test_divergence_silent_when_position_and_trail_alive(fresh_db):

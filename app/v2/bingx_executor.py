@@ -21,6 +21,9 @@
 (версия e5) его АКТИВАЦИЮ решает реалтайм-стрим Bybit — та же цена, что у журнала, — а не
 опрос цены BingX раз в такт (аудит docs/audits/2026-10-30-execution-parity.md: опрос
 пропускал короткие проходы +1.5R и активировал трейл по артефактам цены демо-стакана).
+Трейл, который биржа отклонила при живой позиции (статус FAILED), ставится заново тем же
+путём — до трёх отказов на сигнал, пауза 5 минут; дальше позицию ведёт почасовой стоп за
+трейлом журнала (10.11.2026, миграция 034).
 Ошибка слежения executor-против-журнала — измеряемая величина, не скрытая.
 
 БЕЗОПАСНОСТЬ. Sandbox (VST) ЗАХАРДКОЖЕН — v1 физически не умеет торговать реальные
@@ -459,7 +462,8 @@ def reconcile() -> list[str]:
             _ORPHAN_ALERT["at"] = _time.monotonic()
             report.extend(orph)
     # расхождения, которые раньше всплывали только при закрытии журналом (#825): позиции
-    # на бирже уже нет / нативный трейл отклонён. Только алерты, раз на сигнал
+    # на бирже уже нет / нативный трейл отклонён. Алерты; по отклонённому трейлу при живой
+    # позиции — ещё счёт отказов и снятие мёртвого id в учёте (ордера биржи не трогает)
     try:
         _divergence_alerts(ex, report)
     except Exception as e:                              # noqa: BLE001 — алерты не роняют такт
@@ -1021,7 +1025,9 @@ _TRAIL_WARNED: dict = {}
 def _sync_trail_stops(ex, report: list[str], skip: set | frozenset = frozenset()) -> None:
     """Стоп на бирже вслед за трейлом журнала: новый reduce-only стоп ставится ДО снятия
     старого (позиция ни на миг без стопа). Цена уже за новым уровнем (101400) — журнал
-    засчитает выход по трейлу на закрытии бара; закрываемся по рынку сразу."""
+    засчитает выход по трейлу на закрытии бара; закрываемся по рынку сразу.
+    Фолбэк к нативному трейлу: ведёт позиции, где его нет, — в том числе те, чей трейл
+    биржа отклонила TRAIL_MAX_FAILS раз (их нет в skip, trail_order_id у них пуст)."""
     import time as _t
 
     rows = db.query(
@@ -1100,6 +1106,12 @@ _PENDING_TRAIL = "pending:"
 _PENDING_TRAIL_STALE_S = 120.0
 STREAM_STALE_S = 120.0       # кадров стрима по символу нет дольше — активация опросом BingX
 ACT_RETRY_S = 30.0           # не чаще одной попытки активации сигнала за 30 с (стрим ~1 кадр/с)
+# Биржа может отклонить уже принятый трейл: id выдан, сырой статус ордера — FAILED (#825).
+# Отказы при живой позиции считает _divergence_alerts (executor_orders.trail_fails, миграция
+# 034): после TRAIL_MAX_FAILS-го нативный трейл по сигналу не ставит НИКТО — ни стрим, ни
+# такт, — позицию ведёт почасовой стоп за трейлом журнала (_sync_trail_stops).
+TRAIL_MAX_FAILS = 3
+TRAIL_RETRY_PAUSE_S = 300.0  # между учтённым отказом и новой постановкой — не меньше
 
 _TRAIL_ROWS_SQL = (
     "SELECT eo.*, s.entry AS j_entry, s.stop AS j_stop, s.trail_stop, s.snapshot_json, "
@@ -1115,17 +1127,24 @@ _ACT_TRIED: dict[int, float] = {}       # sid -> monotonic последней п
 _JLEVEL_SEEN: dict[int, float] = {}     # sid -> уровень трейла журнала, уже сверенный с ценой
 
 
+def _trail_given_up(t) -> bool:
+    """Биржа отклонила нативный трейл сигнала TRAIL_MAX_FAILS раз — больше его не ставим."""
+    return int(t["trail_fails"] or 0) >= TRAIL_MAX_FAILS
+
+
 def refresh_armed() -> int:
     """Пересобрать из БД позиции, ждущие активации нативного трейла. Только SQL, без сети.
     Условия: позиция открыта на BingX (state='filled'), журнал засчитал вход (filled_at —
-    ход сделки считается только после него), у сигнала есть правило трейла, трейла ещё нет."""
+    ход сделки считается только после него), у сигнала есть правило трейла, трейла ещё нет
+    (отклонённый биржей id держит место, пока идёт пауза) и отказов меньше TRAIL_MAX_FAILS."""
     from app.brain import journal
     from app.data.stream import ws_symbol
 
     global _ARMED
     armed: dict[str, list[dict]] = {}
     for t in db.query(_TRAIL_ROWS_SQL
-                      + " AND (eo.trail_order_id IS NULL OR eo.trail_order_id='')"):
+                      + " AND (eo.trail_order_id IS NULL OR eo.trail_order_id='')"
+                      " AND COALESCE(eo.trail_fails, 0) < ?", (TRAIL_MAX_FAILS,)):
         rule = journal._trail_of(t)
         risk = abs(t["j_entry"] - t["j_stop"])
         if rule is None or not risk or not t["j_filled_at"]:
@@ -1201,8 +1220,8 @@ def activate_trail(sid: int) -> list[str]:
         if not runtime.executor_enabled() or not os.environ.get("BINGX_API_KEY"):
             return []
         t = db.query_one(_TRAIL_ROWS_SQL + " AND eo.signal_id=?", (sid,))
-        if t is None or t["trail_order_id"]:
-            return []
+        if t is None or t["trail_order_id"] or _trail_given_up(t):
+            return []       # трейл стоит (или его отклонённый id ждёт паузу) / отказы исчерпаны
         _activate_native(_exchange_fast(), t, report, "стрим Bybit")
         _disarm(sid)              # трейл стоит / позиция закрыта; иначе вернёт refresh_armed
     except Exception as e:                              # noqa: BLE001 — такт сверки повторит
@@ -1223,14 +1242,18 @@ def _activate_native(ex, t, report: list[str], source: str, px: float | None = N
 
     Цену АКТИВАЦИИ BingX через API игнорирует (смоук 24.10: activationPrice молча отброшен,
     трейл начинался сразу) — поэтому ордер ставится в момент активации и тянется от текущей
-    цены BingX. Захват в БД ДО create_order: потерянный ответ не даст второго трейла."""
+    цены BingX. Захват в БД ДО create_order: потерянный ответ не даст второго трейла.
+    Сигнал, чей трейл биржа отклонила TRAIL_MAX_FAILS раз, сюда не попадает; тот же предел
+    стоит в условии захвата — он атомарен, поэтому лишний трейл не поставит и поток,
+    прочитавший строку до последнего отказа. Захват заодно сбрасывает trail_failed_at:
+    отказ нового трейла ещё не учтён."""
     from ccxt import NetworkError as _NetErr
 
     from app.brain import journal
     sid, sym = t["signal_id"], t["symbol"]
     rule = journal._trail_of(t)
     risk = abs(t["j_entry"] - t["j_stop"])
-    if rule is None or not risk:
+    if rule is None or not risk or _trail_given_up(t):
         return False
     if px is None:
         px = float(ex.fetch_ticker(sym)["last"])
@@ -1250,9 +1273,10 @@ def _activate_native(ex, t, report: list[str], source: str, px: float | None = N
         return False
     now = clock.utcnow_iso()
     claimed = db.execute(
-        "UPDATE executor_orders SET trail_order_id=?, updated_at=? WHERE signal_id=? "
-        "AND state='filled' AND (trail_order_id IS NULL OR trail_order_id='')",
-        (_PENDING_TRAIL + now, now, sid))
+        "UPDATE executor_orders SET trail_order_id=?, trail_failed_at=NULL, updated_at=? "
+        "WHERE signal_id=? AND state='filled' "
+        "AND (trail_order_id IS NULL OR trail_order_id='') AND COALESCE(trail_fails, 0) < ?",
+        (_PENDING_TRAIL + now, now, sid, TRAIL_MAX_FAILS))
     if claimed != 1:
         return True                                     # трейл уже стоит / ставится
     dist = float(ex.price_to_precision(sym, rule["distance_r"] * risk))
@@ -1351,7 +1375,10 @@ def _sync_native_trails(ex, report: list[str]) -> set:
         рынку, если цена BingX уже за уровнем журнала);
       * трейла нет, стрим по символу молчит дольше STREAM_STALE_S (выключен, обрыв, символ
         вне вотчлиста) -> прежнее правило: цена BingX прошла +activate_r;
-      * трейл стоит -> разрешить метку-захват / сверить с новым уровнем журнала.
+      * трейл стоит -> разрешить метку-захват / сверить с новым уровнем журнала;
+      * биржа отклонила трейл TRAIL_MAX_FAILS раз -> не ставим и «с живым трейлом» не
+        числим: такую позицию ведёт почасовой фолбэк _sync_trail_stops.
+    Отклонённый id, пока _divergence_alerts держит паузу, числится трейлом: место занято.
     При живом стриме тикер BingX раз в такт больше не опрашивается: аудит 30.10 — опрос
     пропускал короткие проходы +1.5R (#715) и активировал трейл по артефакту цены
     демо-стакана, которого не было на рынке журнала (#695 SOL, 27.10)."""
@@ -1362,6 +1389,8 @@ def _sync_native_trails(ex, report: list[str]) -> set:
     active: set = set()
     for t in db.query(_TRAIL_ROWS_SQL):
         sid, sym = t["signal_id"], t["symbol"]
+        if _trail_given_up(t):
+            continue                                    # ведёт почасовой фолбэк
         lock = _sid_lock(sid)
         if not lock.acquire(blocking=False):
             active.add(sid)                             # быстрый путь ставит трейл сейчас
@@ -1564,19 +1593,34 @@ def sweep_orphans(close: bool = False) -> list[str]:
 # --- алерты расхождения журнал/биржа (#825, 10.11.2026) -------------------------------------
 # 05.11 демо-биржа ликвидировала шорт SOL на сбое цены VST; executor узнал через 8 часов,
 # когда журнал закрыл сделку, а по дороге поставил нативный трейл на несуществующую позицию
-# (биржа ответила FAILED — тоже молча). Здесь ТОЛЬКО алерты: ничего не ставится, не снимается,
-# состояния ордеров не меняются.
+# (биржа ответила FAILED — тоже молча). На бирже здесь ничего не ставится и не снимается,
+# состояния ордеров не меняются; в учёте — только счёт отказов нативного трейла и снятие
+# его мёртвого id (ниже).
 # Журнал судит исходы на такте поллера — раз в закрытие младшего ТФ (сейчас час); минутный
 # судья зовётся оттуда же: он точнее в цене и времени выхода, но пишет не чаще. Плановый
 # выход биржи (аварийный стоп, нативный трейл) журнал запишет на ближайшем такте. Тревога —
 # если после обнаружения плоской позиции такт прошёл, а журнал всё ещё открыт.
+#
+# Отклонённый трейл (тот же день). Его id оставался в trail_order_id: _sync_native_trails
+# считал трейл живым, почасовой фолбэк позицию пропускал — она шла без трейла до выхода по
+# рынку после такта журнала. Теперь, если позиция на бирже есть:
+#   отказ №1, №2 — счёт и время в executor_orders (trail_fails, trail_failed_at); мёртвый id
+#     стоит ещё TRAIL_RETRY_PAUSE_S и этим держит штатный путь от новой постановки, затем
+#     снимается — трейл заново ставят refresh_armed + стрим либо _sync_native_trails;
+#   отказ №TRAIL_MAX_FAILS — id снимается сразу, нативный трейл по сигналу больше не ставится
+#     (_trail_given_up), позицию ведёт почасовой стоп за трейлом журнала (_sync_trail_stops).
+# Позиции нет — ставить не на что. Отказ застал её плоской (так было у #825): прежний алерт,
+# id остаётся, счёт не идёт, и это решение по сигналу окончательное (отметка в settings).
+# Hedge: позиция общая на сигналы одной монеты и стороны — появись она позже, это доля
+# соседнего сигнала, чужую трейлом не закрываем. Позиция пропала уже после учтённого отказа
+# — мёртвый id просто стоит, пока её нет. Позиции не прочитались — такт ничего не решает.
 FLAT_GRACE_S = 300.0                # с начала такта поллера: он успел оценить исходы
 TRAIL_STATUS_EVERY_S = 300.0        # статус живого трейла читаем не чаще (лимиты BingX)
 # «Уже предупреждали» — в settings (csv id сигналов), переживает рестарт. Не в
 # executor_orders.note: её метки разбирает код ('sl:<id>', 'retry#N'). Список сам чистится
 # до сигналов, которые ещё filled при открытом журнале, — не растёт.
 _FLAT_ALERTED_KEY = "executor_flat_alerted"
-_TRAIL_FAILED_KEY = "executor_trail_failed_alerted"
+_TRAIL_FAILED_KEY = "executor_trail_failed_alerted"    # трейл отклонён при плоской позиции
 _FLAT_SEEN: dict[int, float] = {}       # sid -> unix-время (UTC) первой плоской позиции
 _TRAIL_STATUS: dict[int, tuple] = {}    # sid -> (id трейла, статус биржи, monotonic чтения)
 _DIVERGENCE_WARNED: dict = {"at": None}
@@ -1627,15 +1671,66 @@ def _poller_tick_ts() -> float | None:
         return None
 
 
+def _count_trail_reject(t, oid: str, status: str, now: float) -> str | None:
+    """Биржа отклонила нативный трейл oid, позиция на бирже есть: учесть отказ.
+    -> строка админам | None (после второго отказа — без строки).
+
+    Счёт, время и — на отказе №TRAIL_MAX_FAILS — снятие мёртвого id идут ОДНИМ UPDATE с
+    условием на этот самый id. Стрим не застанет строку «id уже пуст, а отказов ещё два» и
+    четвёртый трейл не поставит; постановку с другим id UPDATE не тронет. Условие
+    trail_failed_at IS NULL: отказ одного трейла считается один раз — и после рестарта."""
+    sid = t["signal_id"]
+    fails = int(t["trail_fails"] or 0) + 1
+    final = fails >= TRAIL_MAX_FAILS
+    counted = db.execute(
+        "UPDATE executor_orders SET trail_fails=?, trail_failed_at=?, updated_at=?, "
+        "trail_order_id=CASE WHEN ? THEN NULL ELSE trail_order_id END "
+        "WHERE signal_id=? AND trail_order_id=? AND trail_failed_at IS NULL",
+        (fails, datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+         clock.utcnow_iso(), final, sid, oid))
+    if counted != 1:
+        return None                                     # строку успел сменить другой путь
+    head = f"⚠️ #{sid} {t['symbol']}: нативный трейл отклонён"
+    if final:
+        return f"{head} {fails} раза — больше не ставлю, веду по трейлу журнала раз в час"
+    if fails == 1:
+        return (f"{head} биржей ({status}), попытка 1 из {TRAIL_MAX_FAILS} — поставлю заново "
+                f"не раньше чем через {TRAIL_RETRY_PAUSE_S / 60:g} минут")
+    return None
+
+
+def _release_rejected_trail(t, oid: str, now: float) -> None:
+    """Отказ трейла oid уже учтён (trail_failed_at): пауза выдержана — снять мёртвый id.
+    На биржу не ходим: отклонённый ордер снимать нечем. Условие на этот самый id — если
+    место успела занять новая постановка, её не трогаем. Дальше трейл ставит штатный путь:
+    refresh_armed + стрим либо _sync_native_trails."""
+    try:
+        waited = now - _iso_ms(t["trail_failed_at"]) / 1000.0
+    except (TypeError, ValueError):
+        waited = TRAIL_RETRY_PAUSE_S                    # битое время: пауза выдержана
+    if waited >= TRAIL_RETRY_PAUSE_S:
+        db.execute("UPDATE executor_orders SET trail_order_id=NULL, updated_at=? "
+                   "WHERE signal_id=? AND trail_order_id=?",
+                   (clock.utcnow_iso(), t["signal_id"], oid))
+
+
 def _divergence_alerts(ex, report: list[str], now: float | None = None) -> None:
-    """Два алерта по сигналам «вход исполнен, журнал открыт», каждый — раз на сигнал:
+    """Сигналы «вход исполнен, журнал открыт»: два алерта, каждый — раз на сигнал, и учёт
+    отклонённого нативного трейла:
       * позиция на бирже плоская, это не исполнившийся нативный трейл, и после её
         обнаружения журнал уже отработал свой такт (начался ≥ FLAT_GRACE_S назад);
-      * нативный трейл получил от биржи FAILED/отклонён.
-    now — unix-секунды UTC (тесты передают явно): сравнивается с временем такта поллера.
+      * нативный трейл получил от биржи FAILED/отклонён, а позиции под него нет (плоская
+        сейчас или уже признана пропавшей первым алертом) — алерт, учёт не меняется;
+      * то же при живой позиции — счёт отказов, пауза и снятие мёртвого id
+        (_count_trail_reject, _release_rejected_trail); строки — после первого отказа и
+        после последнего.
+    Позиции не прочитались — по отклонённому трейлу на этом такте ничего не решаем.
+    now — unix-секунды UTC (тесты передают явно): сравнивается с временем такта поллера и
+    временем учтённого отказа.
     Запросы: один fetch_positions за такт (пока есть сигналы без алерта) и fetch_order
     трейла — раз в TRAIL_STATUS_EVERY_S на сигнал, при плоской позиции каждый такт до
-    конечного статуса; конечный статус помнится и больше не читается."""
+    конечного статуса; конечный статус помнится и больше не читается, у трейла с уже
+    учтённым отказом не читается вовсе (после рестарта — тоже: отказ записан в БД)."""
     import time as _t
 
     rows = db.query(_TRAIL_ROWS_SQL)
@@ -1666,21 +1761,41 @@ def _divergence_alerts(ex, report: list[str], now: float | None = None) -> None:
         sid, oid = t["signal_id"], t["trail_order_id"] or ""
         if not oid or oid.startswith(_PENDING_TRAIL) or sid in failed_done:
             continue
+        # позиция под трейл: есть / пропала / пока неясно. Пропала — уже признана пропавшей
+        # (алерт ниже) либо плоская второй такт подряд: решение «трейла нет» по сигналу
+        # окончательное, и один пустой ответ биржи не должен навсегда оставить живую позицию
+        # без трейла. Плоская впервые или позиции не прочитались — решим следующим тактом
+        flat_now = flat is not None and sid in flat
+        gone = sid in flat_done or (flat_now and sid in _FLAT_SEEN)
+        present = flat is not None and not flat_now and sid not in flat_done
+        if t["trail_failed_at"]:
+            # отказ этого трейла уже учтён: статус больше не нужен, ждём паузу. Позиции
+            # нет или она неизвестна — id не снимаем: ставить заново не на что
+            if present:
+                _release_rejected_trail(t, oid, now)
+            continue
         seen = _TRAIL_STATUS.get(sid)
-        if seen is not None and seen[0] == oid:
-            if seen[1] in _TRAIL_FINAL:
+        if seen is not None and seen[0] == oid and seen[1] in _TRAIL_FINAL:
+            status = seen[1]                            # конечный статус второй раз не читаем
+        else:
+            if (seen is not None and seen[0] == oid and not (flat and sid in flat)
+                    and mono - seen[2] < TRAIL_STATUS_EVERY_S):
                 continue
-            if not (flat and sid in flat) and mono - seen[2] < TRAIL_STATUS_EVERY_S:
-                continue
-        try:
-            status = _order_status(ex.fetch_order(oid, t["symbol"]))
-        except Exception:                               # noqa: BLE001 — сеть/не найден: позже
-            status = ""
-        _TRAIL_STATUS[sid] = (oid, status, mono)
-        if status in _TRAIL_REJECTED:
+            try:
+                status = _order_status(ex.fetch_order(oid, t["symbol"]))
+            except Exception:                           # noqa: BLE001 — сеть/не найден: позже
+                status = ""
+            _TRAIL_STATUS[sid] = (oid, status, mono)
+        if status not in _TRAIL_REJECTED:
+            continue
+        if gone:
             failed_done.add(sid)
             lines.append(f"⚠️ #{sid} {t['symbol']}: нативный трейл отклонён биржей "
                          f"({status}) — трейла на бирже нет")
+        elif present:                                   # иначе — решим следующим тактом
+            line = _count_trail_reject(t, oid, status, now)
+            if line:
+                lines.append(line)
 
     if flat is not None:
         tick = _poller_tick_ts()
