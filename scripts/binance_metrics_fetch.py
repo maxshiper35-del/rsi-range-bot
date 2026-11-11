@@ -40,7 +40,7 @@ BASE = f"{HOST}/daily/metrics"
 S3 = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
 LIST = f"{S3}?prefix=data/futures/um/daily/metrics/&delimiter=/"
 UA = {"User-Agent": "research-fetch/1.0"}
-THREADS = 4
+THREADS = int(os.environ.get("BINANCE_THREADS", "4"))
 
 
 def root() -> Path:
