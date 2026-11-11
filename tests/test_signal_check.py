@@ -432,3 +432,31 @@ def test_render_contains_verdict_and_cta():
     assert "/trackrecord" in txt
     nf = sc.render_check(LONG, sc.CheckResult("no_fill"), T0, "15m")
     assert "не исполнился" in nf
+
+
+# --- вставленный текст, а не пересылка (11.11.2026) ---
+
+def test_pasted_prompt_names_signal_and_asks_time():
+    txt = sc.pasted_prompt(LONG)
+    assert "BTC" in txt and "LONG" in txt and "100" in txt and "90" in txt
+    assert "Когда вышел сигнал" in txt
+    market = sc.ParsedSignal("ETH", "SHORT", None, None, 3000.0)
+    assert "по рынку" in sc.pasted_prompt(market) and "SHORT" in sc.pasted_prompt(market)
+
+
+def test_ago_choices_and_labels():
+    hours = [h for _, h in sc.AGO_CHOICES]
+    assert hours == sorted(hours) and 0 not in hours        # «только что» проверять нечего
+    assert max(hours) * 3600 <= sc.MAX_AGE_DAYS * 86400
+    assert sc.ago_label(24) == "Вчера" and sc.ago_label(5) is None
+    assert "«Вчера»" in sc.approx_note(24) and "пересланному" in sc.approx_note(24)
+
+
+def test_render_check_marks_approximate_time():
+    r = sc.CheckResult("no_fill")
+    assert "≈" in sc.render_check(LONG, r, T0, "15m", approx=True)
+    assert "≈" not in sc.render_check(LONG, r, T0, "15m")
+
+
+def test_help_mentions_pasted_text():
+    assert "Скопируйте текст сигнала" in sc.HELP

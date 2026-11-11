@@ -485,18 +485,24 @@ def _fmt_dt(ts) -> str:
     return pd.Timestamp(ts).strftime("%d.%m.%Y %H:%M UTC")
 
 
-def render_check(sig: ParsedSignal, res: CheckResult, posted, tf: str,
-                 venue: str = "Bybit") -> str:
-    """Итог проверки для лички (parse_mode=HTML)."""
-    arrow = "🟢 LONG" if sig.side == "LONG" else "🔴 SHORT"
-    lines = [f"🔎 <b>Проверка сигнала: {esc(sig.coin)} {arrow}</b>",
-             f"Опубликован {_fmt_dt(posted)} · свечи {esc(venue)} {tf}", ""]
+def _entry_text(sig: ParsedSignal) -> str:
     if sig.entry_lo is None or sig.entry_hi is None:
-        entry = "по рынку"
-    elif sig.entry_lo == sig.entry_hi:
-        entry = f"<code>{_price(sig.entry_lo)}</code>"
-    else:
-        entry = f"<code>{_price(sig.entry_lo)}</code> – <code>{_price(sig.entry_hi)}</code>"
+        return "по рынку"
+    if sig.entry_lo == sig.entry_hi:
+        return f"<code>{_price(sig.entry_lo)}</code>"
+    return f"<code>{_price(sig.entry_lo)}</code> – <code>{_price(sig.entry_hi)}</code>"
+
+
+def render_check(sig: ParsedSignal, res: CheckResult, posted, tf: str,
+                 venue: str = "Bybit", approx: bool = False) -> str:
+    """Итог проверки для лички (parse_mode=HTML). approx — время публикации указал человек
+    («примерно вчера»), а не Telegram: вставленный текст, а не пересланный пост."""
+    arrow = "🟢 LONG" if sig.side == "LONG" else "🔴 SHORT"
+    when = (f"Опубликован ≈ {_fmt_dt(posted)} (примерно)" if approx
+            else f"Опубликован {_fmt_dt(posted)}")
+    lines = [f"🔎 <b>Проверка сигнала: {esc(sig.coin)} {arrow}</b>",
+             f"{when} · свечи {esc(venue)} {tf}", ""]
+    entry = _entry_text(sig)
     fill = res.fill_price
     if fill is not None:
         lines.append(f"Вход {entry} → исполнен {_fmt_dt(res.fill_time)} по "
@@ -547,4 +553,31 @@ HELP = (
     "исполнился ли вход, какие цели взяты, был ли стоп.\n\n"
     "Нужны в тексте: монета, LONG/SHORT, вход (или «по рынку») и стоп; цели — по желанию. "
     "Сигналы старше 180 дней не проверяются. Бесплатно, до 20 проверок в день.\n\n"
+    "Из закрытого канала переслать нельзя? Скопируйте текст сигнала и вставьте сюда — бот "
+    "спросит, когда он вышел, и проверит так же.\n\n"
     "Или пришлите @username канала — проверю последние сигналы целиком (/audit).")
+
+
+# Вставленный текст, а не пересылка (11.11.2026): из закрытых VIP-каналов пересылать
+# запрещено, а копировать текст можно. Времени публикации у такого текста нет — человек
+# выбирает его кнопкой, проверка идёт с этого момента и помечается «примерно».
+AGO_CHOICES = (("1 ч назад", 1), ("3 ч назад", 3), ("6 ч назад", 6), ("12 ч назад", 12),
+               ("Вчера", 24), ("2 дня назад", 48), ("3 дня назад", 72), ("Неделю назад", 168))
+PASTED_TTL_S = 1800                     # сколько ждём выбора времени после вставки
+
+
+def ago_label(hours: int) -> str | None:
+    return next((t for t, h in AGO_CHOICES if h == hours), None)
+
+
+def pasted_prompt(sig: ParsedSignal) -> str:
+    arrow = "🟢 LONG" if sig.side == "LONG" else "🔴 SHORT"
+    return (f"🔎 Вижу сигнал: <b>{esc(sig.coin)} {arrow}</b>, вход {_entry_text(sig)}, "
+            f"стоп <code>{_price(sig.stop)}</code>.\n\n"
+            "У скопированного текста нет времени публикации. Когда вышел сигнал? "
+            "Выберите примерно — проверю по свечам биржи 👇")
+
+
+def approx_note(hours: int) -> str:
+    return (f"<i>Время выхода — «{esc(ago_label(hours) or '?')}», примерно. Точнее всего "
+            "проверка по пересланному посту: у него Telegram знает время.</i>\n\n")

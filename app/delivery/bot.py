@@ -1350,6 +1350,8 @@ CHECK_HOWTO = (
     "3. Через пару секунд бот покажет по свечам биржи: исполнился ли вход, какие цели "
     "взяты, был ли стоп.\n\n"
     "Важно: именно «Переслать», а не копировать — так бот знает время публикации.\n"
+    "Канал закрытый и переслать нельзя? Скопируйте текст сигнала и вставьте сюда — бот "
+    "спросит, когда он вышел.\n"
     "⚡ <b>Или пришлите @username канала — проверю последние сигналы целиком.</b>\n"
     "Хотите посмотреть, как это выглядит? 👇")
 
@@ -1359,6 +1361,15 @@ def check_demo_markup():
 
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
         text="🔎 Показать пример проверки", callback_data="check_demo")]])
+
+
+def ago_markup():
+    """Когда вышел вставленный сигнал — кнопки по 4 в ряд (signal_check.AGO_CHOICES)."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup  # ленивый импорт
+
+    from app.delivery.signal_check import AGO_CHOICES
+    btns = [InlineKeyboardButton(text=t, callback_data=f"chkago:{h}") for t, h in AGO_CHOICES]
+    return InlineKeyboardMarkup(inline_keyboard=[btns[i:i + 4] for i in range(0, len(btns), 4)])
 
 
 def check_start_markup():
@@ -4769,7 +4780,7 @@ def main() -> None:
             return "1000" + sym, 1000.0
         return None
 
-    def _run_check(sig, posted) -> str:
+    def _run_check(sig, posted, approx: bool = False) -> str:
         # синхронно (ccxt) — только через asyncio.to_thread
         from app.data.market_data import fetch_history
         from app.delivery import signal_check
@@ -4794,7 +4805,16 @@ def main() -> None:
         res = signal_check.evaluate(sig, bars, pd.Timestamp(posted))
         log.info("проверка сигнала: %s %s -> %s (целей %d)", sig.coin, sig.side,
                  res.status, res.hit)
-        return signal_check.render_check(sig, res, posted, tf)
+        return signal_check.render_check(sig, res, posted, tf, approx=approx)
+
+    def _take_check_quota(uid: int, admin: bool) -> bool:
+        """20 проверок в сутки на человека (пересылка и вставленный текст — общий лимит)."""
+        now = _monotonic()
+        recent = [t for t in _check_log.get(uid, []) if now - t < 86400]
+        if len(recent) >= 20 and not admin:
+            return False
+        _check_log[uid] = recent + [now]
+        return True
 
     @dp.message(Command("check"))
     async def _check_help(m):
@@ -4861,12 +4881,9 @@ def main() -> None:
             await m.answer("Не нашёл в посте сигнал: нужны монета, LONG/SHORT, вход "
                            "(или «по рынку») и стоп. Подробнее — /check")
             return
-        uid, now = m.from_user.id, _monotonic()
-        recent = [t for t in _check_log.get(uid, []) if now - t < 86400]
-        if len(recent) >= 20 and not _is_admin(m):
+        if not _take_check_quota(m.from_user.id, _is_admin(m)):
             await m.answer("Лимит — 20 проверок в сутки. Завтра можно снова.")
             return
-        _check_log[uid] = recent + [now]
         wait = await m.answer("🔎 Проверяю по свечам биржи…")
         async with _check_sem:
             try:
@@ -5086,6 +5103,58 @@ def main() -> None:
                 ~F.successful_payment)
     async def _dialog_needs_text(m):
         await m.answer("Жду ответ текстом. Передумали — /cancel")
+
+    # --- вставленный текст сигнала (11.11.2026): из закрытых VIP-каналов пересылать нельзя,
+    # а копировать можно. Время публикации у текста неизвестно — человек выбирает кнопкой.
+    # Фильтр разбирает текст в потоке (как пересылку) и отдаёт сигнал хэндлеру; не сигнал —
+    # фильтр False, и текст идёт дальше (опрос), как раньше.
+    _pasted: dict = {}                          # tg_id -> (текст, monotonic вставки)
+
+    async def _pasted_signal(m):
+        from app.delivery import signal_check
+        text = m.text or ""
+        if text in MENU_TEXTS or len(text) > 4000:
+            return False
+        sig = await asyncio.to_thread(signal_check.parse_signal, text)
+        return {"sig": sig} if sig is not None else False
+
+    @dp.message(F.chat.type == "private", F.text, ~F.text.startswith("/"), ~F.forward_origin,
+                StateFilter(None), _pasted_signal)
+    async def _check_pasted(m, sig):
+        from app.delivery import signal_check
+        _pasted[m.from_user.id] = (m.text, _monotonic())
+        await m.answer(signal_check.pasted_prompt(sig), parse_mode="HTML",
+                       reply_markup=ago_markup())
+
+    @dp.callback_query(F.data.startswith("chkago:"))
+    async def _check_pasted_ago(cq):
+        from app.delivery import signal_check
+        await cq.answer()
+        try:
+            hours = int(cq.data.split(":", 1)[1])
+        except ValueError:
+            hours = -1
+        item = _pasted.get(cq.from_user.id)
+        fresh = item is not None and _monotonic() - item[1] <= signal_check.PASTED_TTL_S
+        sig = (await asyncio.to_thread(signal_check.parse_signal, item[0])
+               if fresh and signal_check.ago_label(hours) else None)
+        if sig is None:
+            await cq.message.answer("Не нашёл сигнал — пришлите его текст ещё раз.")
+            return
+        if not _take_check_quota(cq.from_user.id, cq.from_user.id in cfg.admin_ids):
+            await cq.message.answer("Лимит — 20 проверок в сутки. Завтра можно снова.")
+            return
+        posted = datetime.now(timezone.utc) - timedelta(hours=hours)
+        wait = await cq.message.answer("🔎 Проверяю по свечам биржи…")
+        async with _check_sem:
+            try:
+                txt = await asyncio.to_thread(_run_check, sig, posted, True)
+            except Exception as e:              # noqa: BLE001 — сеть / лимит / нет рынка
+                log.info("проверка вставленного сигнала %s: %s", sig.coin, e)
+                txt = (f"Не получилось загрузить свечи {templates.esc(sig.coin)} с биржи. "
+                       "Попробуйте через пару минут.")
+        await wait.edit_text(signal_check.approx_note(hours) + txt, parse_mode="HTML",
+                             reply_markup=channel_join_markup())
 
     # Ответ на опрос текстом без кнопки, пока опрос открыт (feedback.open_survey) — тоже отзыв.
     # Последний хэндлер: меню, команды, пересылки, ссылки на каналы и шаги диалогов разобраны
