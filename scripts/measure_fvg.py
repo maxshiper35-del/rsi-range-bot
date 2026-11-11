@@ -54,9 +54,19 @@ def cmd_fetch(_a) -> None:
 
 
 def load_daily() -> pd.DataFrame:
+    """Дневные свечи; битые тики (low < 0.5 тела, high > 2 тел) обрезаются до тела свечи.
+    В Coinbase BTC-USD 2017-04-15 low = 0.06 $ при open 1173 и close 1179 — единственный
+    такой день."""
     d = pd.read_csv(root() / "btc_usd_1d.csv")
     d["date"] = pd.to_datetime(d["date"], utc=True)
-    return d.set_index("date")[["open", "high", "low", "close"]].astype(float)
+    d = d.set_index("date")[["open", "high", "low", "close"]].astype(float)
+    body_lo, body_hi = d[["open", "close"]].min(axis=1), d[["open", "close"]].max(axis=1)
+    bad_lo, bad_hi = d["low"] < 0.5 * body_lo, d["high"] > 2 * body_hi
+    d.loc[bad_lo, "low"] = body_lo[bad_lo]
+    d.loc[bad_hi, "high"] = body_hi[bad_hi]
+    if bad_lo.any() or bad_hi.any():
+        print(f"битых тиков исправлено: low {int(bad_lo.sum())}, high {int(bad_hi.sum())}")
+    return d
 
 
 def periods(d: pd.DataFrame, rule: str) -> pd.DataFrame:
