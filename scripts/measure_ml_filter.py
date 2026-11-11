@@ -296,6 +296,9 @@ def main() -> None:
     ap.add_argument("--out", default=None)
     ap.add_argument("--procs", type=int, default=2)
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--open-frozen", action="store_true",
+                    help="открыть замороженный участок, если пройден критерий (только с "
+                         "согласия главной сессии)")
     a = ap.parse_args()
     t0 = time.time()
 
@@ -369,10 +372,13 @@ def main() -> None:
                 line += f" | {sd} взятые {r['net'][ms_ & k].mean():+.4f} " \
                         f"({int((ms_ & k).sum())}), все {r['net'][ms_].mean():+.4f}"
             print(line)
-    importance(res, q_sel)
+    importance(res)
 
-    if verdict:
+    if verdict and a.open_frozen:
         frozen(df, q_sel, lap)
+    elif verdict:
+        print("\n== Критерий пройден: замороженный участок НЕ открыт — ждёт решения главной "
+              "сессии (запуск с --open-frozen)")
     else:
         print("\n== Замороженный участок не открывался (критерий не пройден)")
     if a.out:
@@ -383,20 +389,22 @@ def main() -> None:
     lap("готово")
 
 
-def importance(res: dict, q_sel: float) -> None:
-    """Справочно: какие признаки важнее — модель на rot H1, перестановочная важность на rot
-    H2′ (не walk-forward, только описание)."""
+def importance(res: dict) -> None:
+    """Справочно, по просьбе главной сессии: какие признаки модель вообще использует. Модель на
+    учебной половине набора, перестановочная важность на ней же (не walk-forward, описание)."""
     from sklearn.inspection import permutation_importance
 
-    r = res["rot"]
-    X = r["X"].to_numpy(float)
-    tr, te = r["half"] == "rot H1", r["half"] == "rot H2'"
-    mdl = model().fit(X[tr], np.clip(r["net"][tr], *Y_CLIP))
-    pi = permutation_importance(mdl, X[te], np.clip(r["net"][te], *Y_CLIP), n_repeats=10,
-                                random_state=0, scoring="neg_mean_squared_error")
-    order = np.argsort(pi.importances_mean)[::-1][:8]
-    print("  важность признаков (модель rot H1 → rot H2′, рост ошибки при перестановке): "
-          + ", ".join(f"{FEATURES[i]} {pi.importances_mean[i]:+.4f}" for i in order))
+    for data, half in (("rot", "rot H1"), ("5y", "W1")):
+        r = res[data]
+        X = r["X"].to_numpy(float)
+        tr = r["half"] == half
+        y = np.clip(r["net"][tr], *Y_CLIP)
+        mdl = model().fit(X[tr], y)
+        pi = permutation_importance(mdl, X[tr], y, n_repeats=10, random_state=0,
+                                    scoring="neg_mean_squared_error")
+        order = np.argsort(pi.importances_mean)[::-1][:10]
+        print(f"  важность признаков, {half} (рост ошибки при перестановке): "
+              + ", ".join(f"{FEATURES[i]} {pi.importances_mean[i]:+.4f}" for i in order))
 
 
 def frozen(df: pd.DataFrame, q_sel: float, lap) -> None:
