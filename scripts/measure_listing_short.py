@@ -175,8 +175,8 @@ def load_funding(s: str, months: list[str]) -> pd.Series:
             d = pd.read_csv(p)
             if len(d):
                 parts.append(d)
-    if not parts:
-        return pd.Series(dtype=float)
+    if not parts:                                   # фандинга нет — пустой ряд с индексом времени
+        return pd.Series(dtype=float, index=pd.DatetimeIndex([], tz="UTC"))
     d = pd.concat(parts)
     t = pd.to_datetime(pd.to_numeric(d["calc_time"]), unit="ms", utc=True)
     return pd.Series(d["last_funding_rate"].astype(float).to_numpy(), index=t).sort_index()
