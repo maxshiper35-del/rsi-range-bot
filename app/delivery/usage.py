@@ -6,8 +6,8 @@
 миграция 032).
 
 Пишется ТОЛЬКО название действия: команда без аргументов, текст кнопки меню, префикс
-инлайн-кнопки, «пересылка», «ввод текста», открытие мини-приложения. Содержимое сообщений
-не сохраняется.
+инлайн-кнопки, «пересылка», «ввод текста», «картинка», открытие мини-приложения.
+Содержимое сообщений не сохраняется.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ FORWARD = "пересылка (проверка сигнала)"
 TEXT = "ввод текста"
 OTHER_COMMAND = "/другая команда"
 WEBAPP_OPEN = "мини-приложение"
+IMAGE = "картинка (скриншот)"
 WEBAPP_ONCE_MIN = 30.0            # страница опрашивает /api/me раз в минуту — это один заход
 MAX_ACTION = 64
 TOP = 12
@@ -33,7 +34,7 @@ _CB_RE = re.compile(r"^[A-Za-z0-9_\-]{1,32}")
 
 
 def message_action(text: str | None, is_forward: bool,
-                   menu_texts: Collection[str]) -> str | None:
+                   menu_texts: Collection[str], is_image: bool = False) -> str | None:
     """Название действия для сообщения в личке либо None (нечего считать: фото, оплата…).
     У команды берётся только имя: «/audit @канал» -> «/audit». Исключение — метка источника
     у /start: «/start src_check_yt» -> «/start (check_yt)». По ней видно, с какой площадки
@@ -41,6 +42,8 @@ def message_action(text: str | None, is_forward: bool,
     хранит только первое касание)."""
     if is_forward:
         return FORWARD
+    if is_image:
+        return IMAGE
     t = (text or "").strip()
     if not t:
         return None

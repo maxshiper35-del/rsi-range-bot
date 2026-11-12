@@ -701,13 +701,18 @@ def _affiliate_block() -> str:
             f"поддерживает проект (реферальная): {url}")
 
 
+def is_bybit_ref(url: str) -> bool:
+    """Реф-ссылка ведёт на Bybit: только её уместно ставить в инструкцию про Bybit."""
+    return url.startswith("https://") and "bybit" in url.lower()
+
+
 def format_bybit_guide(affiliate_url: str = "") -> str:
     """/bybit — как вручную открыть сигнал на Bybit: ордер, стоп, нативный трейлинг.
     Трейлинг ордером на бирже, а не руками раз в час: часовая перестановка стоила
     ~0.27R на выход по трейлу (замер 24.10). Реф-ссылка — только если задана."""
     ref = (f"\n\n🟡 Регистрация по нашей ссылке (реферальная — поддерживает проект, "
            f"комиссии для вас не выше): {affiliate_url}"
-           if affiliate_url.startswith("https://") else "")
+           if is_bybit_ref(affiliate_url) else "")
     return (
         "🟡 <b>Как торговать сигнал на Bybit</b>\n\n"
         "1. <b>Деривативы → USDT-перпетуалы</b> → монета из сигнала (ETH → ETHUSDT).\n"
@@ -1390,7 +1395,7 @@ def audit_markup():
         InlineKeyboardButton(text="🔎 Проверить другой канал", callback_data="audit_again")]])
 
 
-def channel_cta_markup(bot_username: str | None, src: str, affiliate_url: str = ""):
+def channel_cta_markup(bot_username: str | None, src: str):
     """Инлайн-CTA под постом КАНАЛА: единственная кнопка-ссылка в бота с deep-link
     атрибуцией (/start src_<src> -> payments.set_acquisition_source, first-touch).
 
@@ -1399,17 +1404,21 @@ def channel_cta_markup(bot_username: str | None, src: str, affiliate_url: str = 
     источника. Кнопка = и путь в бота, и измеримость канала как источника.
     src на каждую поверхность свой: chsig (сигнал), chres (результат/филл), chcard
     (карточка недели) — конверсию поверхностей можно сравнивать по /sources.
-    -> InlineKeyboardMarkup | None (нет username — кнопки нет, пост не блокируем)."""
+    -> InlineKeyboardMarkup | None (нет username — кнопки нет, пост не блокируем).
+
+    Реф-кнопки биржи под постами нет (12.11): у наших сигналов перевеса после издержек не
+    нашли, звать торговать их по партнёрской ссылке нечестно. Ссылка — в /start, /about,
+    мини-приложении и закрепе."""
     if not bot_username:
         return None
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup  # ленивый импорт
 
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
         text="⚡ Получать сигналы в личку",
-        url=f"https://t.me/{bot_username}?start=src_{src}")]] + affiliate_row(affiliate_url))
+        url=f"https://t.me/{bot_username}?start=src_{src}")]])
 
 
-def xray_channel_markup(bot_username: str | None, sid: int, affiliate_url: str = ""):
+def xray_channel_markup(bot_username: str | None, sid: int):
     """Кнопки под постом РЕЗУЛЬТАТА в канале: «Рентген сделки» (deep-link xray_<sid> ->
     анатомия в личке: суб-скоры, путь трейлинга) + стандартный CTA. Рентген — двойной
     агент: уникальный трест-артефакт И вход в воронку (юзер попадает в бота)."""
@@ -1422,7 +1431,7 @@ def xray_channel_markup(bot_username: str | None, sid: int, affiliate_url: str =
                               url=f"https://t.me/{bot_username}?start=xray_{sid}")],
         [InlineKeyboardButton(text="⚡ Получать сигналы в личку",
                               url=f"https://t.me/{bot_username}?start=src_chres")],
-    ] + affiliate_row(affiliate_url))
+    ])
 
 
 _TRACKRECORD_COLS = ("id", "symbol", "side", "timeframe", "entry", "stop", "tp1", "tp2", "tp3",
@@ -1735,9 +1744,12 @@ def usage_recorder(menu_texts: frozenset, kind: str):
                 if kind == "callback":
                     action = usage.callback_action(getattr(event, "data", None))
                 elif getattr(getattr(event, "chat", None), "type", None) == "private":
+                    doc = getattr(event, "document", None)
                     action = usage.message_action(
                         getattr(event, "text", None),
-                        getattr(event, "forward_origin", None) is not None, menu_texts)
+                        getattr(event, "forward_origin", None) is not None, menu_texts,
+                        is_image=bool(getattr(event, "photo", None)) or str(
+                            getattr(doc, "mime_type", "") or "").startswith("image/"))
             if action:
                 await asyncio.to_thread(usage.record, user.id, action)
         except Exception as e:                         # noqa: BLE001 — счётчик не роняет хэндлер
@@ -2307,7 +2319,7 @@ def main() -> None:
         """CTA-кнопка для поста канала либо None (выключено/username ещё неизвестен)."""
         if not runtime.channel_cta_enabled():
             return None
-        return channel_cta_markup(bot_info["username"], src, runtime.affiliate_url())
+        return channel_cta_markup(bot_info["username"], src)
 
     async def _reward_referrer(tg_id: int, paid_days: float) -> None:
         """Реф-награда за РЕАЛЬНЫЙ платёж приглашённого + уведомление реферера. Best-effort:
@@ -2558,8 +2570,8 @@ def main() -> None:
     @dp.message(Command("bybit"))
     async def _bybit(m):
         aff = runtime.affiliate_url()
-        kb = InlineKeyboardMarkup(inline_keyboard=affiliate_row(aff)) if affiliate_row(aff) \
-            else None
+        kb = InlineKeyboardMarkup(inline_keyboard=affiliate_row(aff)) \
+            if is_bybit_ref(aff) else None
         await m.answer(format_bybit_guide(aff), parse_mode="HTML", reply_markup=kb,
                        disable_web_page_preview=True)
 
@@ -3177,7 +3189,7 @@ def main() -> None:
         return InlineKeyboardMarkup(inline_keyboard=[[
             b(text="📈 График", callback_data=f"sigchart:{sid}"),
             b(text="🧮 Риск", callback_data=f"sigcalc:{sid}"),
-        ]] + affiliate_row(runtime.affiliate_url()))
+        ]])
 
     async def _load_signal_for_action(cq):
         """Общая часть sigchart/sigcalc: распарсить sid, достать сигнал, ПРОВЕРИТЬ ПРАВО.
@@ -4400,9 +4412,9 @@ def main() -> None:
             await m.answer("Ссылка должна начинаться с https://")
             return
         await asyncio.to_thread(runtime.set_value, "affiliate_url", arg)
-        await m.answer("✅ Реф-ссылка задана: кнопка под постами канала и личными "
-                       "сигналами, /start, /about, /bybit, мини-приложение и закреп-табло "
-                       "(табло обновится в течение часа)")
+        await m.answer("✅ Реф-ссылка задана: /start, /about, мини-приложение и закреп-табло "
+                       "(табло обновится в течение часа); /bybit — только для ссылки Bybit. "
+                       "Под сигналами её нет")
 
     @dp.message(Command("addpromo"))
     async def _addpromo(m):
@@ -5156,6 +5168,16 @@ def main() -> None:
         await wait.edit_text(signal_check.approx_note(hours) + txt, parse_mode="HTML",
                              reply_markup=channel_join_markup())
 
+    # Скриншот в личке (12.11). Картинки бот не читает; раньше на них не было ответа вовсе.
+    # Подсказка ведёт к тому, что работает: вставить текст или переслать пост. Сколько
+    # людей шлют картинки — в usage_events («картинка»): по нему решать, нужно ли читать
+    # скриншоты ИИ. Пересланные посты с фото разбирает хэндлер пересылки выше
+    @dp.message(F.chat.type == "private", F.photo | F.document.mime_type.startswith("image/"),
+                ~F.forward_origin, StateFilter(None))
+    async def _photo_hint(m):
+        from app.delivery import signal_check
+        await m.answer(signal_check.PHOTO_HINT, parse_mode="HTML")
+
     # Ответ на опрос текстом без кнопки, пока опрос открыт (feedback.open_survey) — тоже отзыв.
     # Последний хэндлер: меню, команды, пересылки, ссылки на каналы и шаги диалогов разобраны
     # выше. Открытость — фильтром: без опроса свободный текст, как и раньше, не обработан
@@ -5208,7 +5230,7 @@ def main() -> None:
             txt = (f"{head}: {templates.esc(row['symbol'].split('/')[0])} "
                    f"{row['side']} · {templates.esc(row['timeframe'])} — "
                    f"<b>{row['result_r']:+.2f}R</b>\n{note}")
-            kb = xray_channel_markup(bot_info["username"], row["id"], runtime.affiliate_url())
+            kb = xray_channel_markup(bot_info["username"], row["id"])
             try:
                 png = await _render_png(_review_chart_png, row)
                 await bot.send_photo(
@@ -6346,8 +6368,7 @@ def main() -> None:
                     want_chart = lifecycle_chart_wanted(
                         runtime.lifecycle_chart_enabled(), runtime.channel_mode(), closed=True)
                     # под результатом — «Рентген сделки» (анатомия по deep-link) + CTA
-                    xray_kb = (xray_channel_markup(bot_info["username"], c["id"],
-                                                   runtime.affiliate_url())
+                    xray_kb = (xray_channel_markup(bot_info["username"], c["id"])
                                if runtime.channel_cta_enabled() else None)
                     msg = await _send_lifecycle_post(
                         channel, c["id"],

@@ -1654,16 +1654,21 @@ def test_battery_alert_parse_and_throttle():
     assert "87%" in bot.battery_alert_text(batt) and "5:12" in bot.battery_alert_text(batt)
 
 
-def test_affiliate_row_and_channel_cta():
-    """Партнёрка: кнопка с честной пометкой «реф.» под постами; без ссылки — нет кнопки."""
-    url = "https://partner.bybit.com/b/RSIRANGE"
+def test_affiliate_row_and_channel_cta(fresh_db):
+    """Партнёрка: кнопка с честной пометкой «реф.»; без ссылки — нет кнопки. Под постами
+    канала и личными сигналами реф-кнопки нет даже с заданной ссылкой (12.11)."""
+    from app import runtime
+    url = "https://www.okx.com/join/RSIRANGE"
     assert bot.affiliate_row("") == [] and bot.affiliate_row("http://x") == []
     btn = bot.affiliate_row(url)[0][0]
-    assert btn.url == url and "Bybit" in btn.text and "реф" in btn.text
-    kb = bot.channel_cta_markup("rsirange_bot", "chsig", url)
-    assert len(kb.inline_keyboard) == 2 and kb.inline_keyboard[1][0].url == url
-    assert len(bot.channel_cta_markup("rsirange_bot", "chsig").inline_keyboard) == 1
-    assert bot.xray_channel_markup("rsirange_bot", 5, url).inline_keyboard[-1][0].url == url
+    assert btn.url == url and "OKX" in btn.text and "реф" in btn.text
+    runtime.set_value("affiliate_url", url)
+    kb = bot.channel_cta_markup("rsirange_bot", "chsig")
+    assert len(kb.inline_keyboard) == 1 and "okx" not in kb.inline_keyboard[0][0].url
+    xr = bot.xray_channel_markup("rsirange_bot", 5)
+    assert all("okx" not in (b.url or "") for row in xr.inline_keyboard for b in row)
+    assert url in bot.format_about()                       # в «О боте» ссылка есть
+    runtime.set_value("affiliate_url", "")
 
 
 def test_bybit_guide():
@@ -1671,6 +1676,9 @@ def test_bybit_guide():
     assert "Trailing Stop" in plain and "стоп-лосс" in plain and "реферальная" not in plain
     withref = bot.format_bybit_guide("https://partner.bybit.com/b/RSIRANGE")
     assert "реферальная" in withref and "partner.bybit.com/b/RSIRANGE" in withref
+    okx = bot.format_bybit_guide("https://www.okx.com/join/RSIRANGE")   # не та биржа
+    assert "реферальная" not in okx and "okx" not in okx
+    assert bot.is_bybit_ref("https://partner.bybit.com/b/X") and not bot.is_bybit_ref("")
     for leak in ("6226", "LTF", "SMC"):
         assert leak not in withref
 

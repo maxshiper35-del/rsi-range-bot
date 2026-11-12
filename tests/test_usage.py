@@ -30,6 +30,8 @@ def test_message_action_names_only():
     assert usage.message_action(None, True, MENU) == usage.FORWARD      # фото с подписью
     assert usage.message_action("/что-то <b>странное</b>", False, MENU) == usage.OTHER_COMMAND
     assert usage.message_action(None, False, MENU) is None              # оплата, стикер
+    assert usage.message_action(None, False, MENU, is_image=True) == usage.IMAGE   # скриншот
+    assert usage.message_action("подпись", True, MENU, is_image=True) == usage.FORWARD
     assert usage.message_action("   ", False, MENU) is None
 
 

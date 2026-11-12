@@ -460,3 +460,10 @@ def test_render_check_marks_approximate_time():
 
 def test_help_mentions_pasted_text():
     assert "Скопируйте текст сигнала" in sc.HELP
+
+
+def test_photo_hint_points_to_text_and_forward():
+    """Подсказка на скриншот ведёт к тому, что работает: вставить текст или переслать пост."""
+    h = sc.PHOTO_HINT
+    assert "не читаю" in h and "текст" in h and "перешлите" in h
+
