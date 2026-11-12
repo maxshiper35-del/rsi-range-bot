@@ -280,10 +280,15 @@ class OldUniverse:
         u = pd.read_csv(bm_root() / "universe.csv")
         u["month"] = pd.to_datetime(u["month"], utc=True)
         self.rank = u
+        # первый месяц в топ-40 по OI: кандидат плацебо — только символ, уже побывавший там к
+        # месяцу входа (поправка до прогона 12.11: иначе в пул попадали будущие «выросшие»)
+        self.first_top = u.groupby("symbol")["month"].min().to_dict()
         print(f"старых символов в кэше: {len(self.px)}", flush=True)
 
     def old_ok(self, s: str, t: pd.Timestamp) -> bool:
-        return s in self.px and self.first[s] <= t - pd.Timedelta(days=365) and s != "BTCUSDT"
+        seen = self.first_top.get(s)
+        return (s in self.px and self.first[s] <= t - pd.Timedelta(days=365) and s != "BTCUSDT"
+                and seen is not None and seen <= t.normalize().replace(day=1))
 
     def basket_big(self, t: pd.Timestamp) -> list[str]:
         m = self.rank[self.rank["month"] == t.normalize().replace(day=1)]
