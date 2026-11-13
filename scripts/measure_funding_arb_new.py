@@ -47,6 +47,16 @@ def period_of(t: pd.Timestamp) -> str | None:
     return next((n for n, a, b in PERIODS if a <= s <= b), None)
 
 
+def dead_from(coin: str) -> pd.Timestamp | None:
+    """Начало мёртвого хвоста HL (фандинг и премия ровно 0 до конца ряда) или None."""
+    h = m.hourly_hl(coin, SUB)
+    z = (h["f"] == 0) & (h["prem"] == 0)
+    if not len(h) or not z.iloc[-1]:
+        return None
+    live = h.index[~z.to_numpy()]
+    return live.max().floor("h") + pd.Timedelta(hours=1) if len(live) else h.index[0]
+
+
 def top_share(v: pd.DataFrame) -> tuple[float, str]:
     by_coin = v.groupby("coin")["net"].sum()
     if not len(by_coin) or by_coin.sum() <= 0:
@@ -62,10 +72,12 @@ def cmd_run(_a) -> None:
         if d is None:
             continue
         first[c] = m.hourly_hl(c, SUB).index[0]
+        death = dead_from(c)
         for tr in m.trades_for(c, d, THETA, HOLD):
             tr["plac"] = m.placebo_for(d, tr["side"], tr["t_in"], HOLD)
             tr["period"] = period_of(tr["t_out"])
             tr["age_d"] = (tr["t_in"] - first[c]).days
+            tr["to_death_d"] = (death - tr["t_in"]).days if death is not None else math.nan
             if tr["period"]:
                 rows.append(tr)
     t = pd.DataFrame(rows)
@@ -95,12 +107,8 @@ def cmd_run(_a) -> None:
     }
     for k, ok in crit.items():
         print(f"  {'✓' if ok else '✗'} {k}")
-    if all(crit.values()):
-        verdict = "правило переносится на новые монеты"
-    elif v["net"].mean() > 0:
-        verdict = "не кандидат (net > 0, но не все пункты)"
-    else:
-        verdict = "направление закрыто (net за 2025+2026 ≤ 0)"
+    verdict = ("правило переносится на новые монеты" if all(crit.values())
+               else "направление закрыто (не все пункты; см. поправку №25)")
     print(f"\nИТОГ: {verdict}")
 
     print("\n== Описательно, не критерий")
@@ -113,6 +121,11 @@ def cmd_run(_a) -> None:
     young = v[v["age_d"] < 90]
     part = f", {young['net'].sum() / v['net'].sum():.0%} суммы net" if v["net"].sum() > 0 else ""
     print(f"  первые 90 дней после первой записи на HL: {len(young)} из {len(v)} сделок{part}")
+    near = v[v["to_death_d"] <= 90]
+    part = f", {near['net'].sum() / v['net'].sum():.0%} суммы net" if v["net"].sum() > 0 else ""
+    n_dead = v.loc[v["to_death_d"].notna(), "coin"].nunique()
+    print(f"  открыты за 90 дней до делистинга с HL: {len(near)} из {len(v)} сделок{part}; "
+          f"монет со сделками, позже делистнутых: {n_dead}")
     old = pd.read_pickle(m.root() / "trades.pkl")
     old = old[(old.theta == THETA) & (old.H == HOLD)
               & old.period.isin(["проверка A", "проверка B", "заморозка"])]

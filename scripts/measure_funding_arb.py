@@ -150,7 +150,8 @@ def events_bn(coin: str) -> pd.Series:
 
 def hourly_diff(coin: str, sub: str = "hl") -> pd.DataFrame | None:
     """Почасовая сетка: фандинг HL за час, фандинг Binance, начисленный в этот час (событие —
-    в час своего времени), разница. Только часы, где есть обе биржи."""
+    в час своего времени), разница. Только часы, где есть обе биржи;
+    часы мёртвого рынка HL (после делистинга) — не ok."""
     hl = hourly_hl(coin, sub)
     bn = events_bn(coin)
     if len(hl) < LOOK_H * 2 or len(bn) < 10:
@@ -163,7 +164,10 @@ def hourly_diff(coin: str, sub: str = "hl") -> pd.DataFrame | None:
     f_bn = bn.groupby(bn.index.floor("h")).sum().reindex(grid).fillna(0.0)
     d = pd.DataFrame({"hl": f_hl, "bn": f_bn,
                       "prem": hl["prem"].groupby(hl.index.floor("h")).mean().reindex(grid)})
-    d["ok"] = d["hl"].notna()
+    # После делистинга HL продолжает отдавать часы с фандингом и премией ровно 0: рынка нет,
+    # ногу HL не открыть. В живой торговле таких часов нет ни одного (поправка 14.11) — дыра.
+    dead = (d["hl"] == 0) & (d["prem"] == 0)
+    d["ok"] = d["hl"].notna() & ~dead
     d["hl"] = d["hl"].fillna(0.0)
     d["diff"] = d["hl"] - d["bn"]                 # шорт HL / лонг Binance получает diff
     return d
