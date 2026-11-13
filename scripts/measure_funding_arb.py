@@ -56,9 +56,11 @@ def universe_candidates() -> list[str]:
     return [x["name"] for x in meta["universe"] if to_bn(x["name"]) in bn]
 
 
-def fetch_coin(coin: str) -> str:
-    path = root() / "hl" / f"{coin}.csv"
-    skip = root() / "hl" / f"{coin}.late"
+def fetch_coin(coin: str, sub: str = "hl", start_max: pd.Timestamp | None = START_MAX) -> str:
+    """sub — папка кэша; start_max=None — без отсечки по дате листинга (№26)."""
+    (root() / sub).mkdir(exist_ok=True)
+    path = root() / sub / f"{coin}.csv"
+    skip = root() / sub / f"{coin}.late"
     if skip.exists():
         return "листинг позже"
     t0 = int(START.timestamp() * 1000)
@@ -71,7 +73,8 @@ def fetch_coin(coin: str) -> str:
                               "endTime": int(END.timestamp() * 1000)})
         if not page:
             break
-        if first and not path.exists() and page[0]["time"] > START_MAX.timestamp() * 1000:
+        if first and start_max is not None and not path.exists() \
+                and page[0]["time"] > start_max.timestamp() * 1000:
             skip.touch()
             return "листинг позже"
         first = False
@@ -127,8 +130,8 @@ PERIODS = (("учёба", "2024-01-01", "2024-12-31"), ("проверка A", "2
            ("проверка B", "2026-01-01", "2026-07-31"), ("заморозка", "2026-08-01", "2026-10-31"))
 
 
-def hourly_hl(coin: str) -> pd.DataFrame:
-    d = pd.read_csv(root() / "hl" / f"{coin}.csv").drop_duplicates("time")
+def hourly_hl(coin: str, sub: str = "hl") -> pd.DataFrame:
+    d = pd.read_csv(root() / sub / f"{coin}.csv").drop_duplicates("time")
     t = pd.to_datetime(d["time"], unit="ms", utc=True).dt.floor("min")   # мс-сдвиг (урок №24)
     return pd.DataFrame({"f": d["fundingRate"].astype(float).to_numpy(),
                          "prem": d["premium"].astype(float).to_numpy()}, index=t).sort_index()
@@ -145,10 +148,10 @@ def events_bn(coin: str) -> pd.Series:
     return pd.Series(x["last_funding_rate"].astype(float).to_numpy(), index=t).sort_index()
 
 
-def hourly_diff(coin: str) -> pd.DataFrame | None:
+def hourly_diff(coin: str, sub: str = "hl") -> pd.DataFrame | None:
     """Почасовая сетка: фандинг HL за час, фандинг Binance, начисленный в этот час (событие —
     в час своего времени), разница. Только часы, где есть обе биржи."""
-    hl = hourly_hl(coin)
+    hl = hourly_hl(coin, sub)
     bn = events_bn(coin)
     if len(hl) < LOOK_H * 2 or len(bn) < 10:
         return None
