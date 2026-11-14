@@ -52,8 +52,8 @@ def load_1m(s: str, months: list[str]) -> pd.DataFrame | None:
     for ym in months:
         p = mfile(s, ym)
         if p.exists():
-            x = pd.read_csv(p, header=None, usecols=range(5),
-                            names=["t", "open", "high", "low", "close"])
+            x = pd.read_csv(p, header=None, usecols=range(6),
+                            names=["t", "open", "high", "low", "close", "vol"])
             x = x[pd.to_numeric(x["t"], errors="coerce").notna()].astype(float)
             t = x["t"].astype("int64")
             t = t.where(t < 10 ** 14, t // 1000)        # с 2025 года архив в микросекундах
@@ -62,6 +62,13 @@ def load_1m(s: str, months: list[str]) -> pd.DataFrame | None:
     if not parts:
         return None
     return pd.concat(parts).drop_duplicates("t").sort_values("t").set_index("t")
+
+
+def alive(m1: pd.DataFrame, t_in: pd.Timestamp) -> bool:
+    """Перп торгуется: за сутки до входа и первый час после есть оборот. У закрытого перпа архив
+    продолжает отдавать плоские свечи с нулевым объёмом — это не рынок (поправка 14.11)."""
+    w = m1.loc[t_in - pd.Timedelta(hours=24):t_in + pd.Timedelta(hours=1)]
+    return bool(len(w)) and float(w["vol"].sum()) > 0
 
 
 def short_1m(m1: pd.DataFrame, fund: pd.Series, t_in: pd.Timestamp, t_out: pd.Timestamp,
@@ -124,7 +131,7 @@ def build() -> pd.DataFrame:
         px = load_1h(s, bms)
         if px is not None:
             bk[s] = (px, load_funding(s, bms))
-    rows = []
+    rows, dead = [], []
     for e in ev:
         m1 = load_1m(e["sym"], ev_months_1m(e))
         if m1 is None:
@@ -133,6 +140,9 @@ def build() -> pd.DataFrame:
         fu = load_funding(e["sym"], ms)
         t_in = (e["t0"] + d.DELAY).ceil("h")
         t_out = e["t_delist"]
+        if not alive(m1, t_in):
+            dead.append(e["token"])
+            continue
         r = short_1m(m1, fu, t_in, t_out, "high")
         if r is None:
             continue
@@ -142,14 +152,18 @@ def build() -> pd.DataFrame:
         row["plac"] = placebo_stop(px, fu, t_in, t_out - t_in) if px is not None else math.nan
         row["mkt"] = market_stop(bk, t_in, t_out)
         rows.append(row)
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    out.attrs["dead"] = dead
+    return out
 
 
 def cmd_run(_a) -> None:
     t = build()
     t.to_pickle(d.droot() / "trades_1m.pkl")
     n_ev = len(d.events())
-    print(f"событий с минутными свечами: {len(t)} из {n_ev}, объявлений {t['ann'].nunique()}")
+    print(f"событий с живым перпом и минутными свечами: {len(t)} из {n_ev}, объявлений "
+          f"{t['ann'].nunique()}; перп уже не торговался: {len(t.attrs['dead'])} "
+          f"({', '.join(t.attrs['dead'])})")
     if len(t) < 30:
         print("ИТОГ: мало событий, вывода нет")
         return

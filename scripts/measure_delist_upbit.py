@@ -109,10 +109,13 @@ def build() -> pd.DataFrame:
         px = load_1h(s, bms)
         if px is not None:
             bk[s] = (px, load_funding(s, bms))
-    rows = []
+    rows, dead = [], []
     for e in ev:
         m1 = m.load_1m(e["sym"], d.months(e["t0"], e["t_out"]))
         if m1 is None:
+            continue
+        if not m.alive(m1, e["t_in"]):
+            dead.append(e["token"])
             continue
         fu = load_funding(e["sym"], months_1h(e))
         r = m.short_1m(m1, fu, e["t_in"], e["t_out"], "high")
@@ -124,7 +127,9 @@ def build() -> pd.DataFrame:
                        if px is not None else math.nan)
         row["mkt"] = m.market_stop(bk, e["t_in"], e["t_out"])
         rows.append(row)
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    out.attrs["dead"] = dead
+    return out
 
 
 def cmd_run(_a) -> None:
@@ -132,7 +137,9 @@ def cmd_run(_a) -> None:
     t = build()
     if len(t):
         t.to_pickle(d.droot() / "trades_upbit.pkl")
-    print(f"событий с минутными свечами: {len(t)} из {n_ev}")
+    dead = t.attrs.get("dead", [])
+    print(f"событий с живым перпом и минутными свечами: {len(t)} из {n_ev}; перп уже не "
+          f"торговался: {len(dead)} ({', '.join(dead)})")
     if len(t) < 15:
         print(f"ИТОГ: мало событий ({len(t)} < 15), вывода нет")
         return
