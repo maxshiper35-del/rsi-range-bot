@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd-агент: замер №30 — раз в 5 минут читает публичную ленту Binance (раздел Delisting) и
+  записывает новые объявления как бумажные сделки. Без ключей, без ордеров, бота не трогает.
+  Регистрация: docs/measurements/2026-11-14-delist-forward.md. Данные — data/forward/delist/.
+  Установка:
+    cp deploy/launchagents/com.rsirange.delist-forward.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.rsirange.delist-forward.plist
+  Снять: launchctl bootout gui/$(id -u)/com.rsirange.delist-forward
+  Сводка: DATA_ROOT="/Users/mac/bot ctypto/data" .venv/bin/python -m scripts.delist_forward report
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rsirange.delist-forward</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mac/bot ctypto/.venv/bin/python</string>
+        <string>-m</string>
+        <string>scripts.delist_forward</string>
+        <string>poll</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/mac/bot ctypto</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DATA_ROOT</key>
+        <string>/Users/mac/bot ctypto/data</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mac/bot ctypto/logs/delist_forward.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mac/bot ctypto/logs/delist_forward.log</string>
+</dict>
+</plist>

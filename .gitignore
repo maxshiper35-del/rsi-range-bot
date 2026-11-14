@@ -46,3 +46,6 @@ data/secrets/
 # кэши исследований
 data/cache_tf/
 data/cache_research/
+
+# проверки вперёд (бумажные журналы, снимки стаканов) — данные, не код
+data/forward/
